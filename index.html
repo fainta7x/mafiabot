@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Mafia Control</title>
+    <!-- Подключаем скрипт Телеграма -->
+    <script src="https://telegram.org"></script>
+    <style>
+        body { color: white; background: #212121; text-align: center; font-family: sans-serif; }
+        button { padding: 10px 20px; background: #0088cc; color: white; border: none; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>Управление игрой</h1>
+    <p id="user_name">Загрузка...</p>
+    <button onclick="Telegram.WebApp.close()">Закрыть</button>
+
+    <script>
+        // Инициализация WebApp
+        const tg = window.Telegram.WebApp;
+        tg.expand(); // Развернуть на весь экран
+
+        // Показываем имя пользователя из ТГ
+        document.getElementById("user_name").innerText = "Привет, " + tg.initDataUnsafe.user.first_name;
+    </script>
+</body>
+</html>
