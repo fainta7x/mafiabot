@@ -51,8 +51,11 @@ async def init_db():
 async def add_or_update_user(user_id: int, username: Optional[str], full_name: str):
     async with aiosqlite.connect(DB_NAME) as conn:
         await conn.execute(
-            """INSERT OR IGNORE INTO users (user_id, username, full_name)
-               VALUES (?, ?, ?)""",
+            """INSERT INTO users (user_id, username, full_name)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+               username = excluded.username,
+               full_name = excluded.full_name""",
             (user_id, username, full_name)
         )
         await conn.commit()

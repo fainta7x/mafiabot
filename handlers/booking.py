@@ -50,6 +50,12 @@ async def book(m: Message):
 
 @router.callback_query(F.data.startswith("book_"))
 async def handle_book(call: CallbackQuery, bot: Bot):
+    # Вызываем твою функцию из database.py
+    await database.add_or_update_user(
+        user_id=call.from_user.id,
+        username=call.from_user.username,
+        full_name=call.from_user.full_name
+    )
     date = get_next_friday()
 
     if call.data in ("book_ontime", "book_late"):
