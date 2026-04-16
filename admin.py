@@ -40,6 +40,16 @@ async def admin_panel(message: types.Message):
     )
 
 
+# Кнопка в ЛС «Перейти в админ-панель» (только для админа)
+@router.message(
+    F.text == "🛠 Перейти в админ-панель",
+    F.from_user.id == config.ADMIN_ID,
+    F.chat.type == "private"
+)
+async def admin_panel_button(message: types.Message):
+    await admin_panel(message)
+
+
 # ===== Админ-меню (reply-клавиатура) =====
 
 @router.message(F.text == "📋 Игроки", F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
@@ -72,7 +82,6 @@ async def admin_all_users_btn(message: types.Message):
         await message.answer("База пользователей пуста")
         return
 
-    # Основная сводка по всем игрокам
     text = "👥 **База игроков:**\n\n"
     for name, nick, visit, debt, total_paid in users:
         if not visit or visit == "-":
@@ -87,7 +96,6 @@ async def admin_all_users_btn(message: types.Message):
             f"   Визит: {visit_text} | Долг: {debt}₽ | Всего оплачено: {total_paid}₽\n\n"
         )
 
-    # ===== Топ по посещениям =====
     top_players = await database.get_top_players_by_visits(limit=10)
     if top_players:
         text += "🏆 **Топ по посещениям:**\n"
@@ -96,7 +104,6 @@ async def admin_all_users_btn(message: types.Message):
             text += f"{i}. {full_name} ({nick_part}) — {visits_count} вечеров\n"
         text += "\n"
 
-    # ===== Давно не были =====
     inactive_raw = await database.get_inactive_players()
     threshold_days = 30
     now = datetime.utcnow()
@@ -190,7 +197,6 @@ async def admin_cancel_evening(message: types.Message):
         except Exception:
             continue
 
-    # отправляем уведомление в НУЖНУЮ ТЕМУ группы
     try:
         await bot.send_message(
             config.GROUP_ID,
@@ -221,7 +227,6 @@ async def admin_announce_evening(message: types.Message):
 
     date_str = get_next_friday_str()
 
-    # динамически получаем username бота
     me = await bot.get_me()
     bot_username = me.username  # без @
 
@@ -248,9 +253,7 @@ async def admin_announce_evening(message: types.Message):
 
     stats_msg_id = None
 
-    # отправляем анонс и статистику в НУЖНУЮ ТЕМУ группы
     try:
-        # сам анонс с кнопками в тему
         await bot.send_message(
             config.GROUP_ID,
             text,
@@ -258,7 +261,6 @@ async def admin_announce_evening(message: types.Message):
             message_thread_id=config.ANNOUNCE_TOPIC_ID
         )
 
-        # отдельное сообщение со статистикой в ту же тему
         stats_text = await build_stats_text(date_str)
         stats_msg = await bot.send_message(
             config.GROUP_ID,
@@ -267,7 +269,6 @@ async def admin_announce_evening(message: types.Message):
         )
         stats_msg_id = stats_msg.message_id
 
-        # сохраняем id сообщения статистики
         await database.set_stats_message(
             date_str,
             config.GROUP_ID,
@@ -281,3 +282,123 @@ async def admin_announce_evening(message: types.Message):
             f"Анонс отправлен {sent} игрокам и в чат.",
             reply_markup=keyboards.admin_menu()
         )
+
+# ===== Должники и редактирование суммы долга =====
+
+@router.message(F.text == "💰 Должники", F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
+async def admin_debtors_btn(message: types.Message):
+    debtors = await database.get_debtors()
+    if not debtors:
+        await message.answer("Сейчас нет должников 🎉")
+        return
+
+    for full_name, nickname, username, debt, user_id in debtors:
+        user_link = f"@{username}" if username else "нет ника"
+        nick_part = nickname if nickname not in (None, "", "Не установлен") else "ник не указан"
+        text = (
+            f"👤 {full_name} ({user_link})\n"
+            f"Ник: {nick_part}\n"
+            f"Текущий долг: {abs(debt)}₽"
+        )
+
+        kb = InlineKeyboardBuilder()
+        kb.button(
+            text="✏️ Изменить сумму",
+            callback_data=f"editdebt_{user_id}"
+        )
+        kb.adjust(1)
+
+        await message.answer(
+            text,
+            reply_markup=kb.as_markup(),
+            parse_mode="Markdown"
+        )
+
+
+@router.callback_query(F.data.startswith("editdebt_"), F.from_user.id == config.ADMIN_ID)
+async def admin_edit_debt_start(call: CallbackQuery, state: FSMContext):
+    user_id_str = call.data.replace("editdebt_", "")
+    try:
+        user_id = int(user_id_str)
+    except ValueError:
+        await call.answer("Некорректный ID пользователя.", show_alert=True)
+        return
+
+    await state.update_data(edit_debt_user_id=user_id)
+    await state.set_state(DebtEditState.waiting_for_amount)
+
+    await call.message.answer(
+        f"Введи новую сумму долга для пользователя {user_id} (в рублях).\n"
+        f"Например: 200 или 0, чтобы закрыть долг."
+    )
+    await call.answer()
+
+
+@router.message(DebtEditState.waiting_for_amount, F.from_user.id == config.ADMIN_ID)
+async def admin_edit_debt_set_amount(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = data.get("edit_debt_user_id")
+    if not user_id:
+        await message.answer("Не найден пользователь для изменения долга.")
+        await state.clear()
+        return
+
+    try:
+        amount = int(message.text.strip())
+    except ValueError:
+        await message.answer("Нужно ввести целое число (например, 200 или 0). Попробуй ещё раз.")
+        return
+
+    new_debt = -amount
+    await database.set_user_debt(user_id, new_debt)
+
+    if amount == 0:
+        await database.set_unpaid_session(user_id, 0)
+
+    await message.answer(
+        f"Долг для пользователя {user_id} обновлён.\n"
+        f"Новая сумма: {amount}₽."
+    )
+    await state.clear()
+
+
+# ===== История вечеров =====
+
+@router.message(F.text == "📚 История вечеров", F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
+async def admin_history_menu(message: types.Message):
+    evenings = await database.get_evenings_list(limit=10)
+    if not evenings:
+        await message.answer("История вечеров пока пуста.")
+        return
+
+    kb = keyboards.evenings_history_kb(evenings)
+    await message.answer(
+        "📚 Выберите вечер, чтобы посмотреть список игроков:",
+        reply_markup=kb
+    )
+
+
+@router.callback_query(F.data.startswith("hist_"), F.from_user.id == config.ADMIN_ID)
+async def admin_history_detail(call: CallbackQuery):
+    date_str = call.data.replace("hist_", "")
+    players = await database.get_evening_players(date_str)
+    if not players:
+        await call.answer("Для этого вечера нет записей.", show_alert=True)
+        return
+
+    text = f"📅 Вечер {date_str}\n\n"
+    total_amount = 0
+
+    for i, (full_name, nickname, status, amount) in enumerate(players, 1):
+        nick_part = nickname if nickname not in (None, "", "Не установлен") else "ник не указан"
+        amount_text = f"{amount}₽" if amount and amount > 0 else "—"
+        text += (
+            f"{i}. {full_name} ({nick_part}) — _{status}_ — оплатил: {amount_text}\n"
+        )
+        if amount:
+            total_amount += amount
+
+    text += f"\n💰 Сумма за вечер: {total_amount}₽"
+
+    await call.message.answer(text, parse_mode="Markdown")
+    await call.answer()

@@ -14,18 +14,25 @@ def get_next_friday() -> str:
     now = datetime.utcnow()
     days_ahead = (4 - now.weekday()) % 7 or 7
     return (now + timedelta(days=days_ahead)).strftime('%d.%m')
+
+
 async def build_stats_text(date: str) -> str:
     ontime = await database.get_players_by_status_for_date(date, "Вовремя")
     late = await database.get_players_by_status_for_date(date, "Позже")
     no = await database.get_players_by_status_for_date(date, "Не идёт")
 
+    # считаем только тех, кто придёт (Вовремя + Позже)
+    total = len(ontime) + len(late)
+
     def block(title: str, items: list) -> str:
         if not items:
             return f"{title}: —"
-        return f"{title}:\n" + "\n".join(f"• {name}" for name in items)
+        # нумерация 1., 2., 3. и защита от пустого имени
+        lines = [f"{i}. {name or 'Без имени'}" for i, name in enumerate(items, start=1)]
+        return f"{title}:\n" + "\n".join(lines)
 
     parts = [
-        f"📊 Запись на {date}:",
+        f"📊 Запись на {date} (всего {total}):",
         block("✅ Идут вовремя", ontime),
         block("⏳ Придут позже", late),
         block("❌ Не идут", no),
@@ -51,37 +58,39 @@ async def handle_book(call: CallbackQuery, bot: Bot):
 
         await database.add_booking(call.from_user.id, status, date)
 
-        # личка: редактируем сообщение
         if call.message.chat.type == "private":
             await call.message.edit_text(
                 f"✅ Вы записаны на {date}! Статус: {status}"
             )
         else:
-            # группа: просто всплывашка
             await call.answer(
                 f"✅ Записал вас на {date}! Статус: {status}",
                 show_alert=False
             )
 
-        # после любой записи считаем, сколько человек
         total_attending = await database.count_all_attending_for_date(date)
         ontime_count = await database.count_ontime_players_for_date(date)
 
-        # если суммарно набралось 11 человек (Вовремя + Позже)
+        # Если набралось 11 человек (любых, кто идет)
         if total_attending == 11:
-            await bot.send_message(
-                config.ADMIN_ID,
-                "Стол есть, точное время напишем позже"
-            )
+            # Пишем админу в ЛС
+            await bot.send_message(config.ADMIN_ID, "🔥 Стол собран!")
 
-        # если именно «Вовремя» стало 11
+            # Пишем в группу анонса (берем ID чата из базы)
+            stats_info = await database.get_stats_message(date)
+            if stats_info:
+                chat_id, _ = stats_info
+                await bot.send_message(chat_id, "🔥 **Стол собран! О времени сбора напишем позже**")
+
+        # Если именно 11 человек придут ровно к 20:00
         if ontime_count == 11:
-            await bot.send_message(
-                config.ADMIN_ID,
-                "Стол есть, ждём всех к 21:00"
-            )
+            await bot.send_message(config.ADMIN_ID, "✅ Все 11 человек будут вовремя!")
 
-        # обновляем сообщение статистики в группе
+            stats_info = await database.get_stats_message(date)
+            if stats_info:
+                chat_id, _ = stats_info
+                await bot.send_message(chat_id, "✅ **Отлично! 11 человек подтвердили, что будут к 20:00.**")
+
         stats_info = await database.get_stats_message(date)
         if stats_info:
             chat_id, msg_id = stats_info
@@ -96,7 +105,6 @@ async def handle_book(call: CallbackQuery, bot: Bot):
                 pass
 
     elif call.data == "book_no":
-        # РАНЬШЕ: remove_booking → теперь просто ставим статус "Не идёт"
         await database.add_booking(call.from_user.id, "Не идёт", date)
 
         if call.message.chat.type == "private":
@@ -110,7 +118,6 @@ async def handle_book(call: CallbackQuery, bot: Bot):
                 show_alert=False
             )
 
-        # обновляем сообщение статистики в группе
         stats_info = await database.get_stats_message(date)
         if stats_info:
             chat_id, msg_id = stats_info

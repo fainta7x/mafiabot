@@ -7,13 +7,14 @@ def main_menu():
     builder.button(text="🧾 Список игроков")
     builder.button(text="👤 Мой профиль")
     builder.button(text="💳 Оплатить")
-    builder.adjust(1, 2)  # первая строка 1 кнопка, потом 2
+    builder.button(text="🛠 Перейти в админ-панель")  # новая кнопка
+    builder.adjust(1, 2, 2)  # первая строка 1 кнопка, далее по 2
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 # Кнопки записи на игру (inline)
 def booking_kb():
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Буду вовремя (21:00)", callback_data="book_ontime")
+    builder.button(text="✅ Буду вовремя (20:00)", callback_data="book_ontime")
     builder.button(text="⏳ Буду позже", callback_data="book_late")
     builder.button(text="❌ Не смогу", callback_data="book_no")
     builder.adjust(1)
@@ -66,7 +67,7 @@ def admin_menu():
     builder.button(text="👥 Все пользователи")
     builder.button(text="❌ Отменить вечер")
     builder.button(text="📣 Сделать анонс")
-    builder.button(text="📚 История вечеров")  # ← тут была ошибка: забуденная закрывающая скобка
+    builder.button(text="📚 История вечеров")
     builder.button(text="🏠 В главное меню")
     builder.adjust(2, 2, 2)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
