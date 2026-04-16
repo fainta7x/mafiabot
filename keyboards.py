@@ -1,4 +1,5 @@
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+from aiogram.types import WebAppInfo
 
 # Главное меню пользователя (reply-клавиатура)
 def main_menu():
@@ -7,8 +8,8 @@ def main_menu():
     builder.button(text="🧾 Список игроков")
     builder.button(text="👤 Мой профиль")
     builder.button(text="💳 Оплатить")
-    builder.button(text="🛠 Перейти в админ-панель")  # новая кнопка
-    builder.adjust(1, 2, 2)  # первая строка 1 кнопка, далее по 2
+    builder.button(text="🛠 Перейти в админ-панель")
+    builder.adjust(1, 2, 2)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 # Кнопки записи на игру (inline)
@@ -57,10 +58,14 @@ def profile_kb(debt: int):
         builder.button(text="💳 Оплатить долг", callback_data="profile_pay")
     return builder.as_markup()
 
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
-
+# МЕНЮ АДМИНИСТРАТОРА С WEBAPP
 def admin_menu():
     builder = ReplyKeyboardBuilder()
+    # Твоя новая кнопка WebApp (ссылку я взял из твоих скриншотов)
+    builder.button(
+        text="📱 Вести игру",
+        web_app=WebAppInfo(url="https://mafiabot-pi.vercel.app/")
+    )
     builder.button(text="📋 Игроки")
     builder.button(text="💸 Разослать счета")
     builder.button(text="💰 Должники")
@@ -69,13 +74,11 @@ def admin_menu():
     builder.button(text="📣 Сделать анонс")
     builder.button(text="📚 История вечеров")
     builder.button(text="🏠 В главное меню")
-    builder.adjust(2, 2, 2)
+    # Подправил сетку: 1 кнопка сверху (WebApp), остальные по 2
+    builder.adjust(1, 2, 2, 2, 2)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 def evenings_history_kb(evenings: list):
-    """
-    evenings: список кортежей (date, players_count)
-    """
     builder = InlineKeyboardBuilder()
     for date_str, count in evenings:
         builder.button(

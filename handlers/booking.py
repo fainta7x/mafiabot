@@ -28,7 +28,7 @@ async def build_stats_text(date: str) -> str:
         if not items:
             return f"{title}: —"
         # нумерация 1., 2., 3. и защита от пустого имени
-        lines = [f"{i}. {name or 'Без имени'}" for i, name in enumerate(items, start=1)]
+        lines = [f"{i}. {name if name and name != 'Неизвестный' else 'Игрок без профиля'}" for i, name in enumerate(items, start=1)]
         return f"{title}:\n" + "\n".join(lines)
 
     parts = [

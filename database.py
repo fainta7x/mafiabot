@@ -101,11 +101,14 @@ async def clear_bookings():
 
 
 async def get_booked_players_detailed() -> list:
+    # Мы берем ID из брони, и если в таблице users пусто (NULL),
+    # пишем 'ID: ' + этот самый номер.
     query = """
-        SELECT IFNULL(users.full_name, 'Неизвестный') AS full_name,
-               users.username,
-               users.nickname,
-               evening_booking.status
+        SELECT 
+            COALESCE(users.full_name, 'ID: ' || evening_booking.user_id) AS full_name,
+            users.username,
+            users.nickname,
+            evening_booking.status
         FROM evening_booking
         LEFT JOIN users ON evening_booking.user_id = users.user_id
     """

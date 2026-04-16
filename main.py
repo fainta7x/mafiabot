@@ -7,8 +7,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 import config
 from database import init_db
-from handlers import start_profile, payment, booking, debug  # ← добавили debug
+from handlers import start_profile, payment, booking, debug
 import admin
+import webapp_handlers  # ← добавили импорт
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,7 +29,8 @@ async def main():
     dp.include_router(payment.router)
     dp.include_router(booking.router)
     dp.include_router(admin.router)
-    dp.include_router(debug.router)  # ← вот здесь подключаем debug
+    dp.include_router(debug.router)
+    dp.include_router(webapp_handlers.router)  # ← подключаем WebApp-обработчик
 
     await init_db()
     logger.info("Бот успешно запущен!")

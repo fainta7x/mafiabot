@@ -59,19 +59,26 @@ async def admin_show_players_btn(message: types.Message):
         await message.answer("На игру пока никто не записался.")
         return
 
-    text = "📋 **Список записанных игроков:**\n\n"
-    for i, (name, username, nickname, status) in enumerate(players, 1):
+    lines = ["📋 Список записанных игроков:\n"]
+
+    for i, (full_name, username, nickname, status) in enumerate(players, start=1):
+        name_part = full_name or "Без имени"
         user_link = f"@{username}" if username else "нет ника"
         nick_part = nickname if nickname not in (None, "", "Не установлен") else "ник не указан"
-        text += (
-            f"{i}. {name} ({user_link})\n"
-            f"   Ник: {nick_part} — _{status}_\n\n"
+        status_part = status or "статус не указан"
+
+        lines.append(
+            f"{i}. {name_part} ({user_link})\n"
+            f"   Ник: {nick_part} — {status_part}\n"
         )
+
+    text = "\n".join(lines)
 
     await message.answer(
         text,
         reply_markup=keyboards.admin_menu(),
-        parse_mode="Markdown"
+        # убираем parse_mode, чтобы не было Markdown
+        # parse_mode="Markdown"
     )
 
 
