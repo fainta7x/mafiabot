@@ -13,7 +13,6 @@
     <h1>Управление игрой</h1>
     <p id="user_name">Загрузка...</p>
 
-    <!-- Кнопка закрытия WebApp -->
     <button id="close_btn">Закрыть</button>
 
     <script>
@@ -21,7 +20,6 @@
         tg.ready();
         tg.expand();
 
-        // Показываем имя пользователя
         if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
             document.getElementById("user_name").innerText =
                 "Привет, " + tg.initDataUnsafe.user.first_name;
@@ -29,10 +27,6 @@
             document.getElementById("user_name").innerText = "Привет, игрок!";
         }
 
-        // Отправляем тестовые данные боту, НО НЕ ЗАКРЫВАЕМ ОКНО
-        tg.sendData("test");
-
-        // Явное закрытие только по кнопке
         document.getElementById("close_btn").addEventListener("click", () => {
             tg.close();
         });
