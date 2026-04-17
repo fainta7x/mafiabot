@@ -9,7 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import config
 import database
 import keyboards
-from handlers.booking import build_stats_text  # чтобы использовать build_stats_text
+from handlers.booking import build_stats_text, get_next_friday  # чтобы использовать build_stats_text
 
 router = Router()
 bot: Bot | None = None
@@ -22,12 +22,6 @@ class DebtEditState(StatesGroup):
 def setup_admin_handlers(bot_instance: Bot):
     global bot
     bot = bot_instance
-
-
-def get_next_friday_str() -> str:
-    now = datetime.utcnow()
-    days_ahead = (4 - now.weekday()) % 7 or 7  # пятница = 4
-    return (now + timedelta(days=days_ahead)).strftime('%d.%m')
 
 
 # ===== Вход в админ-панель =====
@@ -54,31 +48,19 @@ async def admin_panel_button(message: types.Message):
 
 @router.message(F.text == "📋 Игроки", F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
 async def admin_show_players_btn(message: types.Message):
-    players = await database.get_booked_players_detailed()
-    if not players:
-        await message.answer("На игру пока никто не записался.")
+    """
+    Админский список игроков — в том же виде, как в анонсе.
+    """
+    date_str = get_next_friday()
+    text = await build_stats_text(date_str)
+
+    if "всего 0" in text:
+        await message.answer(f"На ближайший вечер {date_str} пока никто не записался.")
         return
-
-    lines = ["📋 Список записанных игроков:\n"]
-
-    for i, (full_name, username, nickname, status) in enumerate(players, start=1):
-        name_part = full_name or "Без имени"
-        user_link = f"@{username}" if username else "нет ника"
-        nick_part = nickname if nickname not in (None, "", "Не установлен") else "ник не указан"
-        status_part = status or "статус не указан"
-
-        lines.append(
-            f"{i}. {name_part} ({user_link})\n"
-            f"   Ник: {nick_part} — {status_part}\n"
-        )
-
-    text = "\n".join(lines)
 
     await message.answer(
         text,
         reply_markup=keyboards.admin_menu(),
-        # убираем parse_mode, чтобы не было Markdown
-        # parse_mode="Markdown"
     )
 
 
@@ -232,7 +214,7 @@ async def admin_announce_evening(message: types.Message):
         await message.answer("В базе пока нет пользователей.")
         return
 
-    date_str = get_next_friday_str()
+    date_str = get_next_friday()
 
     me = await bot.get_me()
     bot_username = me.username  # без @
@@ -289,6 +271,7 @@ async def admin_announce_evening(message: types.Message):
             f"Анонс отправлен {sent} игрокам и в чат.",
             reply_markup=keyboards.admin_menu()
         )
+
 
 # ===== Должники и редактирование суммы долга =====
 

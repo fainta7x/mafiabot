@@ -12,8 +12,16 @@ router = Router()
 
 def get_next_friday() -> str:
     now = datetime.utcnow()
-    days_ahead = (4 - now.weekday()) % 7 or 7
-    return (now + timedelta(days=days_ahead)).strftime('%d.%m')
+    weekday = now.weekday()  # 0=понедельник, 4=пятница
+
+    if weekday <= 4:
+        # пятница этой недели (если сегодня понедельник–пятница)
+        days_ahead = 4 - weekday
+    else:
+        # суббота/воскресенье -> пятница следующей недели
+        days_ahead = 7 - (weekday - 4)
+
+    return (now + timedelta(days=days_ahead)).strftime("%d.%m")
 
 
 async def build_stats_text(date: str) -> str:

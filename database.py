@@ -38,14 +38,20 @@ async def init_db():
             )
         """)
         await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS evening_stats_messages (
-                        date        TEXT PRIMARY KEY,
-                        chat_id     INTEGER,
-                        message_id  INTEGER
-                    )
-                """)
+            CREATE TABLE IF NOT EXISTS evening_stats_messages (
+                date        TEXT PRIMARY KEY,
+                chat_id     INTEGER,
+                message_id  INTEGER
+            )
+        """)
+        # Таблица статуса вечера: открыт/закрыт (счета разосланы)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS evening_status (
+                date       TEXT PRIMARY KEY,
+                bills_sent INTEGER DEFAULT 0
+            )
+        """)
         await conn.commit()
-
 
 
 async def add_or_update_user(user_id: int, username: Optional[str], full_name: str):
@@ -111,6 +117,26 @@ async def get_booked_players_detailed() -> list:
             evening_booking.status
         FROM evening_booking
         LEFT JOIN users ON evening_booking.user_id = users.user_id
+    """
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute(query) as cursor:
+            return await cursor.fetchall()
+
+
+async def get_booked_players_for_game() -> list:
+    """
+    Игроки, записанные на вечер и реально участвующие в игре:
+    только со статусами 'Вовремя' и 'Позже'.
+    Возвращаем: full_name, username, nickname, status.
+    """
+    query = """
+    SELECT IFNULL(users.full_name, 'Неизвестный') AS full_name,
+           users.username,
+           users.nickname,
+           evening_booking.status
+    FROM evening_booking
+    LEFT JOIN users ON evening_booking.user_id = users.user_id
+    WHERE evening_booking.status IN ('Вовремя', 'Позже')
     """
     async with aiosqlite.connect(DB_NAME) as conn:
         async with conn.execute(query) as cursor:
@@ -430,6 +456,7 @@ async def count_all_attending_for_date(date_str: str) -> int:
             row = await cursor.fetchone()
             return row[0] if row else 0
 
+
 async def get_players_by_status_for_date(date_str: str, status: str) -> list:
     """
     Игроки на конкретную дату и со статусом.
@@ -447,6 +474,33 @@ async def get_players_by_status_for_date(date_str: str, status: str) -> list:
         async with conn.execute(query, (date_str, status)) as cursor:
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
+
+async def get_all_bookings_for_date_ordered(date_str: str) -> list[tuple]:
+    """
+    Все записи на конкретную дату с сортировкой по статусу:
+    Сначала 'Вовремя', затем 'Позже', затем 'Не идёт'.
+    Возвращаем: name, status.
+    """
+    query = """
+        SELECT 
+            COALESCE(u.nickname, u.full_name, 'Без имени') AS name,
+            e.status
+        FROM evening_booking e
+        LEFT JOIN users u ON e.user_id = u.user_id
+        WHERE e.date = ?
+        ORDER BY 
+            CASE e.status
+                WHEN 'Вовремя' THEN 1
+                WHEN 'Позже'   THEN 2
+                WHEN 'Не идёт' THEN 3
+                ELSE 4
+            END,
+            name
+    """
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute(query, (date_str,)) as cursor:
+            return await cursor.fetchall()
+
 
 async def set_stats_message(date_str: str, chat_id: int, message_id: int):
     async with aiosqlite.connect(DB_NAME) as conn:
@@ -475,3 +529,35 @@ async def get_stats_message(date_str: str) -> Optional[Tuple[int, int]]:
         ) as cursor:
             row = await cursor.fetchone()
             return row if row else None
+
+
+# ==== Статус вечера (счета разосланы / запись закрыта) ====
+
+
+async def mark_evening_bills_sent(date_str: str):
+    """
+    Пометить, что по вечеру на date_str счета разосланы (запись закрыта).
+    """
+    async with aiosqlite.connect(DB_NAME) as conn:
+        await conn.execute(
+            """
+            INSERT INTO evening_status (date, bills_sent)
+            VALUES (?, 1)
+            ON CONFLICT(date) DO UPDATE SET bills_sent = 1
+            """,
+            (date_str,)
+        )
+        await conn.commit()
+
+
+async def is_evening_bills_sent(date_str: str) -> bool:
+    """
+    True, если по этому вечеру уже разосланы счета (запись закрыта).
+    """
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute(
+            "SELECT bills_sent FROM evening_status WHERE date = ?",
+            (date_str,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return bool(row and row[0])

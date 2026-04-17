@@ -5,24 +5,19 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
+from aiogram import F
 
 import keyboards
 import database
 import config
 from handlers.payment import payment_kb
-from handlers.booking import build_stats_text  # ТУТ только build_stats_text
+from handlers.booking import build_stats_text, get_next_friday  # ТУТ только build_stats_text
 
 router = Router()
 
 
 class Form(StatesGroup):
     waiting_for_nickname = State()
-
-
-def get_next_friday() -> str:
-    now = datetime.utcnow()
-    days_ahead = (4 - now.weekday()) % 7 or 7
-    return (now + timedelta(days=days_ahead)).strftime('%d.%m')
 
 
 @router.message(Command("start"), F.chat.type == "private")
@@ -89,17 +84,19 @@ async def show_profile(message: Message):
 
 @router.message(F.text == "🧾 Список игроков", F.chat.type == "private")
 async def show_players_for_user(message: Message):
-    players = await database.get_booked_players_detailed()
-    if not players:
-        await message.answer("На ближайший вечер пока никто не записался.")
+    """
+    Показывает список игроков на ближайший вечер
+    в том же виде, как в анонсе (build_stats_text + get_next_friday).
+    """
+    date_str = get_next_friday()
+    text = await build_stats_text(date_str)
+
+    # Если на эту дату никого нет (всего 0)
+    if "всего 0" in text:
+        await message.answer(f"На ближайший вечер {date_str} пока никто не записался.")
         return
 
-    text = "🧾 **Игроки, записанные на ближайший вечер:**\n\n"
-    for i, (name, username, nickname, status) in enumerate(players, 1):
-        nick_part = nickname if nickname not in (None, "", "Не установлен") else "ник не указан"
-        text += f"{i}. {nick_part} — _{status}_\n"
-
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text)
 
 
 @router.callback_query(F.data == "edit_nickname")

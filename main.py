@@ -7,7 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 import config
 from database import init_db
-from handlers import start_profile, payment, booking, debug
+from handlers import start_profile, payment, booking, debug, game
 import admin
 
 logging.basicConfig(level=logging.INFO)
@@ -24,11 +24,13 @@ async def main():
     admin.setup_admin_handlers(bot)
 
     # регистрируем все роутеры
+    dp.include_router(game.router)
     dp.include_router(start_profile.router)
     dp.include_router(payment.router)
     dp.include_router(booking.router)
     dp.include_router(admin.router)
     dp.include_router(debug.router)
+
 
     await init_db()
     logger.info("Бот успешно запущен!")
