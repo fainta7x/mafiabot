@@ -11,6 +11,8 @@ class GameCreateState(StatesGroup):
     choosing_sheriff = State()
     waiting_kill_slot = State()          # номер убитого ночью
     waiting_night_suspects = State()     # подозреваемые от первой жертвы
+    waiting_will_protocol = State()
+    waiting_will_opinion = State()
 
     # Новое: ждём номер слота для очистки
     waiting_clear_slot_number = State()

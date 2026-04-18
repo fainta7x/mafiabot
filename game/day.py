@@ -1,10 +1,11 @@
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
+from aiogram.enums import ParseMode
 
 import keyboards
 import database
 from .state import GameCreateState
-from .utils import (
+from .text import (
     _parse_slots_list,
     build_game_state,
     build_votes_summary,
@@ -13,10 +14,161 @@ from .utils import (
 
 router = Router()
 
+# =========================================================
+# FOULS & VOTES ROUTER — ФОЛЫ, ВЫСТАВЛЕНИЕ, ГОЛОСА, ДОПЫ, ПР/МН
+#
+# ОГЛАВЛЕНИЕ:
+# 0. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 1. ФОЛЫ
+# 2. ВЫСТАВЛЕНИЕ (НОМИНАЦИЯ)
+# 3. ГОЛОСОВАНИЕ С ПОПИЛОМ
+# 4. РЕШЕНИЕ ПО ВТОРОМУ ПОПИЛУ
+# 5. ДОПЫ ("доп")
+# 6. БАЛЛЫ ЗА ЗАВЕЩАНИЯ ("пр", "мн")
+# =========================================================
 
-# ===== ФОЛЫ =====
 
-@router.message(GameCreateState.editing_slots, F.text.casefold() == "фол")
+# =========================================================
+# 0. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# =========================================================
+
+def _parse_bonus_value(raw: str) -> float | None:
+    """
+    Парсим доп и всегда приводим его к шагу 0.1.
+
+    Правила:
+    - Целые числа интерпретируем как десятые:
+        "1", "01"   -> 0.1
+        "2", "02"   -> 0.2
+        "-3", "-03" -> -0.3
+
+    - Дроби читаем как есть:
+        "0.2", "0,2", ".2", ",2"       -> 0.2
+        "-0.3", "-0,3", "-.3", "-,3"   -> -0.3
+    """
+    s = raw.strip().replace(",", ".")
+    if not s:
+        return None
+
+    # случаи вида ".2" / "-.3" -> "0.2" / "-0.3"
+    if s.startswith(".") or s.startswith("-."):
+        s = s.replace(".", "0.", 1)
+
+    try:
+        val = float(s)
+    except ValueError:
+        return None
+
+    # Если нет десятичной точки в исходной строке — считаем, что это целое "в десятых"
+    if "." not in s:
+        try:
+            n = int(s)
+        except ValueError:
+            return None
+        val = n / 10.0
+
+    return round(val, 1)
+
+
+def _parse_float_value(raw: str) -> float | None:
+    """
+    Универсальный парсер числа с точкой/запятой (оставлен на всякий случай,
+    сейчас ПР/МН тоже используют _parse_bonus_value, как допы).
+    """
+    s = (raw or "").strip().replace(",", ".")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _attach_night_kills_order(slots: dict[int, dict], data: dict) -> None:
+    """
+    Приклеивает порядок ночных убийств из FSM в slots["_night_kills_order"],
+    чтобы build_protocol_text мог нарисовать блок «Убийства».
+    """
+    night_kills_order: list[int] = data.get("night_kills_order") or []
+    if night_kills_order:
+        slots["_night_kills_order"] = night_kills_order
+    else:
+        # На всякий случай чистим служебный ключ, если порядок пуст
+        slots.pop("_night_kills_order", None)
+
+
+async def _update_main_protocol_message(
+    message: types.Message,
+    state: FSMContext,
+    slots: dict[int, dict],
+):
+    """
+    Перерисовать основное сообщение с протоколом игры на основе актуальных slots.
+    Ожидает, что в FSM лежат protocol_chat_id, protocol_message_id, winner_label.
+    """
+    data = await state.get_data()
+
+    # Приклеиваем порядок ночных убийств, если он есть
+    _attach_night_kills_order(slots, data)
+
+    protocol_body = build_protocol_text(slots, updated=True)
+
+    protocol_chat_id = data.get("protocol_chat_id")
+    protocol_message_id = data.get("protocol_message_id")
+    winner_label = data.get("winner_label")
+
+    # Если нет сохранённого сообщения — просто отправим новый протокол,
+    # чтобы не терять информацию
+    if not protocol_chat_id or not protocol_message_id or winner_label is None:
+        print("[PROTO] No stored protocol message, sending new one")
+        await message.answer(
+            protocol_body,
+            reply_markup=keyboards.game_admin_menu(),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Вытаскиваем текущие номера игры из "current_*"
+    game_date = await database.get_current_game_date() or "-"
+    evening_game_number = await database.get_current_game_number() or 1
+    global_game_number = await database.get_current_global_game_number() or 1
+
+    header = (
+        f"📑 Протокол игры №{evening_game_number} ({game_date}): "
+        f"№{global_game_number} по общей истории — {winner_label}"
+    )
+    full_text = f"{header}\n\n{protocol_body}"
+
+    try:
+        print(
+            f"[PROTO] Editing message chat_id={protocol_chat_id}, "
+            f"message_id={protocol_message_id}"
+        )
+        await message.bot.edit_message_text(
+            chat_id=protocol_chat_id,
+            message_id=protocol_message_id,
+            text=full_text,
+            reply_markup=keyboards.game_admin_menu(),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        # Логируем ошибку и шлём новый протокол, чтобы ничего не потерять
+        print(f"[PROTO] Failed to edit message: {repr(e)}")
+        await message.answer(
+            full_text,
+            reply_markup=keyboards.game_admin_menu(),
+            parse_mode=ParseMode.HTML,
+        )
+
+
+# =========================================================
+# 1. ФОЛЫ
+# =========================================================
+
+@router.message(
+    GameCreateState.editing_slots,
+    F.text.func(lambda t: (t or "").strip().lower().startswith("фол")),
+)
 async def ask_fouls(message: types.Message, state: FSMContext):
     await state.set_state(GameCreateState.waiting_fouls)
     await message.answer(
@@ -34,7 +186,7 @@ async def apply_fouls(message: types.Message, state: FSMContext):
     data = await state.get_data()
     slots: dict[int, dict] = data.get("slots") or {}
 
-    text = message.text.strip()
+    text = (message.text or "").strip()
     if not text:
         await message.answer(
             "Пустой ввод. Пример: `3 7` или `- 3 8`.",
@@ -61,7 +213,6 @@ async def apply_fouls(message: types.Message, state: FSMContext):
     for n in nums:
         if n not in slots or n < 1 or n > 10:
             continue
-
         if not slots[n].get("alive", True):
             continue
 
@@ -74,15 +225,19 @@ async def apply_fouls(message: types.Message, state: FSMContext):
 
     await state.update_data(slots=slots)
 
-    text = build_game_state(slots, alive_only=False)
-    await message.answer(text, reply_markup=keyboards.game_admin_menu())
-
+    game_text = build_game_state(slots, alive_only=False)
+    await message.answer(game_text, reply_markup=keyboards.game_admin_menu())
     await state.set_state(GameCreateState.editing_slots)
 
 
-# ===== ВЫСТАВЛЕНИЕ =====
+# =========================================================
+# 2. ВЫСТАВЛЕНИЕ (НОМИНАЦИЯ)
+# =========================================================
 
-@router.message(GameCreateState.editing_slots, F.text.casefold() == "выставить")
+@router.message(
+    GameCreateState.editing_slots,
+    F.text.func(lambda t: (t or "").strip().lower().startswith("выставить")),
+)
 async def ask_nominees(message: types.Message, state: FSMContext):
     await state.set_state(GameCreateState.waiting_nominees)
     await message.answer(
@@ -100,7 +255,7 @@ async def set_nominees(message: types.Message, state: FSMContext):
         s for s, info in slots.items() if info.get("nominated")
     ]
 
-    nums = _parse_slots_list(message.text)
+    nums = _parse_slots_list(message.text or "")
     if not nums:
         await message.answer(
             "Не удалось распознать номера. Пример: `1 3 7`.",
@@ -120,31 +275,33 @@ async def set_nominees(message: types.Message, state: FSMContext):
 
     await state.update_data(slots=slots, nominated_list=nominated_list, vote_index=0)
 
-    text = build_game_state(slots, alive_only=False)
-    await message.answer(
-        text,
-        reply_markup=keyboards.game_admin_menu(),
-    )
-
+    game_text = build_game_state(slots, alive_only=False)
+    await message.answer(game_text, reply_markup=keyboards.game_admin_menu())
     await state.set_state(GameCreateState.editing_slots)
 
 
-# ===== ГОЛОСОВАНИЕ С ПОПИЛОМ =====
+# =========================================================
+# 3. ГОЛОСОВАНИЕ С ПОПИЛОМ
+# =========================================================
 
-@router.message(GameCreateState.editing_slots, F.text.casefold() == "голоса")
+@router.message(
+    GameCreateState.editing_slots,
+    F.text.func(lambda t: (t or "").strip().lower().startswith("голоса")),
+)
 async def start_votes(message: types.Message, state: FSMContext):
     data = await state.get_data()
     slots: dict[int, dict] = data.get("slots") or {}
     in_split: bool = data.get("in_split", False)
     split_candidates: list[int] = data.get("split_candidates") or []
 
+    # ИСПРАВЛЕНО: логическое and вместо побитового &
     if in_split and split_candidates:
         nominated_list = [
             s for s in split_candidates
             if s in slots and slots[s].get("alive", True)
         ]
         for s, info in slots.items():
-            info["nominated"] = s in nominated_list
+            info["nominated"] = (s in nominated_list)
             info["votes"] = 0
     else:
         nominated_list = [
@@ -189,7 +346,7 @@ async def collect_votes(message: types.Message, state: FSMContext):
         )
         return
 
-    text = message.text.strip()
+    text = (message.text or "").strip()
     try:
         votes = int(text)
     except ValueError:
@@ -206,6 +363,7 @@ async def collect_votes(message: types.Message, state: FSMContext):
     vote_index += 1
     await state.update_data(slots=slots, vote_index=vote_index, nominated_list=nominated_list)
 
+    # Если ещё не всех спросили — спрашиваем следующий слот
     if vote_index < len(nominated_list):
         next_slot = nominated_list[vote_index]
         await message.answer(
@@ -261,12 +419,12 @@ async def collect_votes(message: types.Message, state: FSMContext):
         leaders_text = ", ".join(str(n) for n in leaders_sorted)
 
         if not in_split:
-            # Первый попил — объявляем и готовим переголосовку
+            # Первый попил — объявляем и готовим переголосовку только между лидерами
             for n in live_nominated:
                 slots[n]["votes"] = 0
 
             for s, info in slots.items():
-                info["nominated"] = s in leaders
+                info["nominated"] = (s in leaders)
 
             await state.update_data(
                 slots=slots,
@@ -286,13 +444,13 @@ async def collect_votes(message: types.Message, state: FSMContext):
             await state.set_state(GameCreateState.editing_slots)
             return
         else:
-            # ВТОРОЙ ПОПИЛ — спрашиваем, что делать
+            # ВТОРОЙ ПОПИЛ — спрашиваем, что делать (поднять всех / оставить всех)
             await state.update_data(
                 slots=slots,
                 split_candidates=leaders_sorted,
                 nominated_list=leaders_sorted,
                 vote_index=0,
-                in_split=False,  # цикл переголосовок закончен, ждём решения
+                in_split=False,
             )
 
             game_state = build_game_state(slots, alive_only=False)
@@ -326,7 +484,9 @@ async def collect_votes(message: types.Message, state: FSMContext):
     await state.set_state(GameCreateState.editing_slots)
 
 
-# ===== РЕШЕНИЕ ПО ВТОРОМУ ПОПИЛУ =====
+# =========================================================
+# 4. РЕШЕНИЕ ПО ВТОРОМУ ПОПИЛУ
+# =========================================================
 
 @router.callback_query(F.data == "split:kill_all")
 async def split_kill_all(callback: types.CallbackQuery, state: FSMContext):
@@ -390,7 +550,7 @@ async def split_keep_all(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text(
         "Решение: Оставить всех.\n"
-        "Никто из попила не заголосован."
+        "Никто из попила не заголосovan."
     )
     await callback.message.answer(
         game_state,
@@ -400,64 +560,12 @@ async def split_keep_all(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
- #===== ДОПЫ ("доп") =====
-
-def _parse_bonus_value(raw: str) -> float | None:
-    """
-    Парсим доп и всегда приводим его к шагу 0.1.
-
-    Правила:
-    - Целые числа интерпретируем как десятые:
-        "1", "01"   -> 0.1
-        "2", "02"   -> 0.2
-        "-3", "-03" -> -0.3
-
-    - Дроби читаем как есть:
-        "0.2", "0,2", ".2", ",2"   -> 0.2
-        "-0.3", "-0,3", "-.3", "-,3" -> -0.3
-    """
-    s = raw.strip().replace(",", ".")
-    if not s:
-        return None
-
-    # случаи вида ".2" / "-.3" -> "0.2" / "-0.3"
-    if s.startswith(".") or s.startswith("-."):
-        s = s.replace(".", "0.", 1)
-
-    # Пробуем как float
-    try:
-        val = float(s)
-    except ValueError:
-        return None
-
-    # Если нет десятичной точки в исходной строке — считаем, что это целое "в десятых"
-    if "." not in s:
-        # "2" -> 0.2, "-3" -> -0.3, "02" -> 0.2
-        try:
-            n = int(s)
-        except ValueError:
-            return None
-        val = n / 10.0
-
-    # Округляем до одного знака после запятой
-    val = round(val, 1)
-    return val
-
+# =========================================================
+# 5. ДОПЫ ("доп")
+# =========================================================
 
 @router.message(GameCreateState.editing_slots, F.text.regexp(r"^доп\s+"))
 async def apply_bonus_points(message: types.Message, state: FSMContext):
-    """
-    Формат:
-      доп <номер_слота> <доп>
-    Примеры:
-      доп 4 2    -> слот 4, +0.2
-      доп 4 02   -> слот 4, +0.2
-      доп 5 0,3  -> слот 5, +0.3
-      доп 3 -1   -> слот 3, -0.1
-    """
-    data = await state.get_data()
-    slots: dict[int, dict] = data.get("slots") or {}
-
     text = (message.text or "").strip()
     parts = text.split()
 
@@ -485,10 +593,14 @@ async def apply_bonus_points(message: types.Message, state: FSMContext):
     if bonus_val is None:
         await message.answer(
             "Не удалось разобрать доп. Используй форматы:\n"
-            "`доп 4 2` (0.2), `доп 4 -3` (-0.3), `доп 4 0.4`, `доп 4 0,4`, `доп 4 .5`, `доп 4 ,5`.",
+            "`доп 4 2` (0.2), `доп 4 -3` (-0.3), `доп 4 0.4`, `доп 4 0,4`, "
+            "`доп 4 .5`, `доп 4 ,5`.",
             reply_markup=keyboards.game_admin_menu(),
         )
         return
+
+    data = await state.get_data()
+    slots: dict[int, dict] = data.get("slots") or {}
 
     if slot_num not in slots:
         await message.answer(
@@ -499,35 +611,143 @@ async def apply_bonus_points(message: types.Message, state: FSMContext):
 
     slot = slots[slot_num]
 
-    # Больше не блокируемся по отсутствию user_id:
-    # допы остаются чисто в рамках протокола и FSM-слотов.
-    # user_id = slot.get("user_id")
-    # if not user_id:
-    #     await message.answer(
-    #         f"У слота {slot_num} нет привязки к пользователю (добавлен вручную).",
-    #         reply_markup=keyboards.game_admin_menu(),
-    #     )
-    #     return
-
     current_bonus = slot.get("bonus_points", 0.0) or 0.0
     slot["bonus_points"] = round(current_bonus + bonus_val, 1)
+    slots[slot_num] = slot
 
-    # Обновляем slots в FSM
-    data["slots"] = slots
     await state.update_data(slots=slots)
 
-    # Сообщаем, что доп применён
     sign = "+" if bonus_val >= 0 else ""
     await message.answer(
-        f"Допы: слот {slot_num} ({sign}{bonus_val} очков). Протокол ниже 👇",
+        f"Допы: слот {slot_num} ({sign}{bonus_val} очков). Протокол обновлён 👇",
         reply_markup=keyboards.game_admin_menu(),
     )
 
-    # Пересобираем протокол единым форматтером (с учётом ЛХ и победителя, если передадим)
-    protocol_text = build_protocol_text(slots, updated=True)
+    await _update_main_protocol_message(message, state, slots)
 
-    # Отправляем новый протокол
+
+# =========================================================
+# 6. БАЛЛЫ ЗА ЗАВЕЩАНИЯ ("пр", "мн")
+# =========================================================
+
+@router.message(GameCreateState.editing_slots, F.text.regexp(r"^пр\s+"))
+async def set_protocol_points(message: types.Message, state: FSMContext):
+    """
+    Установка балла за ПРОТОКОЛ завещания.
+    Формат: 'пр <номер_слота> <балл>' -> will_protocol_points.
+    """
+    text = (message.text or "").strip()
+    parts = text.split()
+
+    if len(parts) < 3:
+        await message.answer(
+            "Формат: `пр <номер_слота> <балл>`.\n"
+            "Примеры: `пр 5 0.2`, `пр 5 0`, `пр 5 -0.1`.",
+            reply_markup=keyboards.game_admin_menu(),
+        )
+        return
+
+    _, slot_raw, pts_raw = parts[0], parts[1], parts[2]
+
+    try:
+        slot_num = int(slot_raw)
+    except ValueError:
+        await message.answer(
+            "Вторым должно быть число — номер слота.\n"
+            "Пример: `пр 5 0.2`.",
+            reply_markup=keyboards.game_admin_menu(),
+        )
+        return
+
+    # ПР парсим как доп, чтобы 2 / 02 / 0.2 / 0,2 / .2 / ,2 => 0.2
+    bonus_val = _parse_bonus_value(pts_raw)
+    if bonus_val is None:
+        await message.answer(
+            "Третьим должно быть число — балл.\n"
+            "Примеры: `0.2`, `0`, `-0.1`.",
+            reply_markup=keyboards.game_admin_menu(),
+        )
+        return
+
+    data = await state.get_data()
+    slots: dict[int, dict] = data.get("slots") or {}
+
+    if slot_num not in slots:
+        await message.answer(
+            f"Слот {slot_num} не найден.",
+            reply_markup=keyboards.game_admin_menu(),
+        )
+        return
+
+    # Для ПР ставим значение, не накапливаем
+    slots[slot_num]["will_protocol_points"] = bonus_val
+    await state.update_data(slots=slots)
+
+    sign = "+" if bonus_val >= 0 else ""
     await message.answer(
-        protocol_text,
+        f"ПР: слот {slot_num} ({sign}{bonus_val} очков). Протокол обновлён 👇",
         reply_markup=keyboards.game_admin_menu(),
     )
+
+    await _update_main_protocol_message(message, state, slots)
+
+
+@router.message(GameCreateState.editing_slots, F.text.regexp(r"^мн\s+"))
+async def set_opinion_points(message: types.Message, state: FSMContext):
+    """
+    Установка балла за МНЕНИЕ завещания.
+    Формат: 'мн <номер_слота> <балл>' -> will_opinion_points.
+    """
+    text = (message.text or "").strip()
+    parts = text.split()
+
+    if len(parts) < 3:
+        await message.answer(
+            "Формат: `мн <номер_слота> <балл>`.\n"
+            "Примеры: `мн 5 0.2`, `мн 5 0`, `мн 5 -0.1`.",
+            reply_markup=keyboards.game_admin_menu(),
+        )
+        return
+
+    _, slot_raw, pts_raw = parts[0], parts[1], parts[2]
+
+    try:
+        slot_num = int(slot_raw)
+    except ValueError:
+        await message.answer(
+            "Вторым должно быть число — номер слота.\n"
+            "Пример: `мн 5 0.2`.",
+            reply_markup=keyboards.game_admin_menu(),
+        )
+        return
+
+    # МН тоже парсим как доп
+    bonus_val = _parse_bonus_value(pts_raw)
+    if bonus_val is None:
+        await message.answer(
+            "Третьим должно быть число — балл.\n"
+            "Примеры: `0.2`, `0`, `-0.1`.",
+            reply_markup=keyboards.game_admin_menu(),
+        )
+        return
+
+    data = await state.get_data()
+    slots: dict[int, dict] = data.get("slots") or {}
+
+    if slot_num not in slots:
+        await message.answer(
+            f"Слот {slot_num} не найден.",
+            reply_markup=keyboards.game_admin_menu(),
+        )
+        return
+
+    slots[slot_num]["will_opinion_points"] = bonus_val
+    await state.update_data(slots=slots)
+
+    sign = "+" if bonus_val >= 0 else ""
+    await message.answer(
+        f"МН: слот {slot_num} ({sign}{bonus_val} очков). Протокол обновлён 👇",
+        reply_markup=keyboards.game_admin_menu(),
+    )
+
+    await _update_main_protocol_message(message, state, slots)

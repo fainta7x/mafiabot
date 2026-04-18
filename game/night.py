@@ -3,14 +3,27 @@ from aiogram.fsm.context import FSMContext
 
 import keyboards
 from .state import GameCreateState
-from .utils import _parse_slots_list, build_game_state, build_roles_summary
+from .text import _parse_slots_list, build_game_state, build_roles_summary
 
 router = Router()
 
+# =========================================================
+# NIGHTS & ROLES ROUTER — НОЧНОЙ ВЫСТРЕЛ, ЗАВЕЩАНИЯ И РАЗДАЧА РОЛЕЙ
+#
+# ОГЛАВЛЕНИЕ:
+# 1. НОЧНОЙ ВЫСТРЕЛ ("убить") + ПОДОЗРЕВАЕМЫЕ ПЕРВОГО УБИТЫХ + ЗАВЕЩАНИЯ
+# 2. МАСТЕР РАЗДАЧИ РОЛЕЙ ("ок", выбор мафий, дона, шерифа)
+# =========================================================
 
-# ===== НОЧНОЙ ВЫСТРЕЛ: "УБИТЬ" =====
 
-@router.message(GameCreateState.editing_slots, F.text.casefold() == "убить")
+# =========================================================
+# 1. НОЧНОЙ ВЫСТРЕЛ: "УБИТЬ" + ПОДОЗРЕВАЕМЫЕ + ЗАВЕЩАНИЯ
+# =========================================================
+
+@router.message(
+    GameCreateState.editing_slots,
+    F.text.func(lambda t: (t or "").strip().lower().startswith("убить")),
+)
 async def ask_night_kill_slot(message: types.Message, state: FSMContext):
     await state.set_state(GameCreateState.waiting_kill_slot)
     await message.answer(
@@ -20,11 +33,32 @@ async def ask_night_kill_slot(message: types.Message, state: FSMContext):
     )
 
 
+async def _start_will_for_slot(message: types.Message, state: FSMContext, slot_num: int):
+    """
+    Старт записи завещания для ночного убитого:
+    сначала ПРОТОКОЛ (текст), затем МНЕНИЕ (текст).
+    Баллы ПР/МН выставляются позже вручную командами 'пр' и 'мн'.
+    """
+    await state.update_data(will_slot=slot_num)
+    await state.set_state(GameCreateState.waiting_will_protocol)
+    await message.answer(
+        f"Слот {slot_num} может оставить завещание.\n\n"
+        "Сначала ПРОТОКОЛ (только цвета/версии).\n"
+        "Примеры:\n"
+        "  3 6 7 красные, 1 4 чёрные\n"
+        "  1 красный 4 чёрный\n"
+        "  3 красный, 5 чёрный, 2 дон, 4 шериф\n\n"
+        "Отправь текст протокола или напиши `нет`, если без протокола.",
+        reply_markup=keyboards.game_admin_menu(),
+    )
+
+
 @router.message(GameCreateState.waiting_kill_slot)
 async def handle_night_kill_slot(message: types.Message, state: FSMContext):
     data = await state.get_data()
     slots: dict[int, dict] = data.get("slots") or {}
     first_night_kill_recorded: bool = data.get("first_night_kill_recorded", False)
+    night_kills_order: list[int] = data.get("night_kills_order") or []
 
     text = (message.text or "").strip()
     try:
@@ -51,18 +85,22 @@ async def handle_night_kill_slot(message: types.Message, state: FSMContext):
         )
         return
 
-    # помечаем как убитого ночью
+    # Помечаем как убитого ночью
     slot["alive"] = False
     slot["status_reason"] = "Убит ночью"
 
-    # если это первое ночное убийство — отмечаем ПУ
+    # Если это первое ночное убийство — отмечаем ПУ
     if not first_night_kill_recorded:
-        # на всякий случай сбросим ПУ у всех
+        # На всякий случай сбросим ПУ у всех
         for info in slots.values():
             info["pu_mark"] = False
         slot["pu_mark"] = True
 
-    await state.update_data(slots=slots)
+    # Добавляем в порядок ночных убийств
+    if slot_num not in night_kills_order:
+        night_kills_order.append(slot_num)
+
+    await state.update_data(slots=slots, night_kills_order=night_kills_order)
 
     game_state = build_game_state(slots, alive_only=False)
     await message.answer(
@@ -71,20 +109,21 @@ async def handle_night_kill_slot(message: types.Message, state: FSMContext):
     )
 
     if not first_night_kill_recorded:
-        # запоминаем, кто первый убит ночью, и даём назвать подозреваемых
+        # Запоминаем, кто первый убит ночью, и даём назвать подозреваемых (ЛХ)
         await state.update_data(
             first_night_kill_recorded=True,
             night_killed_slot=slot_num,
         )
         await state.set_state(GameCreateState.waiting_night_suspects)
         await message.answer(
-            "У первого убитого ночью есть право назвать ДО 3 подозрительных игроков.\n\n"
+            "У первого убитого ночью есть право назвать ДО 3 подозрительных игроков (ЛХ).\n\n"
             "Введи номера слотов через пробел (например: `2 5 7`).\n"
             "Если он никого не называет — просто отправь `0`.",
             reply_markup=keyboards.game_admin_menu(),
         )
     else:
-        await state.set_state(GameCreateState.editing_slots)
+        # Не ПУ — сразу переходим к завещанию (протокол + мнение)
+        await _start_will_for_slot(message, state, slot_num)
 
 
 @router.message(GameCreateState.waiting_night_suspects)
@@ -112,7 +151,7 @@ async def handle_night_suspects(message: types.Message, state: FSMContext):
             if n in slots and n != killed_slot
         ][:3]
 
-    # сохраняем трёх (или меньше) подозреваемых у первого убитого ночью
+    # Сохраняем до трёх подозреваемых у первого убитого ночью
     slots[killed_slot]["night_suspects"] = suspects
 
     await state.update_data(
@@ -140,11 +179,95 @@ async def handle_night_suspects(message: types.Message, state: FSMContext):
         reply_markup=keyboards.game_admin_menu(),
     )
 
+    # После ЛХ ПУ может оставить завещание (протокол + мнение)
+    await _start_will_for_slot(message, state, killed_slot)
 
-# ===== МАСТЕР РАЗДАЧИ РОЛЕЙ =====
 
-@router.message(GameCreateState.editing_slots, F.text.casefold() == "ок")
+# === ЗАВЕЩАНИЯ: ПРОТОКОЛ И МНЕНИЕ (ТЕКСТЫ) ===
+
+@router.message(GameCreateState.waiting_will_protocol)
+async def handle_will_protocol(message: types.Message, state: FSMContext):
+    """
+    Принимаем текст ПРОТОКОЛА завещания для ночного убитого.
+    Только текст; баллы ПР ставятся позже через команду 'пр'.
+    """
+    data = await state.get_data()
+    slots: dict[int, dict] = data.get("slots") or {}
+    will_slot: int | None = data.get("will_slot")
+
+    if will_slot is None or will_slot not in slots:
+        await state.set_state(GameCreateState.editing_slots)
+        await message.answer(
+            "Что-то пошло не так с записью завещания (протокола).",
+            reply_markup=keyboards.game_admin_menu(),
+        )
+        return
+
+    text = (message.text or "").strip()
+
+    if text.lower() in {"нет", "no", "0"}:
+        slots[will_slot]["will_protocol_raw"] = ""
+    else:
+        slots[will_slot]["will_protocol_raw"] = text
+
+    await state.update_data(slots=slots)
+    await state.set_state(GameCreateState.waiting_will_opinion)
+
+    await message.answer(
+        f"Теперь МНЕНИЕ слота {will_slot}.\n"
+        "Пример: `В 12 нет двух мирных`, `6 мафия по речи`.\n\n"
+        "Отправь текст мнения или напиши `нет`, если без мнения.",
+        reply_markup=keyboards.game_admin_menu(),
+    )
+
+
+@router.message(GameCreateState.waiting_will_opinion)
+async def handle_will_opinion(message: types.Message, state: FSMContext):
+    """
+    Принимаем текст МНЕНИЯ завещания для ночного убитого.
+    Только текст; баллы МН ставятся позже через команду 'мн'.
+    """
+    data = await state.get_data()
+    slots: dict[int, dict] = data.get("slots") or {}
+    will_slot: int | None = data.get("will_slot")
+
+    if will_slot is None or will_slot not in slots:
+        await state.set_state(GameCreateState.editing_slots)
+        await message.answer(
+            "Что-то пошло не так с записью завещания (мнения).",
+            reply_markup=keyboards.game_admin_menu(),
+        )
+        return
+
+    text = (message.text or "").strip()
+
+    if text.lower() in {"нет", "no", "0"}:
+        slots[will_slot]["will_opinion"] = ""
+    else:
+        slots[will_slot]["will_opinion"] = text
+
+    await state.update_data(slots=slots, will_slot=None)
+    await state.set_state(GameCreateState.editing_slots)
+
+    game_state = build_game_state(slots, alive_only=False)
+    await message.answer(
+        f"Завещание слота {will_slot} сохранено.\n\n" + game_state,
+        reply_markup=keyboards.game_admin_menu(),
+    )
+
+
+# =========================================================
+# 2. МАСТЕР РАЗДАЧИ РОЛЕЙ
+# =========================================================
+
+@router.message(
+    GameCreateState.editing_slots,
+    F.text.func(lambda t: (t or "").strip().lower().startswith("ок")),
+)
 async def handle_ok(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    print(f"[HANDLE_OK] state={current_state}, text={repr(message.text)}")
+
     data = await state.get_data()
     roles_assigned = data.get("roles_assigned", False)
     slots: dict[int, dict] = data.get("slots") or {}
@@ -181,7 +304,7 @@ async def choose_mafia(message: types.Message, state: FSMContext):
     data = await state.get_data()
     slots: dict[int, dict] = data.get("slots") or {}
 
-    numbers = _parse_slots_list(message.text)
+    numbers = _parse_slots_list(message.text or "")
     if len(numbers) != 2:
         await message.answer(
             "Нужно указать РОВНО два разных номера слотов для мафии.\n"
@@ -225,7 +348,7 @@ async def choose_don(message: types.Message, state: FSMContext):
 
     mafia_slots: list[int] = data.get("mafia_slots", [])
 
-    numbers = _parse_slots_list(message.text)
+    numbers = _parse_slots_list(message.text or "")
     if len(numbers) != 1:
         await message.answer(
             "Нужно указать ОДИН номер слота для дона.\n"
@@ -269,7 +392,7 @@ async def choose_sheriff(message: types.Message, state: FSMContext):
     mafia_slots: list[int] = data.get("mafia_slots", [])
     don_slot: int | None = data.get("don_slot")
 
-    numbers = _parse_slots_list(message.text)
+    numbers = _parse_slots_list(message.text or "")
     if len(numbers) != 1:
         await message.answer(
             "Нужно указать ОДИН номер слота для шерифа.\n"
@@ -294,22 +417,22 @@ async def choose_sheriff(message: types.Message, state: FSMContext):
         )
         return
 
-    # сначала всем ставим мирных
+    # Сначала всем ставим мирных
     for slot_num, info in slots.items():
         info["role"] = "Мирный"
         info["team"] = "Красные"
 
-    # мафия
+    # Мафия
     for m in mafia_slots:
         slots[m]["role"] = "Мафия"
         slots[m]["team"] = "Чёрные"
 
-    # дон
+    # Дон
     if don_slot is not None:
         slots[don_slot]["role"] = "Дон"
         slots[don_slot]["team"] = "Чёрные"
 
-    # шериф
+    # Шериф
     slots[sheriff_slot]["role"] = "Шериф"
     slots[sheriff_slot]["team"] = "Красные"
 

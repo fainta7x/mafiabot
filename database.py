@@ -67,15 +67,17 @@ async def init_db():
         # История игровых слотов для статистики по ролям и очкам
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS game_slots_history (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_date    TEXT,
-                user_id      INTEGER,
-                slot_num     INTEGER,
-                role         TEXT,
-                team         TEXT,
-                base_points  REAL DEFAULT 0,
-                bonus_points REAL DEFAULT 0,
-                lh_points    REAL DEFAULT 0
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_date             TEXT,
+                user_id               INTEGER,
+                slot_num              INTEGER,
+                role                  TEXT,
+                team                  TEXT,
+                base_points           REAL DEFAULT 0,
+                bonus_points          REAL DEFAULT 0,
+                lh_points             REAL DEFAULT 0,
+                will_protocol_points  REAL DEFAULT 0,
+                will_opinion_points   REAL DEFAULT 0
             )
         """)
 
@@ -124,6 +126,21 @@ async def init_db():
         try:
             await conn.execute(
                 "ALTER TABLE game_history ADD COLUMN global_game_number INTEGER"
+            )
+        except Exception:
+            pass
+
+        # --- Расширяем старую game_slots_history (если нет новых колонок ПР/МН) ---
+        try:
+            await conn.execute(
+                "ALTER TABLE game_slots_history ADD COLUMN will_protocol_points REAL DEFAULT 0"
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.execute(
+                "ALTER TABLE game_slots_history ADD COLUMN will_opinion_points REAL DEFAULT 0"
             )
         except Exception:
             pass
@@ -203,11 +220,7 @@ async def get_current_global_game_number() -> Optional[int]:
 # Сохранение/загрузка текущих игровых слотов как JSON
 
 async def save_current_game_slots(slots: Dict[int, dict]):
-    """
-    Храним текущие слоты игры как JSON в settings.key='current_game_slots'.
-    Ключи слотов приводим к строкам.
-    """
-    payload = json.dumps({str(k): v for k, v in slots.items()}, ensure_ascii=False)
+    payload = json.dumps(slots, ensure_ascii=False)
     await set_setting("current_game_slots", payload)
 
 
@@ -568,8 +581,8 @@ async def set_last_evening_amount_for_user(user_id: int, amount: int):
                 ORDER BY id DESC
                 LIMIT 1
             )
-            """,
-            (amount, user_id)
+            """
+            , (amount, user_id)
         )
         await conn.commit()
 
@@ -747,42 +760,76 @@ async def get_user_game_counters(user_id: int) -> Optional[Dict[str, int]]:
 
 # ==== История слотов для статистики по ролям ====
 
-async def save_game_slots_history(game_date: str, slots: Dict[int, dict]) -> None:
+async def save_game_slots_history(game_date: str, slots):
+    """
+    Принимает либо dict[int, dict], либо list[dict].
+    Внутри всегда работает как по (slot_num, slot_dict).
+    """
+    # Нормализуем в iterable[(slot_num, slot_dict)]
+    if isinstance(slots, dict):
+        iterable = list(slots.items())
+    elif isinstance(slots, list):
+        iterable = []
+        for idx, slot in enumerate(slots, start=1):
+            if not isinstance(slot, dict):
+                continue
+            slot_num = slot.get("slot_num", idx)
+            iterable.append((slot_num, slot))
+    else:
+        return
+
+    rows = []
+    for slot_num, slot in iterable:
+        if not isinstance(slot, dict):
+            continue
+
+        user_id = slot.get("user_id")
+        role = slot.get("role")
+        team = slot.get("team")
+        base_points = float(slot.get("base_points", 0.0) or 0.0)
+        bonus_points = float(slot.get("bonus_points", 0.0) or 0.0)
+        lh_points = float(slot.get("lh_points", 0.0) or 0.0)
+        will_protocol_points = float(slot.get("will_protocol_points", 0.0) or 0.0)
+        will_opinion_points = float(slot.get("will_opinion_points", 0.0) or 0.0)
+
+        rows.append(
+            (
+                game_date,
+                user_id,
+                slot_num,
+                role,
+                team,
+                base_points,
+                bonus_points,
+                lh_points,
+                will_protocol_points,
+                will_opinion_points,
+            )
+        )
+
+    if not rows:
+        return
+
     async with aiosqlite.connect(DB_NAME) as conn:
-        rows = []
-        for slot_num, slot in slots.items():
-            user_id = slot.get("user_id")
-            role = slot.get("role")
-            team = slot.get("team")
-            base_points = float(slot.get("base_points", 0) or 0)
-            bonus_points = float(slot.get("bonus_points", 0) or 0)
-            lh_points = float(slot.get("lh_points", 0) or 0)
-
-            rows.append(
-                (
-                    game_date,
-                    user_id,
-                    slot_num,
-                    role,
-                    team,
-                    base_points,
-                    bonus_points,
-                    lh_points,
-                )
+        await conn.executemany(
+            """
+            INSERT INTO game_slots_history (
+                game_date,
+                user_id,
+                slot_num,
+                role,
+                team,
+                base_points,
+                bonus_points,
+                lh_points,
+                will_protocol_points,
+                will_opinion_points
             )
-
-        if rows:
-            await conn.executemany(
-                """
-                INSERT INTO game_slots_history (
-                    game_date, user_id, slot_num, role, team,
-                    base_points, bonus_points, lh_points
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows
-            )
-            await conn.commit()
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        await conn.commit()
 
 
 async def get_user_roles_stats(user_id: int) -> List[Dict]:
@@ -793,7 +840,8 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
                 role,
                 COUNT(*) AS games,
                 SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END) AS wins,
-                SUM(base_points + bonus_points + lh_points) AS total_points,
+                SUM(base_points + bonus_points + lh_points
+                    + will_protocol_points + will_opinion_points) AS total_points,
                 SUM(bonus_points) AS total_bonus,
                 SUM(lh_points) AS total_lh,
                 SUM(
@@ -802,7 +850,22 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
                         THEN (bonus_points + lh_points)
                         ELSE 0
                     END
-                ) AS total_negative
+                ) AS total_negative,
+
+                -- ПР: средний, плюсы/минусы
+                AVG(will_protocol_points) AS protocol_avg,
+                SUM(CASE WHEN will_protocol_points > 0 THEN 1 ELSE 0 END) AS protocol_pos_count,
+                SUM(CASE WHEN will_protocol_points > 0 THEN will_protocol_points ELSE 0 END) AS protocol_pos_sum,
+                SUM(CASE WHEN will_protocol_points < 0 THEN 1 ELSE 0 END) AS protocol_neg_count,
+                SUM(CASE WHEN will_protocol_points < 0 THEN will_protocol_points ELSE 0 END) AS protocol_neg_sum,
+
+                -- МН: средний, плюсы/минусы
+                AVG(will_opinion_points) AS opinion_avg,
+                SUM(CASE WHEN will_opinion_points > 0 THEN 1 ELSE 0 END) AS opinion_pos_count,
+                SUM(CASE WHEN will_opinion_points > 0 THEN will_opinion_points ELSE 0 END) AS opinion_pos_sum,
+                SUM(CASE WHEN will_opinion_points < 0 THEN 1 ELSE 0 END) AS opinion_neg_count,
+                SUM(CASE WHEN will_opinion_points < 0 THEN will_opinion_points ELSE 0 END) AS opinion_neg_sum
+
             FROM game_slots_history
             WHERE user_id = ?
             GROUP BY role
@@ -813,13 +876,44 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
 
     result: List[Dict] = []
     for row in rows:
-        role, games, wins, total_points, total_bonus, total_lh, total_negative = row
+        (
+            role,
+            games,
+            wins,
+            total_points,
+            total_bonus,
+            total_lh,
+            total_negative,
+            protocol_avg,
+            protocol_pos_count,
+            protocol_pos_sum,
+            protocol_neg_count,
+            protocol_neg_sum,
+            opinion_avg,
+            opinion_pos_count,
+            opinion_pos_sum,
+            opinion_neg_count,
+            opinion_neg_sum,
+        ) = row
+
         games = games or 0
         wins = wins or 0
         total_points = total_points or 0.0
         total_bonus = total_bonus or 0.0
         total_lh = total_lh or 0.0
         total_negative = total_negative or 0.0
+
+        protocol_avg = protocol_avg or 0.0
+        protocol_pos_count = protocol_pos_count or 0
+        protocol_pos_sum = protocol_pos_sum or 0.0
+        protocol_neg_count = protocol_neg_count or 0
+        protocol_neg_sum = protocol_neg_sum or 0.0
+
+        opinion_avg = opinion_avg or 0.0
+        opinion_pos_count = opinion_pos_count or 0
+        opinion_pos_sum = opinion_pos_sum or 0.0
+        opinion_neg_count = opinion_neg_count or 0
+        opinion_neg_sum = opinion_neg_sum or 0.0
 
         if games > 0:
             winrate = round(wins / games * 100, 1)
@@ -839,6 +933,16 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
                 "total_bonus": total_bonus,
                 "total_lh": total_lh,
                 "total_negative": total_negative,
+                "protocol_avg": round(protocol_avg, 2),
+                "protocol_pos_count": protocol_pos_count,
+                "protocol_pos_sum": round(protocol_pos_sum, 2),
+                "protocol_neg_count": protocol_neg_count,
+                "protocol_neg_sum": round(protocol_neg_sum, 2),
+                "opinion_avg": round(opinion_avg, 2),
+                "opinion_pos_count": opinion_pos_count,
+                "opinion_pos_sum": round(opinion_pos_sum, 2),
+                "opinion_neg_count": opinion_neg_count,
+                "opinion_neg_sum": round(opinion_neg_sum, 2),
             }
         )
 

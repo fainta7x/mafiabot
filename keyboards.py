@@ -18,7 +18,7 @@ def main_menu():
     # 3: статистика + все игры
     # 4: мои игры + оплата
     # 5: админ-панель
-    builder.adjust(1, 2, 2, 2, 1)
+    builder.adjust(2, 2, 3, 2, 1)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
@@ -83,16 +83,16 @@ def admin_menu():
     builder = ReplyKeyboardBuilder()
     builder.button(text="🎲 Новая игра")
     builder.button(text="♻️ Продолжить игру")
+    builder.button(text="📣 Сделать анонс")
     builder.button(text="📋 Игроки")
     builder.button(text="💸 Разослать счета")
     builder.button(text="💰 Должники")
     builder.button(text="👥 Все пользователи")
     builder.button(text="❌ Отменить вечер")
-    builder.button(text="📣 Сделать анонс")
     builder.button(text="📚 История вечеров")
     builder.button(text="🏠 В главное меню")
     # 1, 2, 2, 2, 2
-    builder.adjust(1, 2, 2, 2, 2)
+    builder.adjust(2, 3, 3, 2)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
@@ -108,8 +108,9 @@ def game_admin_menu():
     builder.button(text="Фол")
     builder.button(text="Убить")
     builder.button(text="🧹 Очистить слот")  # новая кнопка
-    builder.button(text="Остановить игру")
     builder.button(text="Завершить игру")  # финальное завершение игры
+    builder.button(text="Остановить игру")
+
     # первая строка: 3 кнопки (Ок, Выставить, Голоса)
     # вторая строка: 3 кнопки (Фол, Убить, Очистить слот)
     # третья строка: 2 кнопки (Остановить игру, Завершить игру)

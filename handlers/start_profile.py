@@ -82,7 +82,7 @@ async def show_profile(message: Message):
         await message.answer("Сначала нажмите /start, чтобы создать профиль.")
 
 
-@router.message(F.text == "🧾 Список игроков", F.chat.type == "private")
+@router.message(F.text == "🧾 Список игроков в записи", F.chat.type == "private")
 async def show_players_for_user(message: Message):
     """
     Показывает список игроков на ближайший вечер
@@ -96,7 +96,7 @@ async def show_players_for_user(message: Message):
         await message.answer(f"На ближайший вечер {date_str} пока никто не записался.")
         return
 
-    await message.answer(text)
+    await message.answer(text, reply_markup=keyboards.main_menu())
 
 
 @router.message(F.text == "📊 Статистика", F.chat.type == "private")

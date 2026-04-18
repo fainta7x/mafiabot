@@ -9,7 +9,7 @@ import config
 import database
 import keyboards
 from .state import GameCreateState
-from .utils import build_slots_text, build_game_state, build_protocol_text
+from .text import build_slots_text, build_game_state, build_protocol_text
 
 router = Router()
 
@@ -24,28 +24,11 @@ router = Router()
 # - завершение игры и протокол;
 # - команды ЛХ и ПУ;
 # - обработку любого текста во время игры.
-#
-# ОГЛАВЛЕНИЕ:
-# 0. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# 1. СТАРТ / ПРОДОЛЖЕНИЕ ИГРЫ
-# 2. РУЧНОЕ РЕДАКТИРОВАНИЕ НИКОВ
-# 3. ОЧИСТКА СЛОТА
-# 4. ПОКАЗ СОСТОЯНИЯ ИГРЫ
-# 5. ЗАВЕРШЕНИЕ ИГРЫ + ПРОТОКОЛ
-# 6. ПОЛНОЕ ЗАВЕРШЕНИЕ ИГРЫ
-# 7. КОМАНДЫ ЛХ
-# 8. КОМАНДЫ ПУ
-# 9. ПРОИЗВОЛЬНЫЙ ТЕКСТ ВО ВРЕМЯ ИГРЫ
 # =========================================================
 
 
 # =========================================================
 # 0. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# Здесь лежат общие функции, которые используются в разных
-# хендлерах ниже:
-#   - проверка, что пишет АДМИН в ЛИЧКУ;
-#   - получение/сохранение слотов;
-#   - разбор номера слота.
 # =========================================================
 
 def _is_admin_pm(message: types.Message) -> bool:
@@ -121,16 +104,6 @@ async def _save_slots(state: FSMContext, slots: dict[int, dict]):
 
 # =========================================================
 # 1. СТАРТ / ПРОДОЛЖЕНИЕ ИГРЫ
-#
-# Хендлеры:
-#   - start_new_game  — кнопка «🎲 Новая игра»
-#   - resume_game     — кнопка «♻️ Продолжить игру»
-#
-# Здесь:
-#   - создаются слоты на основе записавшихся игроков;
-#   - выставляются номера игр (за день и глобальный);
-#   - поднимается флаг "игра активна" в базе;
-#   - можно восстановить игру после перезапуска бота.
 # =========================================================
 
 @router.message(F.text == "🎲 Новая игра")
@@ -204,6 +177,8 @@ async def start_new_game(message: types.Message, state: FSMContext):
         waiting_night_suspects_slot=None,
         night_killed_slot=None,
         winner_label=None,
+        protocol_chat_id=None,
+        protocol_message_id=None,
     )
 
     # Флаг "игра активна" и сами слоты в базу
@@ -260,6 +235,8 @@ async def resume_game(message: types.Message, state: FSMContext):
         waiting_night_suspects_slot=None,
         night_killed_slot=None,
         winner_label=None,
+        protocol_chat_id=None,
+        protocol_message_id=None,
     )
 
     text = build_game_state(slots, alive_only=False)
@@ -271,13 +248,6 @@ async def resume_game(message: types.Message, state: FSMContext):
 
 # =========================================================
 # 2. РУЧНОЕ РЕДАКТИРОВАНИЕ НИКОВ
-#
-# Хендлеры:
-#   - manual_nick_edit — ввод вида: "<номер> <ник>"
-#
-# Здесь можно:
-#   - поменять ник у уже существующего слота;
-#   - создать новый слот с ником, если такого слота ещё нет.
 # =========================================================
 
 @router.message(GameCreateState.editing_slots, F.text.regexp(r"^\d+\s+"))
@@ -354,14 +324,6 @@ async def manual_nick_edit(message: types.Message, state: FSMContext):
 
 # =========================================================
 # 3. ОЧИСТКА СЛОТА
-#
-# Хендлеры:
-#   - ask_clear_slot      — кнопка «🧹 Очистить слот»
-#   - clear_slot_handler  — ввод номера слота
-#
-# Что делает:
-#   - сбрасывает фолы, голоса, статус, ЛХ, ПУ и т.п.;
-#   - НЕ трогает привязку к игроку, роль и команду.
 # =========================================================
 
 @router.message(F.text == "🧹 Очистить слот")
@@ -439,16 +401,6 @@ async def clear_slot_handler(message: types.Message, state: FSMContext):
 
 # =========================================================
 # 4. ПОКАЗ СОСТОЯНИЯ ИГРЫ
-#
-# Хендлеры:
-#   - ask_game_finish_reason — текст «остановить игру»
-#   - show_game_state_all    — текст «игра»
-#   - show_game_state_alive  — текст «игра живые»
-#
-# Здесь:
-#   - спрашиваем, как завершить игру;
-#   - показываем все слоты;
-#   - показываем только живые слоты.
 # =========================================================
 
 @router.message(GameCreateState.editing_slots, F.text.casefold() == "остановить игру")
@@ -489,15 +441,6 @@ async def show_game_state_alive(message: types.Message, state: FSMContext):
 
 # =========================================================
 # 5. ЗАВЕРШЕНИЕ ИГРЫ + ПРОТОКОЛ
-#
-# Хендлеры:
-#   - handle_game_finish — callback "game_end:*"
-#
-# Здесь:
-#   - выбирается, кто победил (город/мафия/отмена);
-#   - начисляются базовые очки по командам;
-#   - автоматически считается ЛХ ПУ по night_suspects;
-#   - формируется и сохраняется протокол игры.
 # =========================================================
 
 @router.callback_query(F.data.startswith("game_end:"))
@@ -546,7 +489,13 @@ async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
             slots[slot_num] = slot
             continue
 
-        # Для ПУ смотрим, сколько чёрных он угадал
+        # Если ПУ не красный (мафия/дон или без команды) — ЛХ не даём
+        if slot.get("team") != "Красные":
+            slot["lh_points"] = 0.0
+            slots[slot_num] = slot
+            continue
+
+        # Для красного ПУ считаем, сколько чёрных он угадал
         suspects = slot.get("night_suspects") or []
         correct_blacks = 0
 
@@ -572,16 +521,14 @@ async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
     evening_game_number = await database.get_current_game_number() or 1
     global_game_number = await database.get_current_global_game_number() or 1
 
-    # Сохраняем историю слотов
-    await database.save_game_slots_history(game_date, slots)
-
-    # Формируем протокол
+    # Формируем тело протокола
     protocol_body = build_protocol_text(
         slots,
         updated=False,
         winner_label=winner_label,
     )
 
+    # Сохраняем в историю ИМЕННО тело протокола (без шапки)
     await database.save_game_history(
         game_date=game_date,
         winner_label=winner_label,
@@ -604,7 +551,7 @@ async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
         parse_mode=ParseMode.HTML,
     )
 
-    # Сохраняем ссылку на сообщение с протоколом
+    # Сохраняем ссылку на сообщение с протоколом и обновлённые слоты в FSM
     await state.update_data(
         slots=slots,
         protocol_chat_id=protocol_msg.chat.id,
@@ -620,20 +567,47 @@ async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
 
 # =========================================================
 # 6. ПОЛНОЕ ЗАВЕРШЕНИЕ ИГРЫ
-#
-# Хендлеры:
-#   - final_finish_game — текст «завершить игру»
-#
-# Полностью очищает:
-#   - FSM-состояние;
-#   - флаг "game_active" и текущие слоты/даты/номера в базе.
 # =========================================================
 
-@router.message(GameCreateState.editing_slots, F.text.casefold() == "завершить игру")
+@router.message(F.text.casefold() == "завершить игру")
 async def final_finish_game(message: types.Message, state: FSMContext):
+    """
+    Полное завершение игры:
+    - сохраняем финальное состояние слотов в game_slots_history;
+    - очищаем FSM и все ключи current_game_* и game_active.
+
+    Работает даже если FSM слетело (после перезапуска бота):
+    тогда берём слоты из settings.current_game_slots.
+    """
     if not await _ensure_admin_pm(message):
         return
 
+    # Проверяем, есть ли вообще активная игра
+    active_flag = await database.get_setting("game_active")
+    if active_flag != "1":
+        await message.answer(
+            "Сейчас нет активной игры. Нечего завершать.",
+            reply_markup=keyboards.admin_menu(),
+        )
+        return
+
+    # 1. Пытаемся достать слоты из FSM
+    data = await state.get_data()
+    slots = data.get("slots")
+
+    # 2. Если в FSM пусто — пробуем восстановить из БД
+    if not slots:
+        slots = await database.load_current_game_slots() or {}
+
+    # 3. Достаём дату игры (для статистики по ролям)
+    game_date = await database.get_current_game_date() or "-"
+
+    # 4. Сохраняем историю слотов для статистики по ролям
+    #    Берём финальное состояние slots (с уже выставленными ПР/МН, если они были)
+    if slots:
+        await database.save_game_slots_history(game_date, slots)
+
+    # 5. Полностью очищаем состояние и настройки текущей игры
     await state.clear()
     await database.set_setting("game_active", None)
     await database.set_setting("current_game_slots", None)
@@ -649,16 +623,6 @@ async def final_finish_game(message: types.Message, state: FSMContext):
 
 # =========================================================
 # 7. КОМАНДЫ ЛХ (night_suspects)
-#
-# Хендлеры:
-#   - manual_lh_input — текст вида: "лх <слот> [список слотов]"
-#
-# Примеры:
-#   - "лх 5 1 2 3"  -> для слота 5 подозреваемые [1,2,3]
-#   - "лх 5"        -> очищаем подозреваемых для слота 5
-#
-# Сам ЛХ (0.1 / 0.3 / 0.6) считается в handle_game_finish
-# на основе night_suspects и команды игроков.
 # =========================================================
 
 @router.message(F.text.regexp(r"^лх\s+"))
@@ -733,17 +697,6 @@ async def manual_lh_input(message: types.Message, state: FSMContext):
 
 # =========================================================
 # 8. КОМАНДЫ ПУ (ПРОВЕРЯЮЩИЙ УЛИЦЫ) + ПОДОЗРЕВАЕМЫЕ
-#
-# Хендлеры:
-#   - manual_pu_and_lh_input — текст "пу <слот> [список слотов]"
-#
-# Примеры:
-#   - "пу 4 1 2 3"  -> слот 4 становится ПУ, подозреваемые [1,2,3]
-#   - "пу 4"        -> слот 4 ПУ, список подозреваемых очищен
-#
-# При этом:
-#   - ПУ снимается со всех остальных слотов;
-#   - night_suspects обновляется для указанного слота.
 # =========================================================
 
 @router.message(F.text.regexp(r"^пу\s+"))
@@ -823,30 +776,13 @@ async def manual_pu_and_lh_input(message: types.Message, state: FSMContext):
 
 # =========================================================
 # 9. ПРОИЗВОЛЬНЫЙ ТЕКСТ ВО ВРЕМЯ ИГРЫ (CATCH-ALL)
-#
-# Хендлеры:
-#   - catch_all_in_game — любое сообщение в состоянии editing_slots,
-#                         которое не попало под более специфичные
-#                         хендлеры (лх/пу/доп и т.п.)
-#
-# Здесь:
-#   - игнорируем команды, которые должны обрабатываться отдельно;
-#   - по любому другому тексту просто показываем текущее состояние игры.
 # =========================================================
 
 @router.message(GameCreateState.editing_slots)
 async def catch_all_in_game(message: types.Message, state: FSMContext):
     text_raw = (message.text or "").strip().lower()
-
-    # Эти префиксы обрабатываются отдельными хендлерами
-    if text_raw.startswith("доп "):
-        return
-
-    if text_raw.startswith("лх "):
-        return
-
-    if text_raw.startswith("пу "):
-        return
+    current_state = await state.get_state()
+    print(f"[CATCH_ALL] state={current_state}, text_raw={repr(text_raw)}")
 
     slots = await _get_slots_or_reply(message, state)
     if not slots:
