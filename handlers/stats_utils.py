@@ -1,37 +1,70 @@
 from typing import Dict, Optional, List
+
 import database
 
+# =========================================================
+# STATS_UTILS — ЛИЧНАЯ И ИГРОВАЯ СТАТИСТИКА
+#
+# ОГЛАВЛЕНИЕ:
+# 1. ЛИЧНАЯ СТАТИСТИКА ИГРОКА
+#    - build_user_stats_text              — общий текст по игроку
+#    - _aggregate_pr_mn_and_negative      — суммарные ПР/МН и минуса
+#    - _format_roles_stats                — разрез по ролям
+#
+# 2. ИСТОРИЯ ИГР (ПО ВСЕМ / ПО ИГРОКУ)
+#    - build_all_games_history_text       — последние игры (все)
+#    - build_user_games_history_text      — игры конкретного игрока
+# =========================================================
+
+
+# =========================================================
+# 1. ЛИЧНАЯ СТАТИСТИКА ИГРОКА
+# =========================================================
 
 async def build_user_stats_text(user_id: int) -> str:
     """
-    Собирает текст личной статистики игрока:
-    - общая по играм (users.games_played/games_won/points)
-    - агрегированные ПР/МН и дисциплинарные минуса по всем играм
-    - по ролям (из game_slots_history)
+    Собирает текст личной статистики игрока.
+
+    Источники:
+      - таблица users:
+          * games_played, games_won, points
+      - таблица game_slots_history:
+          * агрегированные ПР/МН
+          * дисциплинарные минуса (total_negative)
+          * статистика по ролям
+
+    Формат:
+      📊 Твоя статистика по играм:
+      • ...
+      • ...
+      <ПР/МН>
+      <Минуса>
+      🎭 Статистика по ролям:
+      ...
     """
     counters: Optional[Dict[str, int]] = await database.get_user_game_counters(user_id)
     roles_stats = await database.get_user_roles_stats(user_id)
 
     lines: List[str] = []
 
-    # === Общая статистика по играм ===
+    # === Общая статистика по играм (users) ===
     if not counters or counters["games_played"] == 0:
-        lines.append("📊 У тебя пока нет сыгранных игр в общей статистике (users).")
+        lines.append("📊 У тебя пока нет сыгранных игр в общей статистике.")
         return "\n".join(lines)
 
-    gp = counters["games_played"]
-    gw = counters["games_won"]
-    pts = counters["points"]
+    games_played = counters["games_played"]
+    games_won = counters["games_won"]
+    points = counters["points"]
 
-    winrate = round(gw / gp * 100, 1) if gp > 0 else 0.0
-    avg_points = round(pts / gp, 2) if gp > 0 else 0.0
+    winrate = round(games_won / games_played * 100, 1) if games_played > 0 else 0.0
+    avg_points = round(points / games_played, 2) if games_played > 0 else 0.0
 
     lines.append("📊 Твоя статистика по играм:\n")
-    lines.append(f"• Сыграно игр: {gp}")
-    lines.append(f"• Выиграно: {gw}")
+    lines.append(f"• Сыграно игр: {games_played}")
+    lines.append(f"• Выиграно: {games_won}")
     lines.append(f"• Винрейт: {winrate}%")
     lines.append("")
-    lines.append(f"• Баллов за победы (суммарно): {pts}")
+    lines.append(f"• Баллов за победы (суммарно): {points}")
     lines.append(f"• Средний балл за игру: {avg_points}")
 
     # === Агрегированные ПР/МН и дисциплинарные минуса по всем ролям ===
@@ -67,7 +100,7 @@ async def build_user_stats_text(user_id: int) -> str:
             f"  Плюсовой: {mn_pos_count_all} раз (сумма плюсов {mn_pos_sum_all:.2f})"
         )
         lines.append("")
-        lines.append(f"• Минуса дисциплинарные: {total_negative_all:.1f}")
+        lines.append(f"• Минуса дисциплинарные (суммарно): {total_negative_all:.1f}")
 
     # === Статистика по ролям ===
     if roles_stats:
@@ -85,16 +118,24 @@ async def build_user_stats_text(user_id: int) -> str:
 def _aggregate_pr_mn_and_negative(roles_stats: List[Dict]) -> tuple:
     """
     Агрегируем ПР/МН и дисциплинарные минуса по всем ролям.
+
+    На вход:
+      roles_stats — список словарей по каждой роли (из get_user_roles_stats).
+
     Возвращаем кортеж:
-    (
-        pr_avg_all,
-        pr_neg_count_all, pr_neg_sum_all,
-        pr_pos_count_all, pr_pos_sum_all,
-        mn_avg_all,
-        mn_neg_count_all, mn_neg_sum_all,
-        mn_pos_count_all, mn_pos_sum_all,
-        total_negative_all,
-    )
+      (
+          pr_avg_all,              # средний ПР по всем играм
+          pr_neg_count_all,        # сколько раз ПР был минусовым
+          pr_neg_sum_all,          # суммарный минус по ПР
+          pr_pos_count_all,        # сколько раз ПР был плюсовым
+          pr_pos_sum_all,          # суммарный плюс по ПР
+          mn_avg_all,              # средний МН по всем играм
+          mn_neg_count_all,        # сколько раз МН был минусовым
+          mn_neg_sum_all,          # суммарный минус по МН
+          mn_pos_count_all,        # сколько раз МН был плюсовым
+          mn_pos_sum_all,          # суммарный плюс по МН
+          total_negative_all,      # дисциплинарные минуса (bonus+lh<0) по всем ролям
+      )
     """
     total_pr_points = 0.0
     total_pr_events = 0
@@ -124,7 +165,7 @@ def _aggregate_pr_mn_and_negative(roles_stats: List[Dict]) -> tuple:
         pr_pos_count = r.get("protocol_pos_count", 0)
         pr_pos_sum = r.get("protocol_pos_sum", 0.0)
 
-        # Переводим средний ПР по роли в сумму: avg * игр
+        # Переводим средний ПР по роли в суммарный: avg * игр
         total_pr_points += pr_avg * games
         total_pr_events += games
 
@@ -148,7 +189,7 @@ def _aggregate_pr_mn_and_negative(roles_stats: List[Dict]) -> tuple:
         mn_pos_count_all += mn_pos_count
         mn_pos_sum_all += mn_pos_sum
 
-        # Дисциплинарные минуса
+        # Дисциплинарные минуса (из поля total_negative)
         total_negative_all += r.get("total_negative", 0.0)
 
     pr_avg_all = round(total_pr_points / total_pr_events, 2) if total_pr_events > 0 else 0.0
@@ -170,6 +211,23 @@ def _aggregate_pr_mn_and_negative(roles_stats: List[Dict]) -> tuple:
 
 
 def _format_roles_stats(roles_stats: List[Dict]) -> str:
+    """
+    Форматирует статистику по ролям в многострочный текст.
+
+    На вход:
+      roles_stats — список словарей с ключами:
+        role, games, wins, winrate, avg_points,
+        total_bonus, total_lh, ...
+
+    Вывод:
+      🎭 Статистика по ролям:
+      Роль:
+        • Игр: ...
+        • Побед: ...
+        • Средний балл: ...
+        • Допы (суммарно): ...
+        • ЛХ (суммарно): ...   # только для красных / не задана
+    """
     lines: List[str] = []
     lines.append("🎭 Статистика по ролям:\n")
 
@@ -189,7 +247,7 @@ def _format_roles_stats(roles_stats: List[Dict]) -> str:
             f"  • Средний балл: {avg_points}"
         )
 
-        # Допы показываем для всех ролей, без плюса перед числом
+        # Допы показываем для всех ролей
         lines.append(f"  • Допы (суммарно): {total_bonus:.1f}")
 
         # ЛХ — только для красных ролей (мирный/шериф/не задана)
@@ -201,11 +259,15 @@ def _format_roles_stats(roles_stats: List[Dict]) -> str:
     return "\n".join(lines).strip()
 
 
-# ===== История игр (все / игры пользователя) =====
+# =========================================================
+# 2. ИСТОРИЯ ИГР (ПО ВСЕМ / ПО ИГРОКУ)
+# =========================================================
 
 async def build_all_games_history_text(limit: int = 5) -> str:
     """
-    Текст для раздела 'Все игры' — последние N игр с полным протоколом.
+    Строит текст для раздела «Все игры» — последние N игр с полным протоколом.
+
+    Берём данные из game_history (get_last_games).
     """
     games = await database.get_last_games(limit=limit)
     if not games:
@@ -213,11 +275,13 @@ async def build_all_games_history_text(limit: int = 5) -> str:
 
     lines: List[str] = []
     lines.append("📜 Последние игры:\n")
+
     for g in games:
         gid = g["id"]
         date_str = g["game_date"] or "-"
         winner = g["winner_label"] or "Итог не указан"
         protocol_text = g["protocol_text"] or ""
+
         lines.append(f"Игра #{gid} — {date_str} — {winner}")
         lines.append(protocol_text)
         lines.append("")  # пустая строка между играми
@@ -227,7 +291,9 @@ async def build_all_games_history_text(limit: int = 5) -> str:
 
 async def build_user_games_history_text(user_id: int, limit: int = 5) -> str:
     """
-    Текст для раздела 'Игры этого игрока' — только те игры, где он участвовал.
+    Строит текст «Игры этого игрока» — только те игры, где он участвовал.
+
+    Берём данные из game_slots_history / game_history (get_user_games).
     """
     games = await database.get_user_games(user_id, limit=limit)
     if not games:
@@ -235,11 +301,13 @@ async def build_user_games_history_text(user_id: int, limit: int = 5) -> str:
 
     lines: List[str] = []
     lines.append("📜 Твои игры:\n")
+
     for g in games:
         gid = g["id"]
         date_str = g["game_date"] or "-"
         winner = g["winner_label"] or "Итог не указан"
         protocol_text = g["protocol_text"] or ""
+
         lines.append(f"Игра #{gid} — {date_str} — {winner}")
         lines.append(protocol_text)
         lines.append("")
