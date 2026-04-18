@@ -6,11 +6,19 @@ from aiogram.types import WebAppInfo
 def main_menu():
     builder = ReplyKeyboardBuilder()
     builder.button(text="🕵️ Записаться на игру")
-    builder.button(text="🧾 Список игроков")
+    builder.button(text="🧾 Список игроков в записи")
     builder.button(text="👤 Мой профиль")
     builder.button(text="💳 Оплатить")
+    builder.button(text="📊 Статистика")
+    builder.button(text="📜 Мои игры")
+    builder.button(text="📜 Все игры")
     builder.button(text="🛠 Перейти в админ-панель")
-    builder.adjust(1, 2, 2)
+    # 1: запись
+    # 2: список + профиль
+    # 3: статистика + все игры
+    # 4: мои игры + оплата
+    # 5: админ-панель
+    builder.adjust(1, 2, 2, 2, 1)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
@@ -74,6 +82,7 @@ def admin_menu():
     """
     builder = ReplyKeyboardBuilder()
     builder.button(text="🎲 Новая игра")
+    builder.button(text="♻️ Продолжить игру")
     builder.button(text="📋 Игроки")
     builder.button(text="💸 Разослать счета")
     builder.button(text="💰 Должники")
@@ -82,6 +91,7 @@ def admin_menu():
     builder.button(text="📣 Сделать анонс")
     builder.button(text="📚 История вечеров")
     builder.button(text="🏠 В главное меню")
+    # 1, 2, 2, 2, 2
     builder.adjust(1, 2, 2, 2, 2)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
@@ -96,9 +106,14 @@ def game_admin_menu():
     builder.button(text="Выставить")
     builder.button(text="Голоса")
     builder.button(text="Фол")
-    builder.button(text="Убить")          # новая кнопка
+    builder.button(text="Убить")
+    builder.button(text="🧹 Очистить слот")  # новая кнопка
     builder.button(text="Остановить игру")
-    builder.adjust(3, 3)  # 1-я строка 3, 2-я строка 3
+    builder.button(text="Завершить игру")  # финальное завершение игры
+    # первая строка: 3 кнопки (Ок, Выставить, Голоса)
+    # вторая строка: 3 кнопки (Фол, Убить, Очистить слот)
+    # третья строка: 2 кнопки (Остановить игру, Завершить игру)
+    builder.adjust(3, 3, 2)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
@@ -112,6 +127,7 @@ def evenings_history_kb(evenings: list):
     builder.adjust(1)
     return builder.as_markup()
 
+
 def split_decision_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="Поднять всех", callback_data="split:kill_all")
@@ -119,10 +135,28 @@ def split_decision_keyboard():
     builder.adjust(1, 1)
     return builder.as_markup()
 
+
 def game_finish_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="🏙 Победа города", callback_data="game_end:city")
     builder.button(text="💀 Победа мафии", callback_data="game_end:mafia")
     builder.button(text="❌ Отмена игры", callback_data="game_end:cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def games_list_kb(games: list, prefix: str):
+    """
+    games: список кортежей (game_id, title, number)
+           number — логический номер игры (например, номер игры за вечер),
+                     который мы потом подставляем в callback_data.
+    prefix: 'allgames' или 'mygames'
+    """
+    builder = InlineKeyboardBuilder()
+    for game_id, title, number in games:
+        builder.button(
+            text=title,
+            callback_data=f"{prefix}:{game_id}:{number}"
+        )
     builder.adjust(1)
     return builder.as_markup()

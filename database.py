@@ -1,5 +1,6 @@
 import aiosqlite
-from typing import Optional, Tuple, List
+import json
+from typing import Optional, Tuple, List, Dict
 
 DB_NAME = "mafia_crm.db"
 
@@ -16,7 +17,10 @@ async def init_db():
                 debt       INTEGER DEFAULT 0,
                 last_visit TEXT DEFAULT '-',
                 total_paid INTEGER DEFAULT 0,
-                has_unpaid_session INTEGER DEFAULT 0
+                has_unpaid_session INTEGER DEFAULT 0,
+                games_played INTEGER DEFAULT 0,
+                games_won    INTEGER DEFAULT 0,
+                points       INTEGER DEFAULT 0
             )
         """)
         await conn.execute("""
@@ -51,8 +55,175 @@ async def init_db():
                 bills_sent INTEGER DEFAULT 0
             )
         """)
+
+        # Таблица общих настроек/флагов (в т.ч. для игры)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+
+        # История игровых слотов для статистики по ролям и очкам
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS game_slots_history (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_date    TEXT,
+                user_id      INTEGER,
+                slot_num     INTEGER,
+                role         TEXT,
+                team         TEXT,
+                base_points  REAL DEFAULT 0,
+                bonus_points REAL DEFAULT 0,
+                lh_points    REAL DEFAULT 0
+            )
+        """)
+
+        # Таблица истории игр с протоколами + номера игр
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS game_history (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_date          TEXT,
+                winner_label       TEXT,
+                protocol_text      TEXT,
+                game_number        INTEGER,   -- номер игры в этот вечер
+                global_game_number INTEGER    -- глобальный номер игры
+            )
+        """)
+
+        # --- Расширяем старую таблицу users (если поля ещё не были) ---
+        try:
+            await conn.execute(
+                "ALTER TABLE users ADD COLUMN games_played INTEGER DEFAULT 0"
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.execute(
+                "ALTER TABLE users ADD COLUMN games_won INTEGER DEFAULT 0"
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.execute(
+                "ALTER TABLE users ADD COLUMN points INTEGER DEFAULT 0"
+            )
+        except Exception:
+            pass
+
+        # --- Расширяем старую game_history (если нет новых колонок) ---
+        try:
+            await conn.execute(
+                "ALTER TABLE game_history ADD COLUMN game_number INTEGER"
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.execute(
+                "ALTER TABLE game_history ADD COLUMN global_game_number INTEGER"
+            )
+        except Exception:
+            pass
+
         await conn.commit()
 
+
+# ===== SETTINGS (общие флаги/JSON) =====
+
+async def get_setting(key: str) -> Optional[str]:
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (key,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+
+async def set_setting(key: str, value: Optional[str]):
+    async with aiosqlite.connect(DB_NAME) as conn:
+        if value is None:
+            await conn.execute(
+                "DELETE FROM settings WHERE key = ?",
+                (key,)
+            )
+        else:
+            await conn.execute(
+                """
+                INSERT INTO settings (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, value)
+            )
+        await conn.commit()
+
+
+# Удобные обёртки для даты/номеров текущей игры (вечера)
+
+async def set_current_game_date(date_str: str):
+    await set_setting("current_game_date", date_str)
+
+
+async def get_current_game_date() -> Optional[str]:
+    return await get_setting("current_game_date")
+
+
+async def set_current_game_number(num: int):
+    await set_setting("current_game_number", str(num))
+
+
+async def get_current_game_number() -> Optional[int]:
+    val = await get_setting("current_game_number")
+    if not val:
+        return None
+    try:
+        return int(val)
+    except ValueError:
+        return None
+
+
+async def set_current_global_game_number(num: int):
+    await set_setting("current_game_global_number", str(num))
+
+
+async def get_current_global_game_number() -> Optional[int]:
+    val = await get_setting("current_game_global_number")
+    if not val:
+        return None
+    try:
+        return int(val)
+    except ValueError:
+        return None
+
+
+# Сохранение/загрузка текущих игровых слотов как JSON
+
+async def save_current_game_slots(slots: Dict[int, dict]):
+    """
+    Храним текущие слоты игры как JSON в settings.key='current_game_slots'.
+    Ключи слотов приводим к строкам.
+    """
+    payload = json.dumps({str(k): v for k, v in slots.items()}, ensure_ascii=False)
+    await set_setting("current_game_slots", payload)
+
+
+async def load_current_game_slots() -> Optional[Dict[int, dict]]:
+    """
+    Загружаем слоты игры из settings.key='current_game_slots'.
+    Возвращаем dict[int, dict] или None.
+    """
+    payload = await get_setting("current_game_slots")
+    if not payload:
+        return None
+    raw = json.loads(payload)
+    return {int(k): v for k, v in raw.items()}
+
+
+# ===== Пользователи и профиль =====
 
 async def add_or_update_user(user_id: int, username: Optional[str], full_name: str):
     async with aiosqlite.connect(DB_NAME) as conn:
@@ -107,8 +278,6 @@ async def clear_bookings():
 
 
 async def get_booked_players_detailed() -> list:
-    # Мы берем ID из брони, и если в таблице users пусто (NULL),
-    # пишем 'ID: ' + этот самый номер.
     query = """
         SELECT 
             COALESCE(users.full_name, 'ID: ' || evening_booking.user_id) AS full_name,
@@ -127,16 +296,19 @@ async def get_booked_players_for_game() -> list:
     """
     Игроки, записанные на вечер и реально участвующие в игре:
     только со статусами 'Вовремя' и 'Позже'.
-    Возвращаем: full_name, username, nickname, status.
+
+    Возвращаем: user_id, full_name, username, nickname, status.
     """
     query = """
-    SELECT IFNULL(users.full_name, 'Неизвестный') AS full_name,
-           users.username,
-           users.nickname,
-           evening_booking.status
-    FROM evening_booking
-    LEFT JOIN users ON evening_booking.user_id = users.user_id
-    WHERE evening_booking.status IN ('Вовремя', 'Позже')
+    SELECT 
+        e.user_id,
+        IFNULL(u.full_name, 'Неизвестный') AS full_name,
+        u.username,
+        u.nickname,
+        e.status
+    FROM evening_booking e
+    LEFT JOIN users u ON e.user_id = u.user_id
+    WHERE e.status IN ('Вовремя', 'Позже')
     """
     async with aiosqlite.connect(DB_NAME) as conn:
         async with conn.execute(query) as cursor:
@@ -164,7 +336,6 @@ async def get_user_brief(user_id: int) -> Optional[Tuple[str, str, str]]:
 
 
 # ==== Долг и оплаты ====
-
 
 async def change_user_debt(user_id: int, delta: int):
     """Прибавить/убавить долг относительно текущего значения."""
@@ -245,7 +416,6 @@ async def get_user_debt(user_id: int) -> int:
 
 # ==== История вечеров ====
 
-
 async def archive_current_evening():
     """
     Перенести все текущие записи из evening_booking в evening_history и очистить список.
@@ -265,7 +435,6 @@ async def archive_current_evening():
             rows = await cursor.fetchall()
 
         if rows:
-            # добавляем amount = 0 для каждой записи
             rows_with_amount = [(*row, 0) for row in rows]
             await conn.executemany(
                 """
@@ -356,13 +525,7 @@ async def has_unpaid_session(user_id: int) -> bool:
 
 # ==== Статистика игроков ====
 
-
 async def get_top_players_by_visits(limit: int = 10) -> list:
-    """
-    Топ игроков по количеству посещённых вечеров.
-    Считаем по evening_history: сколько раз user_id встречается (по сути, сколько раз был в списке вечера).
-    Возвращаем: full_name, nickname, visits_count.
-    """
     async with aiosqlite.connect(DB_NAME) as conn:
         async with conn.execute(
             """
@@ -381,10 +544,6 @@ async def get_top_players_by_visits(limit: int = 10) -> list:
 
 
 async def get_inactive_players(days: int = 30) -> list:
-    """
-    Игроки, которые давно не были.
-    Возвращаем: full_name, nickname, last_visit.
-    """
     async with aiosqlite.connect(DB_NAME) as conn:
         async with conn.execute(
             """
@@ -397,10 +556,6 @@ async def get_inactive_players(days: int = 30) -> list:
 
 
 async def set_last_evening_amount_for_user(user_id: int, amount: int):
-    """
-    Проставить сумму amount в последнюю запись evening_history для этого пользователя.
-    Используем ORDER BY id DESC, чтобы взять самый свежий вечер.
-    """
     async with aiosqlite.connect(DB_NAME) as conn:
         await conn.execute(
             """
@@ -421,11 +576,7 @@ async def set_last_evening_amount_for_user(user_id: int, amount: int):
 
 # ==== Подсчёт записанных на вечер ====
 
-
 async def count_ontime_players_for_date(date_str: str) -> int:
-    """
-    Сколько игроков со статусом 'Вовремя' на указанную дату.
-    """
     async with aiosqlite.connect(DB_NAME) as conn:
         async with conn.execute(
             """
@@ -440,9 +591,6 @@ async def count_ontime_players_for_date(date_str: str) -> int:
 
 
 async def count_all_attending_for_date(date_str: str) -> int:
-    """
-    Сколько игроков со статусом 'Вовремя' или 'Позже' на указанную дату.
-    """
     async with aiosqlite.connect(DB_NAME) as conn:
         async with conn.execute(
             """
@@ -458,10 +606,6 @@ async def count_all_attending_for_date(date_str: str) -> int:
 
 
 async def get_players_by_status_for_date(date_str: str, status: str) -> list:
-    """
-    Игроки на конкретную дату и со статусом.
-    Возвращаем: nickname (если есть) или full_name.
-    """
     query = """
         SELECT 
             COALESCE(u.nickname, u.full_name, 'Без имени') AS name
@@ -475,12 +619,8 @@ async def get_players_by_status_for_date(date_str: str, status: str) -> list:
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
 
+
 async def get_all_bookings_for_date_ordered(date_str: str) -> list[tuple]:
-    """
-    Все записи на конкретную дату с сортировкой по статусу:
-    Сначала 'Вовремя', затем 'Позже', затем 'Не идёт'.
-    Возвращаем: name, status.
-    """
     query = """
         SELECT 
             COALESCE(u.nickname, u.full_name, 'Без имени') AS name,
@@ -515,9 +655,6 @@ async def set_stats_message(date_str: str, chat_id: int, message_id: int):
 
 
 async def get_stats_message(date_str: str) -> Optional[Tuple[int, int]]:
-    """
-    Вернёт (chat_id, message_id) или None.
-    """
     async with aiosqlite.connect(DB_NAME) as conn:
         async with conn.execute(
             """
@@ -533,11 +670,7 @@ async def get_stats_message(date_str: str) -> Optional[Tuple[int, int]]:
 
 # ==== Статус вечера (счета разосланы / запись закрыта) ====
 
-
 async def mark_evening_bills_sent(date_str: str):
-    """
-    Пометить, что по вечеру на date_str счета разосланы (запись закрыта).
-    """
     async with aiosqlite.connect(DB_NAME) as conn:
         await conn.execute(
             """
@@ -551,9 +684,6 @@ async def mark_evening_bills_sent(date_str: str):
 
 
 async def is_evening_bills_sent(date_str: str) -> bool:
-    """
-    True, если по этому вечеру уже разосланы счета (запись закрыта).
-    """
     async with aiosqlite.connect(DB_NAME) as conn:
         async with conn.execute(
             "SELECT bills_sent FROM evening_status WHERE date = ?",
@@ -561,3 +691,323 @@ async def is_evening_bills_sent(date_str: str) -> bool:
         ) as cursor:
             row = await cursor.fetchone()
             return bool(row and row[0])
+
+
+# ==== Результат игры: начисление очков игрокам ====
+
+async def apply_game_result_to_users(slots: Dict[int, dict], winning_team: str) -> None:
+    async with aiosqlite.connect(DB_NAME) as conn:
+        for slot_data in slots.values():
+            user_id = slot_data.get("user_id")
+            team = slot_data.get("team")
+            if not user_id or not team:
+                continue
+
+            await conn.execute(
+                "UPDATE users SET games_played = COALESCE(games_played, 0) + 1 WHERE user_id = ?",
+                (user_id,)
+            )
+
+            if team == winning_team:
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET games_won = COALESCE(games_won, 0) + 1,
+                        points = COALESCE(points, 0) + 1
+                    WHERE user_id = ?
+                    """,
+                    (user_id,)
+                )
+
+        await conn.commit()
+
+
+# ==== Личная статистика по играм ====
+
+async def get_user_game_counters(user_id: int) -> Optional[Dict[str, int]]:
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute(
+            """
+            SELECT games_played, games_won, points
+            FROM users
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            games_played, games_won, points = row
+            return {
+                "games_played": games_played or 0,
+                "games_won": games_won or 0,
+                "points": points or 0,
+            }
+
+
+# ==== История слотов для статистики по ролям ====
+
+async def save_game_slots_history(game_date: str, slots: Dict[int, dict]) -> None:
+    async with aiosqlite.connect(DB_NAME) as conn:
+        rows = []
+        for slot_num, slot in slots.items():
+            user_id = slot.get("user_id")
+            role = slot.get("role")
+            team = slot.get("team")
+            base_points = float(slot.get("base_points", 0) or 0)
+            bonus_points = float(slot.get("bonus_points", 0) or 0)
+            lh_points = float(slot.get("lh_points", 0) or 0)
+
+            rows.append(
+                (
+                    game_date,
+                    user_id,
+                    slot_num,
+                    role,
+                    team,
+                    base_points,
+                    bonus_points,
+                    lh_points,
+                )
+            )
+
+        if rows:
+            await conn.executemany(
+                """
+                INSERT INTO game_slots_history (
+                    game_date, user_id, slot_num, role, team,
+                    base_points, bonus_points, lh_points
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows
+            )
+            await conn.commit()
+
+
+async def get_user_roles_stats(user_id: int) -> List[Dict]:
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute(
+            """
+            SELECT
+                role,
+                COUNT(*) AS games,
+                SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END) AS wins,
+                SUM(base_points + bonus_points + lh_points) AS total_points,
+                SUM(bonus_points) AS total_bonus,
+                SUM(lh_points) AS total_lh,
+                SUM(
+                    CASE
+                        WHEN (bonus_points + lh_points) < 0
+                        THEN (bonus_points + lh_points)
+                        ELSE 0
+                    END
+                ) AS total_negative
+            FROM game_slots_history
+            WHERE user_id = ?
+            GROUP BY role
+            """,
+            (user_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    result: List[Dict] = []
+    for row in rows:
+        role, games, wins, total_points, total_bonus, total_lh, total_negative = row
+        games = games or 0
+        wins = wins or 0
+        total_points = total_points or 0.0
+        total_bonus = total_bonus or 0.0
+        total_lh = total_lh or 0.0
+        total_negative = total_negative or 0.0
+
+        if games > 0:
+            winrate = round(wins / games * 100, 1)
+            avg_points = round(total_points / games, 2)
+        else:
+            winrate = 0.0
+            avg_points = 0.0
+
+        result.append(
+            {
+                "role": role or "Не задана",
+                "games": games,
+                "wins": wins,
+                "winrate": winrate,
+                "avg_points": avg_points,
+                "total_points": total_points,
+                "total_bonus": total_bonus,
+                "total_lh": total_lh,
+                "total_negative": total_negative,
+            }
+        )
+
+    return result
+
+
+# ==== История игр и протоколов ====
+
+async def save_game_history(
+    game_date: str,
+    winner_label: str,
+    protocol_text: str,
+    game_number: Optional[int] = None,
+    global_game_number: Optional[int] = None,
+) -> int:
+    """
+    Сохраняет итоговый протокол игры в историю game_history.
+    Возвращает id вставленной игры.
+    """
+    async with aiosqlite.connect(DB_NAME) as conn:
+        cursor = await conn.execute(
+            """
+            INSERT INTO game_history (
+                game_date, winner_label, protocol_text, game_number, global_game_number
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (game_date, winner_label, protocol_text, game_number, global_game_number)
+        )
+        await conn.commit()
+        return cursor.lastrowid
+
+
+async def get_total_games_count() -> int:
+    """
+    Общее количество игр в истории (для глобальной нумерации).
+    """
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute("SELECT COUNT(*) FROM game_history") as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+
+async def get_games_by_date(game_date: str) -> List[Dict]:
+    """
+    Все игры за конкретную дату (вечер).
+    """
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute(
+            """
+            SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number
+            FROM game_history
+            WHERE game_date = ?
+            ORDER BY id ASC
+            """,
+            (game_date,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    result: List[Dict] = []
+    for row in rows:
+        gid, date_str, winner_label, protocol_text, game_number, global_number = row
+        result.append(
+            {
+                "id": gid,
+                "game_date": date_str,
+                "winner_label": winner_label,
+                "protocol_text": protocol_text,
+                "game_number": game_number,
+                "global_game_number": global_number,
+            }
+        )
+    return result
+
+
+async def get_last_games(limit: int = 10) -> List[Dict]:
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute(
+            """
+            SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number
+            FROM game_history
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    result: List[Dict] = []
+    for row in rows:
+        gid, date_str, winner_label, protocol_text, game_number, global_number = row
+        result.append(
+            {
+                "id": gid,
+                "game_date": date_str,
+                "winner_label": winner_label,
+                "protocol_text": protocol_text,
+                "game_number": game_number,
+                "global_game_number": global_number,
+            }
+        )
+    return result
+
+
+async def get_user_games(user_id: int, limit: int = 10) -> List[Dict]:
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute(
+            """
+            SELECT DISTINCT game_date
+            FROM game_slots_history
+            WHERE user_id = ?
+            ORDER BY game_date DESC
+            LIMIT ?
+            """,
+            (user_id, limit)
+        ) as cursor:
+            date_rows = await cursor.fetchall()
+
+        dates = [row[0] for row in date_rows if row[0] is not None]
+        if not dates:
+            return []
+
+        placeholders = ",".join("?" for _ in dates)
+        query = f"""
+            SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number
+            FROM game_history
+            WHERE game_date IN ({placeholders})
+            ORDER BY id DESC
+        """
+        async with conn.execute(query, dates) as cursor:
+            rows = await cursor.fetchall()
+
+    result: List[Dict] = []
+    for row in rows:
+        gid, date_str, winner_label, protocol_text, game_number, global_number = row
+        result.append(
+            {
+                "id": gid,
+                "game_date": date_str,
+                "winner_label": winner_label,
+                "protocol_text": protocol_text,
+                "game_number": game_number,
+                "global_game_number": global_number,
+            }
+        )
+    return result
+
+
+async def get_game_by_id(game_id: int) -> Optional[Dict]:
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute(
+            """
+            SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number
+            FROM game_history
+            WHERE id = ?
+            """,
+            (game_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    if not row:
+        return None
+
+    gid, date_str, winner_label, protocol_text, game_number, global_number = row
+    return {
+        "id": gid,
+        "game_date": date_str,
+        "winner_label": winner_label,
+        "protocol_text": protocol_text,
+        "game_number": game_number,
+        "global_game_number": global_number,
+    }

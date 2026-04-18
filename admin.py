@@ -26,31 +26,37 @@ def setup_admin_handlers(bot_instance: Bot):
 
 # ===== Вход в админ-панель =====
 
-@router.message(Command("admin"), F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
+@router.message(Command("admin"), F.chat.type == "private")
 async def admin_panel(message: types.Message):
+    # проверяем, что пользователь — админ
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+
     await message.answer(
         "🛠 Панель администратора.\nВыбери действие на клавиатуре ниже 👇",
-        reply_markup=keyboards.admin_menu()
+        reply_markup=keyboards.admin_menu(),
     )
 
 
 # Кнопка в ЛС «Перейти в админ-панель» (только для админа)
-@router.message(
-    F.text == "🛠 Перейти в админ-панель",
-    F.from_user.id == config.ADMIN_ID,
-    F.chat.type == "private"
-)
+@router.message(F.text == "🛠 Перейти в админ-панель", F.chat.type == "private")
 async def admin_panel_button(message: types.Message):
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+
     await admin_panel(message)
 
 
 # ===== Админ-меню (reply-клавиатура) =====
 
-@router.message(F.text == "📋 Игроки", F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
+@router.message(F.text == "📋 Игроки", F.chat.type == "private")
 async def admin_show_players_btn(message: types.Message):
     """
     Админский список игроков — в том же виде, как в анонсе.
     """
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+
     date_str = get_next_friday()
     text = await build_stats_text(date_str)
 
@@ -64,8 +70,11 @@ async def admin_show_players_btn(message: types.Message):
     )
 
 
-@router.message(F.text == "👥 Все пользователи", F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
+@router.message(F.text == "👥 Все пользователи", F.chat.type == "private")
 async def admin_all_users_btn(message: types.Message):
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+
     users = await database.get_all_users_stat()
     if not users:
         await message.answer("База пользователей пуста")
@@ -126,8 +135,11 @@ async def admin_all_users_btn(message: types.Message):
     )
 
 
-@router.message(F.text == "💸 Разослать счета", F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
+@router.message(F.text == "💸 Разослать счета", F.chat.type == "private")
 async def admin_send_bills_btn(message: types.Message):
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+
     assert bot is not None
     players = await database.get_all_players()
     if not players:
@@ -163,8 +175,11 @@ async def admin_send_bills_btn(message: types.Message):
     )
 
 
-@router.message(F.text == "❌ Отменить вечер", F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
+@router.message(F.text == "❌ Отменить вечер", F.chat.type == "private")
 async def admin_cancel_evening(message: types.Message):
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+
     assert bot is not None
 
     players = await database.get_all_players()
@@ -205,8 +220,11 @@ async def admin_cancel_evening(message: types.Message):
     )
 
 
-@router.message(F.text == "📣 Сделать анонс", F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
+@router.message(F.text == "📣 Сделать анонс", F.chat.type == "private")
 async def admin_announce_evening(message: types.Message):
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+
     assert bot is not None
 
     users = await database.get_all_user_ids()
@@ -275,8 +293,11 @@ async def admin_announce_evening(message: types.Message):
 
 # ===== Должники и редактирование суммы долга =====
 
-@router.message(F.text == "💰 Должники", F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
+@router.message(F.text == "💰 Должники", F.chat.type == "private")
 async def admin_debtors_btn(message: types.Message):
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+
     debtors = await database.get_debtors()
     if not debtors:
         await message.answer("Сейчас нет должников 🎉")
@@ -305,8 +326,12 @@ async def admin_debtors_btn(message: types.Message):
         )
 
 
-@router.callback_query(F.data.startswith("editdebt_"), F.from_user.id == config.ADMIN_ID)
+@router.callback_query(F.data.startswith("editdebt_"))
 async def admin_edit_debt_start(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in config.ADMIN_IDS:
+        await call.answer("Недостаточно прав.", show_alert=True)
+        return
+
     user_id_str = call.data.replace("editdebt_", "")
     try:
         user_id = int(user_id_str)
@@ -324,8 +349,11 @@ async def admin_edit_debt_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.message(DebtEditState.waiting_for_amount, F.from_user.id == config.ADMIN_ID)
+@router.message(DebtEditState.waiting_for_amount)
 async def admin_edit_debt_set_amount(message: types.Message, state: FSMContext):
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+
     data = await state.get_data()
     user_id = data.get("edit_debt_user_id")
     if not user_id:
@@ -354,8 +382,11 @@ async def admin_edit_debt_set_amount(message: types.Message, state: FSMContext):
 
 # ===== История вечеров =====
 
-@router.message(F.text == "📚 История вечеров", F.from_user.id == config.ADMIN_ID, F.chat.type == "private")
+@router.message(F.text == "📚 История вечеров", F.chat.type == "private")
 async def admin_history_menu(message: types.Message):
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+
     evenings = await database.get_evenings_list(limit=10)
     if not evenings:
         await message.answer("История вечеров пока пуста.")
@@ -368,8 +399,12 @@ async def admin_history_menu(message: types.Message):
     )
 
 
-@router.callback_query(F.data.startswith("hist_"), F.from_user.id == config.ADMIN_ID)
+@router.callback_query(F.data.startswith("hist_"))
 async def admin_history_detail(call: CallbackQuery):
+    if call.from_user.id not in config.ADMIN_IDS:
+        await call.answer("Недостаточно прав.", show_alert=True)
+        return
+
     date_str = call.data.replace("hist_", "")
     players = await database.get_evening_players(date_str)
     if not players:

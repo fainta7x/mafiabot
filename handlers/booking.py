@@ -36,7 +36,10 @@ async def build_stats_text(date: str) -> str:
         if not items:
             return f"{title}: —"
         # нумерация 1., 2., 3. и защита от пустого имени
-        lines = [f"{i}. {name if name and name != 'Неизвестный' else 'Игрок без профиля'}" for i, name in enumerate(items, start=1)]
+        lines = [
+            f"{i}. {name if name and name != 'Неизвестный' else 'Игрок без профиля'}"
+            for i, name in enumerate(items, start=1)
+        ]
         return f"{title}:\n" + "\n".join(lines)
 
     parts = [
@@ -58,13 +61,16 @@ async def book(m: Message):
 
 @router.callback_query(F.data.startswith("book_"))
 async def handle_book(call: CallbackQuery, bot: Bot):
-    # Вызываем твою функцию из database.py
+    # Обновляем пользователя в базе
     await database.add_or_update_user(
         user_id=call.from_user.id,
         username=call.from_user.username,
         full_name=call.from_user.full_name
     )
     date = get_next_friday()
+
+    # ВАЖНО: сохраняем дату текущей игры/вечера для истории игр/ролей
+    await database.set_current_game_date(date)
 
     if call.data in ("book_ontime", "book_late"):
         status_map = {"book_ontime": "Вовремя", "book_late": "Позже"}
@@ -94,7 +100,10 @@ async def handle_book(call: CallbackQuery, bot: Bot):
             stats_info = await database.get_stats_message(date)
             if stats_info:
                 chat_id, _ = stats_info
-                await bot.send_message(chat_id, "🔥 **Стол собран! О времени сбора напишем позже**")
+                await bot.send_message(
+                    chat_id,
+                    "🔥 **Стол собран! О времени сбора напишем позже**"
+                )
 
         # Если именно 11 человек придут ровно к 20:00
         if ontime_count == 11:
@@ -103,7 +112,10 @@ async def handle_book(call: CallbackQuery, bot: Bot):
             stats_info = await database.get_stats_message(date)
             if stats_info:
                 chat_id, _ = stats_info
-                await bot.send_message(chat_id, "✅ **Отлично! 11 человек подтвердили, что будут к 20:00.**")
+                await bot.send_message(
+                    chat_id,
+                    "✅ **Отлично! 11 человек подтвердили, что будут к 20:00.**"
+                )
 
         stats_info = await database.get_stats_message(date)
         if stats_info:
