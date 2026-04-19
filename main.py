@@ -10,6 +10,7 @@ from database import init_db
 from handlers import start_profile, payment, booking, debug, profile
 import admin
 from game import router as game_router
+from commands import setup_bot_commands  # ← ДОБАВИТЬ импорт
 
 # 1. Описываем класс логгера ВНЕ функции main, чтобы Python его видел
 class MyLoggerMiddleware(BaseMiddleware):
@@ -46,6 +47,10 @@ async def main():
     dp.include_router(booking.router)
     dp.include_router(admin.router)
     dp.include_router(debug.router)
+
+    # ========== ДОБАВИТЬ: Устанавливаем команды для кнопки меню ==========
+    await setup_bot_commands(bot)
+    logger.info("✅ Команды для меню установлены!")
 
     await init_db()
     logger.info("Бот успешно запущен!")

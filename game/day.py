@@ -1,41 +1,37 @@
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import keyboards
 import database
 from .state import GameCreateState
-from .text import _parse_slots_list, build_game_state, build_votes_summary, build_protocol_text
+from .text import build_game_state, build_protocol_text
+from .control import ensure_admin_pm, get_slots, save_slots
 
 router = Router()
 
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def _parse_bonus_value(raw: str) -> float | None:
-    """Парсит доп, ПР, МН с шагом 0.1. Поддерживает целые (2→0.2) и дроби (0.2, .2)."""
     s = raw.strip().replace(",", ".")
     if not s:
         return None
-
     if s.startswith(".") or s.startswith("-."):
         s = s.replace(".", "0.", 1)
-
     try:
         val = float(s)
     except ValueError:
         return None
-
-    if "." not in s:  # целое число → десятые
+    if "." not in s:
         try:
             val = int(s) / 10.0
         except ValueError:
             return None
-
     return round(val, 1)
 
 
 def _attach_night_kills_order(slots: dict, data: dict) -> None:
-    """Добавляет порядок ночных убийств в slots для протокола."""
     kills = data.get("night_kills_order") or []
     if kills:
         slots["_night_kills_order"] = kills
@@ -44,10 +40,8 @@ def _attach_night_kills_order(slots: dict, data: dict) -> None:
 
 
 async def _update_protocol(message: types.Message, state: FSMContext, slots: dict):
-    """Обновляет основное сообщение с протоколом игры."""
     data = await state.get_data()
     _attach_night_kills_order(slots, data)
-
     protocol = build_protocol_text(slots, updated=True)
     chat_id = data.get("protocol_chat_id")
     msg_id = data.get("protocol_message_id")
@@ -60,7 +54,6 @@ async def _update_protocol(message: types.Message, state: FSMContext, slots: dic
     game_date = await database.get_current_game_date() or "-"
     evening_num = await database.get_current_game_number() or 1
     global_num = await database.get_current_global_game_number() or 1
-
     full_text = f"📑 Протокол игры №{evening_num} ({game_date}): №{global_num} по общей истории — {winner}\n\n{protocol}"
 
     try:
@@ -71,241 +64,387 @@ async def _update_protocol(message: types.Message, state: FSMContext, slots: dic
         await message.answer(full_text, reply_markup=keyboards.game_admin_menu(), parse_mode=ParseMode.HTML)
 
 
-def _clear_nominations(slots: dict, candidates: list[int] = None):
-    """Сбрасывает статус номинации и голоса у указанных слотов (или у всех)."""
-    targets = candidates if candidates is not None else slots.keys()
-    for n in targets:
-        if n in slots:
-            slots[n]["nominated"] = False
-            slots[n]["votes"] = 0
+# ========== 1. ВЫСТАВЛЕНИЕ (ИНТЕРАКТИВНОЕ) ==========
+@router.message(GameCreateState.editing_slots, F.text == "Выставить")
+async def nominate_start(message: types.Message, state: FSMContext):
+    if not await ensure_admin_pm(message):
+        return
 
+    slots = await get_slots(message, state)
+    if not slots:
+        return
 
-# ========== 1. ФОЛЫ ==========
-@router.message(GameCreateState.editing_slots, F.text.func(lambda t: (t or "").strip().lower().startswith("фол")))
-async def ask_fouls(message: types.Message, state: FSMContext):
-    await state.set_state(GameCreateState.waiting_fouls)
+    alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
+    if not alive_slots:
+        await message.answer("❌ Нет живых игроков для выставления.", reply_markup=keyboards.game_admin_menu())
+        return
+
+    data = await state.get_data()
+    current_nominated = data.get("nominated_list", [])
+
+    await state.set_state(GameCreateState.nominate_select)
     await message.answer(
-        "Режим фолов.\nДОБАВИТЬ: `3 7`\nСНЯТЬ: `- 3 8`",
-        reply_markup=keyboards.game_admin_menu()
+        "⚖️ **Выставление игроков**\n\n"
+        "Нажимайте на игроков, чтобы добавить/убрать из списка.\n"
+        "После выбора нажмите **«Подтвердить»**.",
+        reply_markup=keyboards.nominate_select_kb(alive_slots, current_nominated)
     )
 
 
-@router.message(GameCreateState.waiting_fouls)
-async def apply_fouls(message: types.Message, state: FSMContext):
+@router.callback_query(GameCreateState.nominate_select, F.data.startswith("nominate_toggle_"))
+async def nominate_toggle(callback: types.CallbackQuery, state: FSMContext):
+    slot_num = int(callback.data.split("_")[2])
+
     data = await state.get_data()
     slots = data.get("slots") or {}
-    text = (message.text or "").strip()
+    nominated = data.get("nominated_list", [])
 
-    if not text:
-        await message.answer("Пустой ввод.", reply_markup=keyboards.game_admin_menu())
-        await state.set_state(GameCreateState.editing_slots)
+    if slot_num not in slots or not slots[slot_num].get("alive", True):
+        await callback.answer("Этого игрока уже нельзя выставить!", show_alert=True)
         return
 
-    mode, text = ("remove", text[1:].strip()) if text.startswith("-") else ("add", text)
-    nums = _parse_slots_list(text)
+    if slot_num in nominated:
+        nominated.remove(slot_num)
+        await callback.answer(f"❌ Игрок {slot_num} убран из списка")
+    else:
+        nominated.append(slot_num)
+        await callback.answer(f"✅ Игрок {slot_num} добавлен в список")
 
-    for n in nums:
-        if n in slots and slots[n].get("alive", True):
-            slots[n]["fouls"] = max(0, (slots[n].get("fouls", 0) + (1 if mode == "add" else -1)))
+    await state.update_data(nominated_list=nominated)
 
-    await state.update_data(slots=slots)
-    await message.answer(build_game_state(slots, alive_only=False), reply_markup=keyboards.game_admin_menu())
-    await state.set_state(GameCreateState.editing_slots)
-
-
-# ========== 2. ВЫСТАВЛЕНИЕ ==========
-@router.message(GameCreateState.editing_slots, F.text.func(lambda t: (t or "").strip().lower().startswith("выставить")))
-async def ask_nominees(message: types.Message, state: FSMContext):
-    await state.set_state(GameCreateState.waiting_nominees)
-    await message.answer("Введи номера выставленных слотов через пробел.\nПример: `1 3 7`",
-                         reply_markup=keyboards.game_admin_menu())
+    alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
+    await callback.message.edit_reply_markup(reply_markup=keyboards.nominate_select_kb(alive_slots, nominated))
 
 
-@router.message(GameCreateState.waiting_nominees)
-async def set_nominees(message: types.Message, state: FSMContext):
+@router.callback_query(GameCreateState.nominate_select, F.data == "nominate_confirm")
+async def nominate_confirm(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     slots = data.get("slots") or {}
-    nums = _parse_slots_list(message.text or "")
+    nominated = data.get("nominated_list", [])
 
-    if not nums:
-        await message.answer("Не удалось распознать номера.", reply_markup=keyboards.game_admin_menu())
-        await state.set_state(GameCreateState.editing_slots)
-        return
+    # Сначала очищаем все старые номинации
+    for slot in slots.values():
+        slot["nominated"] = False
+        slot["votes"] = 0
 
-    nominated = []
-    for n in nums:
-        if n in slots and slots[n].get("alive", True):
-            slots[n]["nominated"] = True
-            slots[n].setdefault("votes", 0)
-            nominated.append(n)
+    # Затем отмечаем выбранных
+    for slot_num in nominated:
+        if slot_num in slots and slots[slot_num].get("alive", True):
+            slots[slot_num]["nominated"] = True
 
     await state.update_data(slots=slots, nominated_list=nominated, vote_index=0)
-    await message.answer(build_game_state(slots, alive_only=False), reply_markup=keyboards.game_admin_menu())
+    await save_slots(state, slots)
+
+    # Отвечаем на callback ДО того, как редактировать сообщение
+    await callback.answer(f"✅ Выставлено {len(nominated)} игроков")
+
+    # Удаляем сообщение с клавиатурой выставления
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    # Отправляем новое сообщение с результатом
+    if nominated:
+        nominated_names = []
+        for slot_num in nominated:
+            name = slots[slot_num].get("nickname") or slots[slot_num].get("full_name") or f"Слот {slot_num}"
+            nominated_names.append(f"{slot_num}. {name}")
+        await callback.message.answer(
+            f"⚖️ **Выставленные игроки:**\n\n" + "\n".join(nominated_names),
+            reply_markup=keyboards.game_admin_menu()
+        )
+    else:
+        await callback.message.answer(
+            f"⚖️ **Выставление**\n\nНикто не выставлен.",
+            reply_markup=keyboards.game_admin_menu()
+        )
+
+    # Показываем состояние игры
+    await callback.message.answer(
+        build_game_state(slots, alive_only=False),
+        reply_markup=keyboards.game_admin_menu()
+    )
+
     await state.set_state(GameCreateState.editing_slots)
 
 
-# ========== 3. ГОЛОСОВАНИЕ ==========
-@router.message(GameCreateState.editing_slots, F.text.func(lambda t: (t or "").strip().lower().startswith("голоса")))
-async def start_votes(message: types.Message, state: FSMContext):
+@router.callback_query(GameCreateState.nominate_select, F.data == "nominate_cancel")
+async def nominate_cancel(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(GameCreateState.editing_slots)
     data = await state.get_data()
     slots = data.get("slots") or {}
-    in_split = data.get("in_split", False)
-    split_candidates = data.get("split_candidates") or []
+    await callback.message.delete()
+    await callback.message.answer(build_game_state(slots, alive_only=False), reply_markup=keyboards.game_admin_menu())
+    await callback.answer("Выставление отменено")
 
-    if in_split and split_candidates:
-        nominated = [s for s in split_candidates if s in slots and slots[s].get("alive", True)]
-        for s in slots:
-            slots[s]["nominated"] = s in nominated
-            slots[s]["votes"] = 0
-    else:
-        nominated = [s for s, info in slots.items() if info.get("nominated") and info.get("alive", True)]
+
+# ========== 2. ГОЛОСОВАНИЕ (ИНТЕРАКТИВНОЕ) ==========
+@router.message(GameCreateState.editing_slots, F.text == "Голоса")
+async def votes_start(message: types.Message, state: FSMContext):
+    if not await ensure_admin_pm(message):
+        return
+
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+
+    nominated = [s for s, info in slots.items() if info.get("nominated") and info.get("alive", True)]
 
     if not nominated:
-        await message.answer("Сначала нужно выставить живых игроков (кнопка «Выставить»).",
+        await message.answer("❌ Сначала нужно выставить игроков (кнопка «Выставить»).",
                              reply_markup=keyboards.game_admin_menu())
         return
 
-    await state.update_data(nominated_list=nominated, vote_index=0, slots=slots)
-    await state.set_state(GameCreateState.waiting_votes)
-    await message.answer(f"Голоса.\nСколько голосов за слот {nominated[0]}?", reply_markup=keyboards.game_admin_menu())
+    alive_count = sum(1 for info in slots.values() if info.get("alive", True))
+
+    nominated_names = []
+    for s in nominated:
+        name = slots[s].get("nickname") or slots[s].get("full_name") or f"Слот {s}"
+        nominated_names.append((s, name))
+
+    await state.update_data(
+        nominated_list=nominated,
+        nominated_names=nominated_names,
+        vote_index=0,
+        votes_received={},
+        remaining_voters=alive_count
+    )
+    await state.set_state(GameCreateState.vote_collect)
+
+    first_slot, first_name = nominated_names[0]
+    remaining_candidates = len(nominated)  # сколько всего кандидатов на голосовании
+
+    await message.answer(
+        f"🗳️ **Голосование**\n\n"
+        f"Всего живых игроков: {alive_count}\n\n"
+        f"Сколько голосов за игрока {first_slot} ({first_name})?\n\n"
+        f"🔴 — вариант может привести к попилу",
+        reply_markup=keyboards.vote_value_kb(first_slot, alive_count, alive_count, remaining_candidates)
+    )
 
 
-@router.message(GameCreateState.waiting_votes)
-async def collect_votes(message: types.Message, state: FSMContext):
+@router.callback_query(GameCreateState.vote_collect, F.data.startswith("vote_set_"))
+async def vote_set(callback: types.CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    slot_num = int(parts[2])
+    votes = int(parts[3])
+
+    data = await state.get_data()
+    nominated = data.get("nominated_list", [])
+    nominated_names = data.get("nominated_names", [])
+    idx = data.get("vote_index", 0)
+    votes_received = data.get("votes_received", {})
+    remaining_voters = data.get("remaining_voters", 0)
+
+    if votes > remaining_voters:
+        await callback.answer(f"❌ Не может быть больше {remaining_voters} голосов!", show_alert=True)
+        return
+
+    votes_received[slot_num] = votes
+    remaining_voters -= votes
+    idx += 1
+
+    # Обновляем состояние ДО того, как проверять условия
+    await state.update_data(votes_received=votes_received, vote_index=idx, remaining_voters=remaining_voters)
+
+    # Если это последний кандидат — автоматически засчитываем оставшиеся голоса
+    if idx == len(nominated):
+        # Все кандидаты проголосованы, подводим итоги
+        await process_vote_results(callback.message, state, votes_received, nominated)
+
+    elif idx == len(nominated) - 1:
+        # Предпоследний кандидат — после его голосов останутся голоса для последнего
+        last_slot, last_name = nominated_names[idx]
+        remaining_votes = remaining_voters
+        votes_received[last_slot] = remaining_votes
+
+        await callback.message.edit_text(
+            f"🗳️ **Голосование**\n\n"
+            f"Осталось голосующих: {remaining_voters}\n\n"
+            f"Автоматический подсчёт:\n"
+            f"За игрока {last_slot} ({last_name}) отдано {remaining_votes} голосов (все оставшиеся)."
+        )
+
+        await process_vote_results(callback.message, state, votes_received, nominated)
+
+    else:
+        # Есть ещё кандидаты
+        next_slot, next_name = nominated_names[idx]
+        remaining_candidates = len(nominated) - idx  # сколько кандидатов осталось (включая текущего)
+        await callback.message.edit_text(
+            f"🗳️ **Голосование**\n\n"
+            f"Осталось голосующих: {remaining_voters}\n\n"
+            f"Сколько голосов за игрока {next_slot} ({next_name})?\n\n"
+            f"🔴 — вариант может привести к попилу",
+            reply_markup=keyboards.vote_value_kb(next_slot, remaining_voters, remaining_voters, remaining_candidates)
+        )
+
+    await callback.answer()
+
+
+async def process_vote_results(message: types.Message, state: FSMContext, votes_received: dict, nominated: list):
     data = await state.get_data()
     slots = data.get("slots") or {}
-    nominated = data.get("nominated_list") or []
-    idx = data.get("vote_index", 0)
     in_split = data.get("in_split", False)
+    alive_count = sum(1 for info in slots.values() if info.get("alive", True))
 
-    if not nominated or idx >= len(nominated):
-        await state.set_state(GameCreateState.editing_slots)
-        await message.answer("Ошибка голосования. Начните заново кнопкой «Голоса».",
-                             reply_markup=keyboards.game_admin_menu())
-        return
+    def get_name(slot):
+        return slots[slot].get("nickname") or slots[slot].get("full_name") or f"Слот {slot}"
 
-    try:
-        votes = int((message.text or "").strip())
-    except ValueError:
-        await message.answer("Нужно ввести число голосов. Пример: 3", reply_markup=keyboards.game_admin_menu())
-        return
-
-    slot = nominated[idx]
-    if slot in slots:
-        slots[slot]["votes"] = max(0, votes)
-
-    idx += 1
-    await state.update_data(slots=slots, vote_index=idx)
-
-    if idx < len(nominated):
-        await message.answer(f"Сколько голосов за слот {nominated[idx]}?", reply_markup=keyboards.game_admin_menu())
-        return
-
-    # Подведение итогов
-    alive_nominated = [n for n in nominated if n in slots and slots[n].get("alive", True)]
-    max_votes = max((slots[n]["votes"] for n in alive_nominated), default=0)
-    leaders = [n for n in alive_nominated if slots[n]["votes"] == max_votes] if max_votes > 0 else []
+    max_votes = max(votes_received.values())
+    leaders = [s for s, v in votes_received.items() if v == max_votes]
 
     if len(leaders) == 1:
-        # Один лидер — заголосован
         leader = leaders[0]
         slots[leader].update({"alive": False, "status_reason": "Заголосован"})
-        _clear_nominations(slots, alive_nominated)
-        await state.update_data(slots=slots, nominated_list=[], vote_index=0, in_split=False, split_candidates=[])
 
-        await message.answer(
-            build_votes_summary(slots) + "\n\n" + build_game_state(slots, alive_only=False),
-            reply_markup=keyboards.game_admin_menu()
+        for s in nominated:
+            if s in slots:
+                slots[s]["nominated"] = False
+                slots[s]["votes"] = 0
+
+        await state.update_data(slots=slots, nominated_list=[], vote_index=0, in_split=False, split_candidates=[])
+        await save_slots(state, slots)
+
+        leader_name = get_name(leader)
+
+        results_text = "📊 **Распределение голосов:**\n"
+        for s in nominated:
+            votes = votes_received.get(s, 0)
+            name = get_name(s)
+            results_text += f"  • {s}. {name}: {votes} голосов\n"
+
+        await message.edit_text(
+            f"🗳️ **Результат голосования**\n\n"
+            f"{results_text}\n"
+            f"🏆 **Заголосован:** {leader_name} (слот {leader})\n"
+            f"Голосов: {max_votes} из {alive_count}\n\n"
+            f"{build_game_state(slots, alive_only=False)}"
         )
         await state.set_state(GameCreateState.editing_slots)
 
     elif len(leaders) > 1:
-        leaders_text = ", ".join(map(str, sorted(leaders)))
+        leaders_text = ", ".join(f"{s} ({get_name(s)})" for s in sorted(leaders))
 
         if not in_split:
-            # Первый попил
-            _clear_nominations(slots)
             for s in leaders:
-                slots[s]["nominated"] = True
-            await state.update_data(slots=slots, nominated_list=leaders, vote_index=0, in_split=True,
-                                    split_candidates=leaders)
-            await message.answer(
-                f"ПОПИЛ МЕЖДУ: {leaders_text}\nОправдательные речи, затем переголосование.\n\n{build_game_state(slots, alive_only=False)}",
-                reply_markup=keyboards.game_admin_menu()
+                if s in slots:
+                    slots[s]["nominated"] = True
+                    slots[s]["votes"] = 0
+            for s in nominated:
+                if s not in leaders and s in slots:
+                    slots[s]["nominated"] = False
+
+            new_nominated_names = [(s, get_name(s)) for s in leaders]
+
+            await state.update_data(
+                slots=slots,
+                nominated_list=leaders,
+                nominated_names=new_nominated_names,
+                vote_index=0,
+                in_split=True,
+                split_candidates=leaders,
+                votes_received={},
+                remaining_voters=alive_count
             )
+
+            first_leader = leaders[0]
+            first_name = get_name(first_leader)
+            remaining_candidates = len(leaders)  # сколько кандидатов осталось
+
+            await message.edit_text(
+                f"🗳️ **ПОПИЛ!**\n\n"
+                f"Голоса разделились между: {leaders_text}\n"
+                f"**Переголосование только между ними!**\n\n"
+                f"Сколько голосов за игрока {first_leader} ({first_name})?\n\n"
+                f"🔴 — вариант может привести к попилу",
+                reply_markup=keyboards.vote_value_kb(first_leader, alive_count, alive_count, remaining_candidates)
+            )
+            await state.set_state(GameCreateState.vote_collect)
         else:
-            # Второй попил
-            await state.update_data(slots=slots, split_candidates=leaders, nominated_list=leaders, vote_index=0,
-                                    in_split=False)
-            await message.answer(
-                f"Повторный попил: голоса снова поровну.\nИгроки: {leaders_text}\nЧто делаем?",
+            await state.update_data(slots=slots, split_candidates=leaders, nominated_list=leaders, in_split=False)
+            await message.edit_text(
+                f"🗳️ **ПОВТОРНЫЙ ПОПИЛ!**\n\n"
+                f"Голоса снова разделились между: {leaders_text}\n\n"
+                f"Что делаем?",
                 reply_markup=keyboards.split_decision_keyboard()
             )
-        await state.set_state(GameCreateState.editing_slots)
+            await state.set_state(GameCreateState.editing_slots)
 
     else:
-        # Никто не заголосован
-        _clear_nominations(slots, alive_nominated)
+        for s in nominated:
+            if s in slots:
+                slots[s]["nominated"] = False
+                slots[s]["votes"] = 0
         await state.update_data(slots=slots, nominated_list=[], vote_index=0, in_split=False, split_candidates=[])
-        await message.answer(
-            f"Никто не заголосован.\n\n{build_game_state(slots, alive_only=False)}",
-            reply_markup=keyboards.game_admin_menu()
+        await save_slots(state, slots)
+        await message.edit_text(
+            f"🗳️ **Результат**\n\n❌ Никто не заголосован.\n\n{build_game_state(slots, alive_only=False)}"
         )
         await state.set_state(GameCreateState.editing_slots)
 
 
-# ========== 4. РЕШЕНИЕ ПО ВТОРОМУ ПОПИЛУ ==========
-async def _handle_split_decision(callback: types.CallbackQuery, state: FSMContext, kill: bool):
+# ========== 3. РЕШЕНИЕ ПО ВТОРОМУ ПОПИЛУ ==========
+async def handle_split_decision(callback: types.CallbackQuery, state: FSMContext, kill: bool):
     data = await state.get_data()
     slots = data.get("slots") or {}
     candidates = data.get("split_candidates") or []
 
-    alive = [n for n in candidates if n in slots and slots[n].get("alive", True)]
-
     if kill:
-        for n in alive:
-            slots[n].update({"alive": False, "status_reason": "Заголосован"})
+        for n in candidates:
+            if n in slots and slots[n].get("alive", True):
+                slots[n].update({"alive": False, "status_reason": "Заголосован"})
+                slots[n]["nominated"] = False
+                slots[n]["votes"] = 0
+        await callback.message.edit_text(f"⚡ **Решение: Поднять всех**\n\nИгроки {', '.join(map(str, candidates))} заголосованы.")
+    else:
+        # Оставляем всех — снимаем номинации СО ВСЕХ игроков
+        for slot_num, info in slots.items():
+            info["nominated"] = False
+            info["votes"] = 0
+        await callback.message.edit_text(f"🔄 **Решение: Оставить всех**\n\nНикто не заголосован.")
 
-    _clear_nominations(slots, candidates)
-    await state.update_data(slots=slots, nominated_list=[], vote_index=0, in_split=False, split_candidates=[])
-
-    action = "заголосованы" if kill else "не заголосованы"
-    await callback.message.edit_text(
-        f"Решение: {'Поднять всех' if kill else 'Оставить всех'}.\nВсе игроки из попила {action}.")
+    # Очищаем глобальные списки номинаций
+    await state.update_data(
+        slots=slots,
+        nominated_list=[],
+        vote_index=0,
+        in_split=False,
+        split_candidates=[],
+        votes_received={},
+        remaining_voters=0
+    )
+    await save_slots(state, slots)
     await callback.message.answer(build_game_state(slots, alive_only=False), reply_markup=keyboards.game_admin_menu())
     await callback.answer()
 
 
 @router.callback_query(F.data == "split:kill_all")
 async def split_kill_all(callback: types.CallbackQuery, state: FSMContext):
-    await _handle_split_decision(callback, state, kill=True)
+    await handle_split_decision(callback, state, kill=True)
 
 
 @router.callback_query(F.data == "split:keep_all")
 async def split_keep_all(callback: types.CallbackQuery, state: FSMContext):
-    await _handle_split_decision(callback, state, kill=False)
+    await handle_split_decision(callback, state, kill=False)
 
 
-# ========== 5. ДОПЫ, ПР, МН ==========
+# ========== 4. ДОПЫ, ПР, МН ==========
 async def _apply_score(message: types.Message, state: FSMContext, cmd: str, field: str, is_cumulative: bool = True):
-    """Общая функция для доп/пр/мн."""
     parts = (message.text or "").strip().split()
     if len(parts) < 3:
-        await message.answer(f"Формат: `{cmd} <номер_слота> <значение>`.\nПример: `{cmd} 4 2` (0.2)",
-                             reply_markup=keyboards.game_admin_menu())
+        await message.answer(f"Формат: `{cmd} <номер_слота> <значение>`.\nПример: `{cmd} 4 2` (0.2)", reply_markup=keyboards.game_admin_menu())
         return
 
     try:
         slot_num = int(parts[1])
     except ValueError:
-        await message.answer(f"Номер слота должен быть числом. Пример: `{cmd} 4 2`",
-                             reply_markup=keyboards.game_admin_menu())
+        await message.answer(f"Номер слота должен быть числом. Пример: `{cmd} 4 2`", reply_markup=keyboards.game_admin_menu())
         return
 
     val = _parse_bonus_value(parts[2])
     if val is None:
-        await message.answer(f"Не удалось разобрать значение. Примеры: `2`, `0.2`, `-0.3`",
-                             reply_markup=keyboards.game_admin_menu())
+        await message.answer(f"Не удалось разобрать значение. Примеры: `2`, `0.2`, `-0.3`", reply_markup=keyboards.game_admin_menu())
         return
 
     data = await state.get_data()
@@ -320,8 +459,7 @@ async def _apply_score(message: types.Message, state: FSMContext, cmd: str, fiel
 
     await state.update_data(slots=slots)
     sign = "+" if val >= 0 else ""
-    await message.answer(f"{cmd.upper()}: слот {slot_num} ({sign}{val} очков). Протокол обновлён 👇",
-                         reply_markup=keyboards.game_admin_menu())
+    await message.answer(f"{cmd.upper()}: слот {slot_num} ({sign}{val} очков). Протокол обновлён 👇", reply_markup=keyboards.game_admin_menu())
     await _update_protocol(message, state, slots)
 
 

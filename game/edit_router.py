@@ -1,51 +1,38 @@
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+import config
+import database
 import keyboards
 from .state import GameCreateState
-from .text import build_game_state, build_slots_text
+from .text import build_game_state
 
 router = Router()
 
 
-# ========== КЛАВИАТУРЫ ДЛЯ РЕДАКТИРОВАНИЯ ==========
-def get_role_keyboard(current_role: str = None) -> InlineKeyboardMarkup:
-    """Клавиатура выбора роли."""
-    buttons = [
-        [InlineKeyboardButton(text="👤 Мирный", callback_data="role_Мирный")],
-        [InlineKeyboardButton(text="🕵️ Шериф", callback_data="role_Шериф")],
-        [InlineKeyboardButton(text="🔪 Мафия", callback_data="role_Мафия")],
-        [InlineKeyboardButton(text="👑 Дон", callback_data="role_Дон")],
-        [InlineKeyboardButton(text="❓ Не задана", callback_data="role_Не задана")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="edit_back_to_menu")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+# ========== КЛАВИАТУРЫ ==========
+def get_slot_selection_kb(slots: dict) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for slot_num, info in slots.items():
+        name = info.get("nickname") or info.get("full_name") or f"Слот {slot_num}"
+        if len(name) > 15:
+            name = name[:12] + "..."
+        role = info.get("role", "?")
+        if len(role) > 8:
+            role = role[:6] + "."
+        status_icon = "✅" if info.get("alive", True) else "💀"
+        builder.button(
+            text=f"{status_icon} {slot_num}. {name} [{role}]",
+            callback_data=f"edit_slot_{slot_num}"
+        )
+    builder.button(text="❌ Закрыть", callback_data="edit_close")
+    builder.adjust(1)
+    return builder.as_markup()
 
 
-def get_team_keyboard(current_team: str = None) -> InlineKeyboardMarkup:
-    """Клавиатура выбора команды."""
-    buttons = [
-        [InlineKeyboardButton(text="🔴 Красные", callback_data="team_Красные")],
-        [InlineKeyboardButton(text="⚫ Чёрные", callback_data="team_Чёрные")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="edit_back_to_menu")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def get_status_keyboard(current_status: str = None) -> InlineKeyboardMarkup:
-    """Клавиатура выбора статуса."""
-    buttons = [
-        [InlineKeyboardButton(text="✅ Жив", callback_data="status_alive")],
-        [InlineKeyboardButton(text="💀 Убит ночью", callback_data="status_killed")],
-        [InlineKeyboardButton(text="⚖️ Заголосован", callback_data="status_voted")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="edit_back_to_menu")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def get_edit_menu_keyboard(slot_num: int, slot_data: dict) -> InlineKeyboardMarkup:
-    """Главное меню редактирования слота."""
+def get_edit_menu_kb(slot_num: int, slot_data: dict) -> InlineKeyboardMarkup:
     role = slot_data.get("role", "Не задана")
     team = slot_data.get("team", "—")
     alive = slot_data.get("alive", True)
@@ -57,110 +44,139 @@ def get_edit_menu_keyboard(slot_num: int, slot_data: dict) -> InlineKeyboardMark
 
     status_text = "✅ Жив" if alive else f"💀 {status_reason}"
 
-    buttons = [
-        [InlineKeyboardButton(text=f"👤 Роль: {role}", callback_data="edit_role")],
-        [InlineKeyboardButton(text=f"🏳️ Команда: {team}", callback_data="edit_team")],
-        [InlineKeyboardButton(text=f"📊 Статус: {status_text}", callback_data="edit_status")],
-        [InlineKeyboardButton(text=f"👑 ПУ: {'✅' if pu_mark else '❌'}", callback_data="edit_pu")],
-        [InlineKeyboardButton(text=f"📝 ЛХ: {len(lh)} чел.", callback_data="edit_lh")],
-        [InlineKeyboardButton(text=f"📋 ПР: {'есть' if protocol else 'нет'}", callback_data="edit_protocol")],
-        [InlineKeyboardButton(text=f"💬 МН: {'есть' if opinion else 'нет'}", callback_data="edit_opinion")],
-        [InlineKeyboardButton(text="🔄 Очистить всё", callback_data="edit_clear_all")],
-        [InlineKeyboardButton(text="❌ Закрыть", callback_data="edit_close")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    role_display = role if len(role) <= 10 else role[:8] + ".."
+    team_display = team if team and len(team) <= 8 else team[:6] + ".." if team else "—"
+
+    builder = InlineKeyboardBuilder()
+
+    builder.button(text=f"🎭 Роль: {role_display}", callback_data="edit_role")
+    builder.button(text=f"🏳️ Команда: {team_display}", callback_data="edit_team")
+    builder.button(text=f"📊 Статус: {status_text}", callback_data="edit_status")
+    pu_text = "👑 ПУ: ✅" if pu_mark else "👑 ПУ: ❌"
+    builder.button(text=pu_text, callback_data="edit_pu")
+    lh_text = f"📝 ЛХ: {len(lh)}" if lh else "📝 ЛХ: нет"
+    protocol_text = "📋 ПР: есть" if protocol else "📋 ПР: нет"
+    builder.button(text=lh_text, callback_data="edit_lh")
+    builder.button(text=protocol_text, callback_data="edit_protocol")
+    opinion_text = "💬 МН: есть" if opinion else "💬 МН: нет"
+    builder.button(text=opinion_text, callback_data="edit_opinion")
+    builder.button(text="🔄 Очистить всё", callback_data="edit_clear_all")
+    builder.button(text="◀️ Назад", callback_data="edit_back_to_slots")
+    builder.button(text="❌ Закрыть", callback_data="edit_close")
+
+    builder.adjust(2, 2, 2, 2, 1, 1)
+    return builder.as_markup()
 
 
-def get_slot_selection_keyboard(slots: dict) -> InlineKeyboardMarkup:
-    """Клавиатура выбора слота для редактирования."""
-    buttons = []
-    row = []
-    for slot_num in sorted(slots.keys()):
-        info = slots[slot_num]
-        name = info.get("nickname") or info.get("full_name") or f"Слот {slot_num}"
-        if len(name) > 15:
-            name = name[:12] + "..."
-        status = "✅" if info.get("alive", True) else "💀"
-        row.append(InlineKeyboardButton(text=f"{status}{slot_num}.{name}", callback_data=f"edit_slot_{slot_num}"))
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="edit_close")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+def get_role_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="👤 Мирный", callback_data="role_set_Мирный")
+    builder.button(text="🕵️ Шериф", callback_data="role_set_Шериф")
+    builder.button(text="🔪 Мафия", callback_data="role_set_Мафия")
+    builder.button(text="👑 Дон", callback_data="role_set_Дон")
+    builder.button(text="❓ Не задана", callback_data="role_set_Не задана")
+    builder.button(text="◀️ Назад", callback_data="edit_back_to_menu")
+    builder.adjust(2, 2, 1, 1)
+    return builder.as_markup()
 
 
-# ========== ОСНОВНЫЕ ХЕНДЛЕРЫ ==========
+def get_team_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔴 Красные", callback_data="team_set_Красные")
+    builder.button(text="⚫ Чёрные", callback_data="team_set_Чёрные")
+    builder.button(text="◀️ Назад", callback_data="edit_back_to_menu")
+    builder.adjust(1)
+    return builder.as_markup()
 
+
+def get_status_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Жив", callback_data="status_set_alive")
+    builder.button(text="💀 Убит ночью", callback_data="status_set_killed")
+    builder.button(text="⚖️ Заголосован", callback_data="status_set_voted")
+    builder.button(text="◀️ Назад", callback_data="edit_back_to_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_pu_kb(slot_num: int, slot_name: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"✅ Да, назначить {slot_name} ПУ", callback_data="pu_confirm_yes")
+    builder.button(text="❌ Нет, отмена", callback_data="edit_back_to_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_clear_kb(slot_num: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⚠️ ДА, ОЧИСТИТЬ ВСЁ", callback_data="clear_confirm_yes")
+    builder.button(text="❌ Отмена", callback_data="edit_back_to_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+# ========== ХЕНДЛЕРЫ ==========
 @router.message(GameCreateState.editing_slots, F.text == "✏️ Редактировать")
 async def enter_edit_mode(message: types.Message, state: FSMContext):
-    """Вход в режим редактирования игры."""
-    if not await ensure_admin_pm(message):
+    if message.from_user.id not in config.ADMIN_IDS:
         return
 
     data = await state.get_data()
     slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
 
     if not slots:
-        await message.answer("Нет активной игры для редактирования.", reply_markup=keyboards.game_admin_menu())
+        await message.answer("Нет активной игры.")
         return
 
+    await state.update_data(slots=slots)
     await state.set_state(GameCreateState.edit_mode_select_slot)
     await message.answer(
-        "✏️ **Режим редактирования игры**\n\nВыберите слот для редактирования:",
-        reply_markup=get_slot_selection_keyboard(slots)
+        "✏️ **Режим редактирования**\n\nВыберите слот:",
+        reply_markup=get_slot_selection_kb(slots)
     )
 
 
 @router.callback_query(GameCreateState.edit_mode_select_slot, F.data.startswith("edit_slot_"))
 async def edit_select_slot(callback: types.CallbackQuery, state: FSMContext):
-    """Выбор слота для редактирования."""
     slot_num = int(callback.data.split("_")[-1])
 
     data = await state.get_data()
     slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
 
     if slot_num not in slots:
-        await callback.answer("Слот не найден!", show_alert=True)
+        await callback.answer("Слот не найден!")
         return
 
     await state.update_data(edit_slot=slot_num)
     await state.set_state(GameCreateState.edit_mode_menu)
 
-    slot_data = slots[slot_num]
-    name = slot_data.get("nickname") or slot_data.get("full_name") or f"Слот {slot_num}"
-
     await callback.message.edit_text(
-        f"✏️ **Редактирование слота {slot_num}**\n👤 Игрок: {name}\n\nВыберите параметр для изменения:",
-        reply_markup=get_edit_menu_keyboard(slot_num, slot_data)
+        f"✏️ **Редактирование слота {slot_num}**\n👤 {slots[slot_num].get('nickname', 'Без имени')}\n\nВыберите действие:",
+        reply_markup=get_edit_menu_kb(slot_num, slots[slot_num])
     )
     await callback.answer()
 
 
 @router.callback_query(GameCreateState.edit_mode_menu, F.data == "edit_role")
 async def edit_role(callback: types.CallbackQuery, state: FSMContext):
-    """Редактирование роли."""
     await state.set_state(GameCreateState.edit_mode_role)
-    await callback.message.edit_text(
-        "🎭 **Выберите роль:**",
-        reply_markup=get_role_keyboard()
-    )
+    await callback.message.edit_text("🎭 **Выберите роль:**", reply_markup=get_role_kb())
     await callback.answer()
 
 
-@router.callback_query(GameCreateState.edit_mode_role, F.data.startswith("role_"))
+@router.callback_query(F.data.startswith("role_set_"))
 async def set_role(callback: types.CallbackQuery, state: FSMContext):
-    """Установка роли."""
-    role = callback.data.split("_")[1]
+    role = callback.data.split("_")[-1]
 
     data = await state.get_data()
     slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
     slot_num = data.get("edit_slot")
 
     if slot_num and slot_num in slots:
         slots[slot_num]["role"] = role
-        # Автоматически ставим команду
         if role in ["Мирный", "Шериф"]:
             slots[slot_num]["team"] = "Красные"
         elif role in ["Мафия", "Дон"]:
@@ -172,66 +188,56 @@ async def set_role(callback: types.CallbackQuery, state: FSMContext):
         await database.save_current_game_slots(slots)
 
     await state.set_state(GameCreateState.edit_mode_menu)
-    slot_data = slots.get(slot_num, {})
     await callback.message.edit_text(
-        f"✏️ **Редактирование слота {slot_num}**\n\nВыберите параметр для изменения:",
-        reply_markup=get_edit_menu_keyboard(slot_num, slot_data)
+        f"✏️ **Редактирование слота {slot_num}**\n\n✅ Роль изменена на {role}\n\nВыберите действие:",
+        reply_markup=get_edit_menu_kb(slot_num, slots.get(slot_num, {}))
     )
     await callback.answer(f"Роль изменена на {role}")
 
 
 @router.callback_query(GameCreateState.edit_mode_menu, F.data == "edit_team")
 async def edit_team(callback: types.CallbackQuery, state: FSMContext):
-    """Редактирование команды."""
     await state.set_state(GameCreateState.edit_mode_menu)
-    await callback.message.edit_text(
-        "🏳️ **Выберите команду:**",
-        reply_markup=get_team_keyboard()
-    )
+    await callback.message.edit_text("🏳️ **Выберите команду:**", reply_markup=get_team_kb())
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("team_"))
+@router.callback_query(F.data.startswith("team_set_"))
 async def set_team(callback: types.CallbackQuery, state: FSMContext):
-    """Установка команды."""
-    team = callback.data.split("_")[1]
+    team = callback.data.split("_")[-1]
 
     data = await state.get_data()
     slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
     slot_num = data.get("edit_slot")
 
     if slot_num and slot_num in slots:
         slots[slot_num]["team"] = team
-
-    await state.update_data(slots=slots)
-    await database.save_current_game_slots(slots)
+        await state.update_data(slots=slots)
+        await database.save_current_game_slots(slots)
 
     await state.set_state(GameCreateState.edit_mode_menu)
-    slot_data = slots.get(slot_num, {})
     await callback.message.edit_text(
-        f"✏️ **Редактирование слота {slot_num}**\n\nВыберите параметр для изменения:",
-        reply_markup=get_edit_menu_keyboard(slot_num, slot_data)
+        f"✏️ **Редактирование слота {slot_num}**\n\n✅ Команда изменена на {team}\n\nВыберите действие:",
+        reply_markup=get_edit_menu_kb(slot_num, slots.get(slot_num, {}))
     )
     await callback.answer(f"Команда изменена на {team}")
 
 
 @router.callback_query(GameCreateState.edit_mode_menu, F.data == "edit_status")
 async def edit_status(callback: types.CallbackQuery, state: FSMContext):
-    """Редактирование статуса (жив/убит)."""
-    await callback.message.edit_text(
-        "📊 **Выберите статус:**",
-        reply_markup=get_status_keyboard()
-    )
+    await state.set_state(GameCreateState.edit_mode_status)
+    await callback.message.edit_text("📊 **Выберите статус:**", reply_markup=get_status_kb())
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("status_"))
+@router.callback_query(F.data.startswith("status_set_"))
 async def set_status(callback: types.CallbackQuery, state: FSMContext):
-    """Установка статуса."""
-    status_type = callback.data.split("_")[1]
+    status_type = callback.data.split("_")[-1]
 
     data = await state.get_data()
     slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
     slot_num = data.get("edit_slot")
 
     if slot_num and slot_num in slots:
@@ -245,51 +251,61 @@ async def set_status(callback: types.CallbackQuery, state: FSMContext):
             slots[slot_num]["alive"] = False
             slots[slot_num]["status_reason"] = "Заголосован"
 
-    await state.update_data(slots=slots)
-    await database.save_current_game_slots(slots)
+        await state.update_data(slots=slots)
+        await database.save_current_game_slots(slots)
 
     await state.set_state(GameCreateState.edit_mode_menu)
-    slot_data = slots.get(slot_num, {})
     await callback.message.edit_text(
-        f"✏️ **Редактирование слота {slot_num}**\n\nВыберите параметр для изменения:",
-        reply_markup=get_edit_menu_keyboard(slot_num, slot_data)
+        f"✏️ **Редактирование слота {slot_num}**\n\n✅ Статус изменён\n\nВыберите действие:",
+        reply_markup=get_edit_menu_kb(slot_num, slots.get(slot_num, {}))
     )
-    await callback.answer(f"Статус изменён")
+    await callback.answer("Статус изменён")
 
 
 @router.callback_query(GameCreateState.edit_mode_menu, F.data == "edit_pu")
 async def edit_pu(callback: types.CallbackQuery, state: FSMContext):
-    """Переключение ПУ."""
+    data = await state.get_data()
+    slot_num = data.get("edit_slot")
+    slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
+    name = slots.get(slot_num, {}).get("nickname", f"Слот {slot_num}")
+
+    await state.set_state(GameCreateState.edit_mode_pu)
+    await callback.message.edit_text(
+        f"👑 **Назначение ПУ**\n\nНазначить {name} ПУ?\n⚠️ ПУ может быть только один!",
+        reply_markup=get_pu_kb(slot_num, name)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "pu_confirm_yes")
+async def pu_confirm(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
     slot_num = data.get("edit_slot")
 
     if slot_num and slot_num in slots:
-        # Снимаем ПУ со всех
         for s in slots.values():
             s["pu_mark"] = False
-        # Ставим ПУ на выбранный слот
-        slots[slot_num]["pu_mark"] = not slots[slot_num].get("pu_mark", False)
+        slots[slot_num]["pu_mark"] = True
+        await state.update_data(slots=slots)
+        await database.save_current_game_slots(slots)
 
-    await state.update_data(slots=slots)
-    await database.save_current_game_slots(slots)
-
-    slot_data = slots.get(slot_num, {})
+    await state.set_state(GameCreateState.edit_mode_menu)
     await callback.message.edit_text(
-        f"✏️ **Редактирование слота {slot_num}**\n\nВыберите параметр для изменения:",
-        reply_markup=get_edit_menu_keyboard(slot_num, slot_data)
+        f"✏️ **Редактирование слота {slot_num}**\n\n✅ ПУ назначен\n\nВыберите действие:",
+        reply_markup=get_edit_menu_kb(slot_num, slots.get(slot_num, {}))
     )
-    await callback.answer(f"ПУ: {'включён' if slots[slot_num].get('pu_mark') else 'выключен'}")
+    await callback.answer("ПУ назначен")
 
 
 @router.callback_query(GameCreateState.edit_mode_menu, F.data == "edit_lh")
 async def edit_lh(callback: types.CallbackQuery, state: FSMContext):
-    """Редактирование ЛХ (подозреваемых)."""
     await state.set_state(GameCreateState.edit_mode_lh)
     await callback.message.edit_text(
         "📝 **Введите номера подозреваемых через пробел**\n\n"
-        "Пример: `2 5 7`\n"
-        "Или `0` для очистки",
+        "Пример: `2 5 7`\nИли `0` для очистки",
         reply_markup=None
     )
     await callback.answer()
@@ -297,14 +313,14 @@ async def edit_lh(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(GameCreateState.edit_mode_lh)
 async def set_lh(message: types.Message, state: FSMContext):
-    """Установка ЛХ."""
-    if not await ensure_admin_pm(message):
+    if message.from_user.id not in config.ADMIN_IDS:
         return
 
     text = message.text.strip()
 
     data = await state.get_data()
     slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
     slot_num = data.get("edit_slot")
 
     if text == "0":
@@ -314,26 +330,22 @@ async def set_lh(message: types.Message, state: FSMContext):
 
     if slot_num and slot_num in slots:
         slots[slot_num]["night_suspects"] = list(dict.fromkeys(suspects))
-
-    await state.update_data(slots=slots)
-    await database.save_current_game_slots(slots)
+        await state.update_data(slots=slots)
+        await database.save_current_game_slots(slots)
 
     await state.set_state(GameCreateState.edit_mode_menu)
-    slot_data = slots.get(slot_num, {})
     await message.answer(
-        f"✏️ **Редактирование слота {slot_num}**\n\nВыберите параметр для изменения:",
-        reply_markup=get_edit_menu_keyboard(slot_num, slot_data)
+        f"✏️ **Редактирование слота {slot_num}**\n\n✅ ЛХ установлены\n\nВыберите действие:",
+        reply_markup=get_edit_menu_kb(slot_num, slots.get(slot_num, {}))
     )
 
 
 @router.callback_query(GameCreateState.edit_mode_menu, F.data == "edit_protocol")
 async def edit_protocol(callback: types.CallbackQuery, state: FSMContext):
-    """Редактирование ПР (протокола)."""
     await state.set_state(GameCreateState.edit_mode_protocol)
     await callback.message.edit_text(
         "📋 **Введите текст протокола (ПР)**\n\n"
-        "Пример: `3 6 7 красные, 1 4 чёрные`\n"
-        "Или `нет` для очистки",
+        "Пример: `3 6 7 красные, 1 4 чёрные`\nИли `нет` для очистки",
         reply_markup=None
     )
     await callback.answer()
@@ -341,41 +353,36 @@ async def edit_protocol(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(GameCreateState.edit_mode_protocol)
 async def set_protocol(message: types.Message, state: FSMContext):
-    """Установка ПР."""
-    if not await ensure_admin_pm(message):
+    if message.from_user.id not in config.ADMIN_IDS:
         return
 
     text = message.text.strip()
+    if text.lower() in ["нет", "no", "0"]:
+        text = ""
 
     data = await state.get_data()
     slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
     slot_num = data.get("edit_slot")
 
     if slot_num and slot_num in slots:
-        if text.lower() in ["нет", "no", "0"]:
-            slots[slot_num]["will_protocol_raw"] = ""
-        else:
-            slots[slot_num]["will_protocol_raw"] = text
-
-    await state.update_data(slots=slots)
-    await database.save_current_game_slots(slots)
+        slots[slot_num]["will_protocol_raw"] = text
+        await state.update_data(slots=slots)
+        await database.save_current_game_slots(slots)
 
     await state.set_state(GameCreateState.edit_mode_menu)
-    slot_data = slots.get(slot_num, {})
     await message.answer(
-        f"✏️ **Редактирование слота {slot_num}**\n\nВыберите параметр для изменения:",
-        reply_markup=get_edit_menu_keyboard(slot_num, slot_data)
+        f"✏️ **Редактирование слота {slot_num}**\n\n✅ Протокол сохранён\n\nВыберите действие:",
+        reply_markup=get_edit_menu_kb(slot_num, slots.get(slot_num, {}))
     )
 
 
 @router.callback_query(GameCreateState.edit_mode_menu, F.data == "edit_opinion")
 async def edit_opinion(callback: types.CallbackQuery, state: FSMContext):
-    """Редактирование МН (мнения)."""
     await state.set_state(GameCreateState.edit_mode_opinion)
     await callback.message.edit_text(
         "💬 **Введите текст мнения (МН)**\n\n"
-        "Пример: `В 12 нет двух мирных`\n"
-        "Или `нет` для очистки",
+        "Пример: `В 12 нет двух мирных`\nИли `нет` для очистки",
         reply_markup=None
     )
     await callback.answer()
@@ -383,86 +390,96 @@ async def edit_opinion(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(GameCreateState.edit_mode_opinion)
 async def set_opinion(message: types.Message, state: FSMContext):
-    """Установка МН."""
-    if not await ensure_admin_pm(message):
+    if message.from_user.id not in config.ADMIN_IDS:
         return
 
     text = message.text.strip()
+    if text.lower() in ["нет", "no", "0"]:
+        text = ""
 
     data = await state.get_data()
     slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
     slot_num = data.get("edit_slot")
 
     if slot_num and slot_num in slots:
-        if text.lower() in ["нет", "no", "0"]:
-            slots[slot_num]["will_opinion"] = ""
-        else:
-            slots[slot_num]["will_opinion"] = text
-
-    await state.update_data(slots=slots)
-    await database.save_current_game_slots(slots)
+        slots[slot_num]["will_opinion"] = text
+        await state.update_data(slots=slots)
+        await database.save_current_game_slots(slots)
 
     await state.set_state(GameCreateState.edit_mode_menu)
-    slot_data = slots.get(slot_num, {})
     await message.answer(
-        f"✏️ **Редактирование слота {slot_num}**\n\nВыберите параметр для изменения:",
-        reply_markup=get_edit_menu_keyboard(slot_num, slot_data)
+        f"✏️ **Редактирование слота {slot_num}**\n\n✅ Мнение сохранено\n\nВыберите действие:",
+        reply_markup=get_edit_menu_kb(slot_num, slots.get(slot_num, {}))
     )
 
 
 @router.callback_query(GameCreateState.edit_mode_menu, F.data == "edit_clear_all")
 async def edit_clear_all(callback: types.CallbackQuery, state: FSMContext):
-    """Очистка всех данных слота (кроме ника и слота)."""
+    slot_num = callback.data.split("_")[-1]
+    await state.set_state(GameCreateState.edit_mode_confirm_clear)
+    await callback.message.edit_text(
+        f"⚠️ **Очистка слота {slot_num}**\n\nВы уверены? Это действие НЕЛЬЗЯ отменить!",
+        reply_markup=get_clear_kb(int(slot_num))
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "clear_confirm_yes")
+async def clear_confirm(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
     slot_num = data.get("edit_slot")
 
     if slot_num and slot_num in slots:
-        # Сохраняем ник и базовую информацию
         nickname = slots[slot_num].get("nickname")
-        full_name = slots[slot_num].get("full_name")
-        user_id = slots[slot_num].get("user_id")
-        username = slots[slot_num].get("username")
+        slots[slot_num] = {
+            "user_id": None, "full_name": None, "nickname": nickname, "username": None,
+            "status": "Добавлен вручную", "fouls": 0, "alive": True, "status_reason": "Жив",
+            "nominated": False, "votes": 0, "night_suspects": [], "role": "Не задана",
+            "team": None, "base_points": 0, "bonus_points": 0, "lh_points": 0.0, "pu_mark": False,
+            "will_protocol_raw": "", "will_opinion": ""
+        }
+        await state.update_data(slots=slots)
+        await database.save_current_game_slots(slots)
 
-        # Очищаем всё
-        slots[slot_num] = create_empty_slot(nickname or full_name or f"Слот {slot_num}")
-        slots[slot_num].update({
-            "user_id": user_id,
-            "full_name": full_name,
-            "username": username,
-            "nickname": nickname,
-        })
-
-    await state.update_data(slots=slots)
-    await database.save_current_game_slots(slots)
-
-    slot_data = slots.get(slot_num, {})
+    await state.set_state(GameCreateState.edit_mode_menu)
     await callback.message.edit_text(
-        f"✏️ **Редактирование слота {slot_num}**\n\n✅ Все данные очищены!\n\nВыберите параметр для изменения:",
-        reply_markup=get_edit_menu_keyboard(slot_num, slot_data)
+        f"✏️ **Редактирование слота {slot_num}**\n\n✅ Все данные очищены!\n\nВыберите действие:",
+        reply_markup=get_edit_menu_kb(slot_num, slots.get(slot_num, {}))
     )
     await callback.answer("Данные очищены")
 
 
+@router.callback_query(F.data == "edit_back_to_slots")
+async def back_to_slots(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
+
+    await state.set_state(GameCreateState.edit_mode_select_slot)
+    await callback.message.edit_text("✏️ **Выберите слот:**", reply_markup=get_slot_selection_kb(slots))
+    await callback.answer()
+
+
 @router.callback_query(F.data == "edit_back_to_menu")
-async def edit_back_to_menu(callback: types.CallbackQuery, state: FSMContext):
-    """Возврат в главное меню редактирования."""
+async def back_to_menu(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     slot_num = data.get("edit_slot")
     slots = data.get("slots") or {}
+    slots = {int(k): v for k, v in slots.items()}
 
     await state.set_state(GameCreateState.edit_mode_menu)
-    slot_data = slots.get(slot_num, {})
     await callback.message.edit_text(
-        f"✏️ **Редактирование слота {slot_num}**\n\nВыберите параметр для изменения:",
-        reply_markup=get_edit_menu_keyboard(slot_num, slot_data)
+        f"✏️ **Редактирование слота {slot_num}**\n\nВыберите действие:",
+        reply_markup=get_edit_menu_kb(slot_num, slots.get(slot_num, {}))
     )
     await callback.answer()
 
 
 @router.callback_query(F.data == "edit_close")
 async def edit_close(callback: types.CallbackQuery, state: FSMContext):
-    """Закрытие режима редактирования."""
     await state.set_state(GameCreateState.editing_slots)
 
     data = await state.get_data()
@@ -474,17 +491,3 @@ async def edit_close(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=keyboards.game_admin_menu()
     )
     await callback.answer()
-
-
-# Добавим вспомогательную функцию, если её нет
-async def ensure_admin_pm(message: types.Message) -> bool:
-    from .slots_router import is_admin_pm
-    if not is_admin_pm(message):
-        await message.answer("⛔ Только для администраторов.")
-        return False
-    return True
-
-
-def create_empty_slot(nickname: str) -> dict:
-    from .slots_router import create_empty_slot
-    return create_empty_slot(nickname)

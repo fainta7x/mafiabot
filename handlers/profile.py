@@ -9,7 +9,7 @@ from database import (
     get_last_games,
     get_user_games,
     get_game_by_id,
-    get_last_game_slots,
+    get_game_slots_by_date,  # ← исправлено
 )
 from keyboards import games_list_kb
 from pic_profile import create_profile_pic
@@ -39,18 +39,11 @@ async def show_user_stats(message: types.Message):
     user_id = message.from_user.id
 
     try:
-        # 1. Данные для картинки профиля
         stats_data = await stats_utils.build_user_stats_data(user_id)
-
-        # 2. Генерируем картинку профиля
         nickname = stats_data.get("nickname") or message.from_user.full_name
         img_path = create_profile_pic(nickname, stats_data)
-        print(f"[PROFILE] Generated profile image for {user_id}: {img_path}")
-
-        # 3. Текстовая версия
         text = await stats_utils.build_user_stats_text(user_id)
 
-        # 4. Отправляем как ДОКУМЕНТ (не фото) с timestamp в caption
         doc = FSInputFile(img_path)
         timestamp = int(time.time())
         await message.answer_document(
@@ -59,11 +52,9 @@ async def show_user_stats(message: types.Message):
             parse_mode=ParseMode.MARKDOWN,
         )
 
-        # Очищаем старые файлы профиля
         _cleanup_old_files("profile_", keep=10)
 
     except Exception as e:
-        # Fallback — хотя бы текст
         print(f"[PROFILE][ERROR] Failed to send profile image for {user_id}: {e}")
         text = await stats_utils.build_user_stats_text(user_id)
         await message.answer(text)
@@ -135,7 +126,7 @@ async def show_my_games(message: types.Message):
 
 
 @router.callback_query(F.data.startswith(("allgames:", "mygames:")))
-async def show_game_protocol(callback: types.CallbackQuery):
+async def show_game_protocol(callback: types.CallbackQuery, state: FSMContext):
     """
     callback.data: allgames:{game_id}:{game_number} или mygames:{game_id}:{game_number}
     """
@@ -178,34 +169,36 @@ async def show_game_protocol(callback: types.CallbackQuery):
     if protocol_body:
         text += f"\n\n{protocol_body}"
 
-    # Пробуем нарисовать картинку протокола
+    # ========== НОВОЕ: Пытаемся восстановить слоты для картинки ==========
     try:
-        slots = await get_last_game_slots()
-        if not slots:
+        # Получаем слоты из game_slots_history по game_id
+        # Для этого нужно знать game_date, так как слоты хранятся по дате
+        slots = await get_game_slots_by_date(date_str)
+
+        if slots:
+            # Рисуем графический протокол
+            img_path = create_endgame_pic_summary(
+                slots=slots,
+                game_date=date_str,
+                evening_game_number=game_number or 0,
+                global_game_number=global_game_number or 0,
+                winner_label=winner_label,
+            )
+            print(f"[GAME_PROTOCOL] Generated protocol image for game_id={game_id}: {img_path}")
+
+            doc = FSInputFile(img_path)
+            timestamp = int(time.time())
+            await callback.message.answer_document(
+                document=doc,
+                caption=f"{text}\n\n🕐 Обновлено: {timestamp}",
+                parse_mode=ParseMode.HTML,
+            )
+
+            # Очищаем старые файлы
+            _cleanup_old_files("endgame_summary_", keep=10)
+        else:
+            # Если слотов нет — шлём только текст
             await callback.message.answer(text, parse_mode=ParseMode.HTML)
-            await callback.answer()
-            return
-
-        img_path = create_endgame_pic_summary(
-            slots=slots,
-            game_date=date_str,
-            evening_game_number=game_number or 0,
-            global_game_number=global_game_number or 0,
-            winner_label=winner_label,
-        )
-        print(f"[GAME_PROTOCOL] Generated protocol image for game_id={game_id}: {img_path}")
-
-        # Отправляем как ДОКУМЕНТ с timestamp
-        doc = FSInputFile(img_path)
-        timestamp = int(time.time())
-        await callback.message.answer_document(
-            document=doc,
-            caption=f"{text}\n\n🕐 Обновлено: {timestamp}",
-            parse_mode=ParseMode.HTML,
-        )
-
-        # Очищаем старые файлы протоколов
-        _cleanup_old_files("endgame_summary_", keep=10)
 
     except Exception as e:
         print(f"[GAME_PROTOCOL][ERROR] Failed to send image for game_id={game_id}: {e}")

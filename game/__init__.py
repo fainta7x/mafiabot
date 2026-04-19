@@ -9,11 +9,10 @@ from .edit_router import router as edit_router
 
 router = Router()
 
-# СНАЧАЛА более специфичные роутеры (day/night),
-# в КОНЦЕ — control с catch_all_in_game как fallback
-router.include_router(day.router)
-router.include_router(night.router)
-router.include_router(control.router)
-router.include_router(edit_router)
+# СНАЧАЛА более специфичные роутеры
+router.include_router(edit_router)      # ← ПЕРВЫМ! Режим редактирования
+router.include_router(day.router)       # дневные хендлеры
+router.include_router(night.router)     # ночные хендлеры
+router.include_router(control.router)   # ← ПОСЛЕДНИМ! catch-all как fallback
 
 __all__ = ["router"]
