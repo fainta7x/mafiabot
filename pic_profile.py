@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Dict, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
@@ -6,6 +7,20 @@ from PIL import Image, ImageDraw, ImageFont
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMP_DIR = os.path.join(BASE_DIR, "temp")
 os.makedirs(TEMP_DIR, exist_ok=True)
+
+
+def _cleanup_old_profile_files(nickname: str, keep: int = 5):
+    """Удаляет старые файлы профиля для конкретного ника, оставляя только keep последних."""
+    safe_nick = "".join(ch for ch in (nickname or "player") if ch.isalnum() or ch in "._-")
+    try:
+        files = [os.path.join(TEMP_DIR, f) for f in os.listdir(TEMP_DIR)
+                 if f.startswith(f"profile_{safe_nick}") and f.endswith(".png")]
+        files.sort(key=os.path.getmtime)
+        for f in files[:-keep]:
+            os.remove(f)
+            print(f"[PROFILE_IMG] Removed old file: {f}")
+    except Exception as e:
+        print(f"[PROFILE_IMG] Cleanup error: {e}")
 
 
 def _load_font(size: int):
@@ -255,9 +270,19 @@ def create_profile_pic(player_nickname: str, stats: Dict) -> str:
             line2 += f"  •  ЛХ: {_fmt_float(r_lh, 1)}"
         draw.text((ix, iy), line2, fill=(189, 195, 199) if not is_unknown else (140, 145, 155), font=font_text)
 
-    # Сохранение
+    # Сохранение с timestamp в имени файла
     final = img.resize((int(base_w), int(base_h)), Image.LANCZOS)
     safe_nick = "".join(ch for ch in (player_nickname or "player") if ch.isalnum() or ch in "._-")
-    path = os.path.join(TEMP_DIR, f"profile_{safe_nick}.png")
+    timestamp = int(time.time())
+    path = os.path.join(TEMP_DIR, f"profile_{safe_nick}_{timestamp}.png")
     final.save(path)
+
+    # Закрываем изображения для освобождения памяти
+    final.close()
+    img.close()
+
+    # Очищаем старые файлы (оставляем только 5 последних)
+    _cleanup_old_profile_files(player_nickname, keep=5)
+
+    print(f"[PROFILE_IMG] Saved profile image to: {path}")
     return path

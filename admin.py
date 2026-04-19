@@ -94,15 +94,22 @@ async def admin_panel(message: types.Message):
     )
 
 
-@router.message(F.text == "🛠 Перейти в админ-панель", F.chat.type == "private")
-async def admin_panel_button(message: types.Message):
+@router.message(F.text.in_(["🛠 Админ-панель", "🛠 Перейти в админ-панель"]), F.chat.type == "private")
+async def admin_panel_unified(message: types.Message):
     """
-    Кнопка в ЛС «Перейти в админ-панель» (дублирует /admin).
+    Общий обработчик для всех вариантов входа в админ-панель.
     """
     if not _is_admin(message.from_user.id):
+        await message.answer(
+            "⛔ Эта кнопка доступна только администраторам.",
+            reply_markup=keyboards.main_menu()
+        )
         return
 
-    await admin_panel(message)
+    await message.answer(
+        "🛠 Панель администратора.\nВыбери действие на клавиатуре ниже 👇",
+        reply_markup=keyboards.admin_menu(),
+    )
 
 
 # =========================================================

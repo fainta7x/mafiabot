@@ -10,6 +10,7 @@ import database
 
 router = Router()
 
+
 # =========================================================
 # BOOKING — ЗАПИСЬ НА ВЕЧЕР МАФИИ
 #
@@ -21,6 +22,9 @@ router = Router()
 # 2. ХЕНДЛЕРЫ ЗАПИСИ
 #    - book                 — кнопка "🕵️ Записаться на игру"
 #    - handle_book          — обработка inline-кнопок book_*
+#
+# 3. ХЕНДЛЕРЫ ПРОСМОТРА
+#    - show_players_list    — кнопка "🧾 Список игроков"
 # =========================================================
 
 
@@ -30,7 +34,7 @@ router = Router()
 
 def get_next_friday() -> str:
     """
-    Возвращает дату ближайшей пятницы в формате "ДД.MM".
+    Возвращает дату ближайшей пятницы в формате "ДД.ММ".
 
     Логика:
       - если сегодня понедельник–пятница -> пятница этой недели;
@@ -234,3 +238,39 @@ async def handle_book(call: CallbackQuery, bot: Bot):
         await call.answer()
     except Exception:
         pass
+
+
+# =========================================================
+# 3. ХЕНДЛЕРЫ ПРОСМОТРА
+# =========================================================
+
+@router.message(F.text == "🧾 Список игроков", F.chat.type == "private")
+async def show_players_list(message: Message):
+    """
+    Кнопка из главного меню «🧾 Список игроков».
+    Показывает список записавшихся на ближайший вечер.
+    """
+    date = get_next_friday()
+    text = await build_stats_text(date)
+
+    # Проверяем, есть ли хоть кто-то записанный
+    ontime = await database.get_players_by_status_for_date(date, "Вовремя")
+    late = await database.get_players_by_status_for_date(date, "Позже")
+    total = len(ontime) + len(late)
+
+    if total == 0:
+        await message.answer(
+            f"📋 На вечер {date} пока никто не записался.\n\n"
+            f"Стань первым — нажми «🕵️ Записаться на игру»!",
+            reply_markup=keyboards.main_menu()
+        )
+        return
+
+    # Добавляем пояснение для пользователей
+    text += "\n\n📌 Чтобы записаться — нажми «🕵️ Записаться на игру»"
+
+    await message.answer(
+        text,
+        reply_markup=keyboards.main_menu(),
+        parse_mode="Markdown"
+    )

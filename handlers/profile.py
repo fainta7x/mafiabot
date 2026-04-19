@@ -1,19 +1,37 @@
 from aiogram import Router, F, types
 from aiogram.enums import ParseMode
 from aiogram.types import FSInputFile
+import time
+import os
 
 import stats_utils
 from database import (
     get_last_games,
     get_user_games,
     get_game_by_id,
-    get_last_game_slots,  # новый импорт
+    get_last_game_slots,
 )
 from keyboards import games_list_kb
 from pic_profile import create_profile_pic
-from game.pic_endgame import create_endgame_pic_summary  # путь поправь, если pic_endgame лежит не в пакете game
+from game.pic_endgame import create_endgame_pic_summary
 
 router = Router()
+
+TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+
+def _cleanup_old_files(prefix: str, keep: int = 10):
+    """Удаляет старые файлы с указанным префиксом, оставляя только keep последних."""
+    try:
+        files = [os.path.join(TEMP_DIR, f) for f in os.listdir(TEMP_DIR)
+                 if f.startswith(prefix) and f.endswith(".png")]
+        files.sort(key=os.path.getmtime)
+        for f in files[:-keep]:
+            os.remove(f)
+            print(f"[CLEANUP] Removed old file: {f}")
+    except Exception as e:
+        print(f"[CLEANUP] Error: {e}")
 
 
 @router.message(F.text == "📊 Статистика")
@@ -32,13 +50,18 @@ async def show_user_stats(message: types.Message):
         # 3. Текстовая версия
         text = await stats_utils.build_user_stats_text(user_id)
 
-        # 4. Отправляем картинку + подпись
-        photo = FSInputFile(img_path)
-        await message.answer_photo(
-            photo=photo,
-            caption=text,
+        # 4. Отправляем как ДОКУМЕНТ (не фото) с timestamp в caption
+        doc = FSInputFile(img_path)
+        timestamp = int(time.time())
+        await message.answer_document(
+            document=doc,
+            caption=f"{text}\n\n🕐 Обновлено: {timestamp}",
             parse_mode=ParseMode.MARKDOWN,
         )
+
+        # Очищаем старые файлы профиля
+        _cleanup_old_files("profile_", keep=10)
+
     except Exception as e:
         # Fallback — хотя бы текст
         print(f"[PROFILE][ERROR] Failed to send profile image for {user_id}: {e}")
@@ -115,7 +138,6 @@ async def show_my_games(message: types.Message):
 async def show_game_protocol(callback: types.CallbackQuery):
     """
     callback.data: allgames:{game_id}:{game_number} или mygames:{game_id}:{game_number}
-    В третьей части передаём game_number (номер игры в вечер).
     """
     try:
         prefix, game_id_str, game_number_str = callback.data.split(":", 2)
@@ -143,7 +165,7 @@ async def show_game_protocol(callback: types.CallbackQuery):
         lines = lines[1:]
     protocol_body = "\n".join(lines).lstrip()
 
-    # Шапка: используем сохранённые номера
+    # Шапка
     if game_number:
         header = f"📑 Протокол игры №{game_number} ({date_str}): {winner_label}"
     else:
@@ -156,15 +178,11 @@ async def show_game_protocol(callback: types.CallbackQuery):
     if protocol_body:
         text += f"\n\n{protocol_body}"
 
-    # Пробуем нарисовать картинку протокола, если есть слоты последней игры
+    # Пробуем нарисовать картинку протокола
     try:
         slots = await get_last_game_slots()
         if not slots:
-            # Нет слотов — шлём только текст, как раньше
-            await callback.message.answer(
-                text,
-                parse_mode=ParseMode.HTML,
-            )
+            await callback.message.answer(text, parse_mode=ParseMode.HTML)
             await callback.answer()
             return
 
@@ -177,17 +195,20 @@ async def show_game_protocol(callback: types.CallbackQuery):
         )
         print(f"[GAME_PROTOCOL] Generated protocol image for game_id={game_id}: {img_path}")
 
-        photo = FSInputFile(img_path)
-        await callback.message.answer_photo(
-            photo=photo,
-            caption=text,
+        # Отправляем как ДОКУМЕНТ с timestamp
+        doc = FSInputFile(img_path)
+        timestamp = int(time.time())
+        await callback.message.answer_document(
+            document=doc,
+            caption=f"{text}\n\n🕐 Обновлено: {timestamp}",
             parse_mode=ParseMode.HTML,
         )
+
+        # Очищаем старые файлы протоколов
+        _cleanup_old_files("endgame_summary_", keep=10)
+
     except Exception as e:
         print(f"[GAME_PROTOCOL][ERROR] Failed to send image for game_id={game_id}: {e}")
-        await callback.message.answer(
-            text,
-            parse_mode=ParseMode.HTML,
-        )
+        await callback.message.answer(text, parse_mode=ParseMode.HTML)
 
     await callback.answer()
