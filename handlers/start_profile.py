@@ -11,7 +11,7 @@ import database
 import config
 from handlers.payment import payment_kb
 from handlers.booking import build_stats_text, get_next_friday  # ТУТ только build_stats_text
-from stats_utils import build_user_stats_text  # импорт функции статистики
+from stats_utils import build_user_stats_text  # импорт функции статистики (понадобится, если где-то ещё используешь)
 
 router = Router()
 
@@ -97,15 +97,6 @@ async def show_players_for_user(message: Message):
         return
 
     await message.answer(text, reply_markup=keyboards.main_menu())
-
-
-@router.message(F.text == "📊 Статистика", F.chat.type == "private")
-async def show_user_stats(message: Message):
-    """
-    Личная статистика игрока (по таблице users: games_played, games_won, points).
-    """
-    text = await build_user_stats_text(message.from_user.id)
-    await message.answer(text)
 
 
 @router.callback_query(F.data == "edit_nickname")

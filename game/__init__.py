@@ -1,4 +1,5 @@
 # game/__init__.py
+
 from aiogram import Router
 
 from . import control

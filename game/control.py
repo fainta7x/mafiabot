@@ -4,12 +4,14 @@ from datetime import datetime
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
+from aiogram.types import FSInputFile
 
 import config
 import database
 import keyboards
 from .state import GameCreateState
 from .text import build_slots_text, build_game_state, build_protocol_text
+from .pic_endgame import create_endgame_pic_summary
 
 router = Router()
 
@@ -484,18 +486,15 @@ async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
     # === Расчёт ЛХ для ПУ (по night_suspects и team "Чёрные") ===
     for slot_num, slot in slots.items():
         if not slot.get("pu_mark"):
-            # Не ПУ — ЛХ либо уже задан, либо 0
             slot["lh_points"] = float(slot.get("lh_points") or 0.0)
             slots[slot_num] = slot
             continue
 
-        # Если ПУ не красный (мафия/дон или без команды) — ЛХ не даём
         if slot.get("team") != "Красные":
             slot["lh_points"] = 0.0
             slots[slot_num] = slot
             continue
 
-        # Для красного ПУ считаем, сколько чёрных он угадал
         suspects = slot.get("night_suspects") or []
         correct_blacks = 0
 
@@ -521,7 +520,7 @@ async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
     evening_game_number = await database.get_current_game_number() or 1
     global_game_number = await database.get_current_global_game_number() or 1
 
-    # Формируем тело протокола
+    # Формируем тело протокола (HTML)
     protocol_body = build_protocol_text(
         slots,
         updated=False,
@@ -543,7 +542,7 @@ async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
     )
     protocol_text = f"{header}\n\n{protocol_body}"
 
-    # Обновляем сообщение с кнопками и отправляем протокол
+    # Обновляем сообщение с кнопками и отправляем протокол (ТОЛЬКО текст)
     await callback.message.edit_text(result_text)
     protocol_msg = await callback.message.answer(
         protocol_text,
@@ -574,6 +573,7 @@ async def final_finish_game(message: types.Message, state: FSMContext):
     """
     Полное завершение игры:
     - сохраняем финальное состояние слотов в game_slots_history;
+    - рисуем итоговый графический протокол по всем игрокам;
     - очищаем FSM и все ключи current_game_* и game_active.
 
     Работает даже если FSM слетело (после перезапуска бота):
@@ -599,11 +599,30 @@ async def final_finish_game(message: types.Message, state: FSMContext):
     if not slots:
         slots = await database.load_current_game_slots() or {}
 
-    # 3. Достаём дату игры (для статистики по ролям)
+    # 3. Достаём дату и номера игры (для подписи и истории)
     game_date = await database.get_current_game_date() or "-"
+    evening_game_number = await database.get_current_game_number() or 1
+    global_game_number = await database.get_current_global_game_number() or 1
+    winner_label = data.get("winner_label") or await database.get_last_winner_label()
+
+    # 3a. Рисуем графический протокол, если слоты есть
+    if slots:
+        img_path = create_endgame_pic_summary(
+            slots=slots,
+            game_date=game_date,
+            evening_game_number=evening_game_number,
+            global_game_number=global_game_number,
+            winner_label=winner_label,
+        )
+        photo = FSInputFile(img_path)
+
+        await message.answer_photo(
+            photo,
+            caption="Итоговый графический протокол игры 📸",
+        )
 
     # 4. Сохраняем историю слотов для статистики по ролям
-    #    Берём финальное состояние slots (с уже выставленными ПР/МН, если они были)
+    #    Берём финальное состояние slots (с уже выставленными ПР/МН/Доп)
     if slots:
         await database.save_game_slots_history(game_date, slots)
 

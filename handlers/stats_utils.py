@@ -8,6 +8,7 @@ import database
 # ОГЛАВЛЕНИЕ:
 # 1. ЛИЧНАЯ СТАТИСТИКА ИГРОКА
 #    - build_user_stats_text              — общий текст по игроку
+#    - build_user_stats_data              — данные для картинки профиля
 #    - _aggregate_pr_mn_and_negative      — суммарные ПР/МН и минуса
 #    - _format_roles_stats                — разрез по ролям
 #
@@ -20,6 +21,90 @@ import database
 # =========================================================
 # 1. ЛИЧНАЯ СТАТИСТИКА ИГРОКА
 # =========================================================
+
+async def build_user_stats_data(user_id: int) -> dict:
+    """
+    ВРЕМЕННАЯ заглушка, чтобы заработала картинка профиля.
+    Потом заменим на реальный расчёт по БД.
+    """
+    # Пытаемся вытащить ник из профиля
+    user_profile = await database.get_user_profile(user_id)
+    # get_user_profile у тебя возвращает (name, nick, debt, visit)
+    if user_profile:
+        _, nick, _, _ = user_profile
+    else:
+        nick = None
+
+    nickname = nick or f"Player {user_id}"
+    nickname = f"{nickname} ({user_id})"
+
+    return {
+        "nickname": nickname,
+
+        "games_played": 47,
+        "games_won": 25,
+        "winrate": 53.2,
+        "win_points_sum": 25,
+        "avg_points": 0.53,
+
+        "pr_avg": -0.02,
+        "pr_minus_count": 3,
+        "pr_minus_sum": -1.30,
+        "pr_plus_count": 1,
+        "pr_plus_sum": 0.40,
+
+        "mn_avg": 0.00,
+        "mn_minus_count": 1,
+        "mn_minus_sum": -0.20,
+        "mn_plus_count": 1,
+        "mn_plus_sum": 0.40,
+
+        "discipline_minus_sum": 0.0,
+
+        "roles": {
+            "Дон": {
+                "games": 11,
+                "wins": 4,
+                "winrate": 36.4,
+                "avg_points": 0.41,
+                "bonus_sum": 0.5,
+                "lh_sum": 0.0,
+            },
+            "Мафия": {
+                "games": 16,
+                "wins": 9,
+                "winrate": 56.2,
+                "avg_points": 0.61,
+                "bonus_sum": 0.4,
+                "lh_sum": 0.0,
+            },
+            "Мирный": {
+                "games": 7,
+                "wins": 6,
+                "winrate": 85.7,
+                "avg_points": 1.09,
+                "bonus_sum": 0.0,
+                "lh_sum": 1.2,
+            },
+            "Не задана": {
+                "games": 5,
+                "wins": 0,
+                "winrate": 0.0,
+                "avg_points": 0.0,
+                "bonus_sum": 0.0,
+                "lh_sum": 0.0,
+            },
+            "Шериф": {
+                "games": 7,
+                "wins": 4,
+                "winrate": 57.1,
+                "avg_points": 0.97,
+                "bonus_sum": 0.3,
+                "lh_sum": 3.6,
+            },
+        },
+    }
+
 
 async def build_user_stats_text(user_id: int) -> str:
     """

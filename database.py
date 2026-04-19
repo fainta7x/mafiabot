@@ -291,6 +291,15 @@ async def load_current_game_slots() -> Optional[Dict[int, dict]]:
     return {int(k): v for k, v in raw.items()}
 
 
+# Удобная обёртка под «слоты последней игры»
+async def get_last_game_slots() -> Optional[Dict[int, dict]]:
+    """
+    Возвращает слоты последней сыгранной игры
+    (то же, что сейчас лежит в settings.current_game_slots).
+    """
+    return await load_current_game_slots()
+
+
 # =========================================================
 # 3. ПОЛЬЗОВАТЕЛИ И ПРОФИЛЬ
 # =========================================================
