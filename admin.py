@@ -317,7 +317,7 @@ async def admin_cancel_evening(message: types.Message):
 
 
 @router.message(F.text == "📣 Сделать анонс", F.chat.type == "private")
-async def admin_announce_evening(message: types.Message):
+async def admin_announce_evening(message: types.Message, bot: Bot):
     """
     Сделать анонс вечера:
       - личные сообщения всем пользователям,
@@ -327,8 +327,6 @@ async def admin_announce_evening(message: types.Message):
     if not _is_admin(message.from_user.id):
         return
 
-    assert bot is not None
-
     users = await database.get_all_user_ids()
     if not users:
         await message.answer("В базе пока нет пользователей.")
@@ -337,7 +335,7 @@ async def admin_announce_evening(message: types.Message):
     date_str = get_next_friday()
 
     me = await bot.get_me()
-    bot_username = me.username  # без @
+    bot_username = me.username
 
     players_link = f"https://t.me/{bot_username}?start=players"
 
@@ -361,8 +359,19 @@ async def admin_announce_evening(message: types.Message):
         except Exception:
             continue
 
-    # Пост в группе + сообщение со статистикой
+    # Пост в группе
     try:
+        # Удаляем старое сообщение со статистикой, если есть
+        stats_info = await database.get_stats_message(date_str)
+        if stats_info:
+            chat_id, msg_id = stats_info
+            try:
+                await bot.delete_message(chat_id, msg_id)
+            except Exception:
+                pass
+            await database.set_stats_message(date_str, 0, 0)
+
+        # Отправляем новый анонс
         await bot.send_message(
             config.GROUP_ID,
             text,
@@ -370,6 +379,7 @@ async def admin_announce_evening(message: types.Message):
             message_thread_id=config.ANNOUNCE_TOPIC_ID,
         )
 
+        # Отправляем сообщение со статистикой
         stats_text = await build_stats_text(date_str)
         stats_msg = await bot.send_message(
             config.GROUP_ID,
@@ -382,8 +392,8 @@ async def admin_announce_evening(message: types.Message):
             config.GROUP_ID,
             stats_msg.message_id,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ANNOUNCE] Failed to send to group: {e}")
 
     if message.chat.type == "private":
         await message.answer(

@@ -13,18 +13,6 @@ router = Router()
 
 # =========================================================
 # BOOKING — ЗАПИСЬ НА ВЕЧЕР МАФИИ
-#
-# ОГЛАВЛЕНИЕ:
-# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-#    - get_next_friday      — ближайшая пятница в формате ДД.MM
-#    - build_stats_text     — текстовый блок со списком записавшихся
-#
-# 2. ХЕНДЛЕРЫ ЗАПИСИ
-#    - book                 — кнопка "🕵️ Записаться на игру"
-#    - handle_book          — обработка inline-кнопок book_*
-#
-# 3. ХЕНДЛЕРЫ ПРОСМОТРА
-#    - show_players_list    — кнопка "🧾 Список игроков"
 # =========================================================
 
 
@@ -35,19 +23,13 @@ router = Router()
 def get_next_friday() -> str:
     """
     Возвращает дату ближайшей пятницы в формате "ДД.ММ".
-
-    Логика:
-      - если сегодня понедельник–пятница -> пятница этой недели;
-      - если суббота/воскресенье        -> пятница следующей недели.
     """
     now = datetime.utcnow()
-    weekday = now.weekday()  # 0=понедельник, 4=пятница
+    weekday = now.weekday()
 
     if weekday <= 4:
-        # пятница этой недели (если сегодня понедельник–пятница)
         days_ahead = 4 - weekday
     else:
-        # суббота/воскресенье -> пятница следующей недели
         days_ahead = 7 - (weekday - 4)
 
     return (now + timedelta(days=days_ahead)).strftime("%d.%m")
@@ -56,33 +38,16 @@ def get_next_friday() -> str:
 async def build_stats_text(date: str) -> str:
     """
     Строит текстовую сводку по записи на конкретную дату.
-
-    Использует статусы:
-      - "Вовремя"
-      - "Позже"
-      - "Не идёт"
-
-    Формат:
-      📊 Запись на <date> (всего N):
-      ✅ Идут вовремя:
-      1. Игрок
-      ...
-      ⏳ Придут позже:
-      ...
-      ❌ Не идут:
-      ...
     """
     ontime = await database.get_players_by_status_for_date(date, "Вовремя")
     late = await database.get_players_by_status_for_date(date, "Позже")
     no = await database.get_players_by_status_for_date(date, "Не идёт")
 
-    # считаем только тех, кто придёт (Вовремя + Позже)
     total = len(ontime) + len(late)
 
     def block(title: str, items: List[str]) -> str:
         if not items:
             return f"{title}: —"
-        # нумерация 1., 2., 3. и защита от пустого/неизвестного имени
         lines = [
             f"{i}. {name if name and name != 'Неизвестный' else 'Игрок без профиля'}"
             for i, name in enumerate(items, start=1)
@@ -98,15 +63,51 @@ async def build_stats_text(date: str) -> str:
     return "\n\n".join(parts)
 
 
+async def update_stats_message(bot: Bot, date: str) -> bool:
+    """
+    Обновляет сообщение со статистикой в группе.
+    Если сообщение не найдено или не редактируется — создаёт новое.
+    """
+    new_text = await build_stats_text(date)
+    stats_info = await database.get_stats_message(date)
+
+    # Пробуем обновить существующее сообщение
+    if stats_info and stats_info[0] and stats_info[1]:
+        chat_id, msg_id = stats_info
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=new_text,
+                parse_mode="Markdown"
+            )
+            return True
+        except Exception as e:
+            print(f"[STATS] Failed to edit message: {e}")
+            # Сообщение недоступно — удаляем запись и создадим новое
+            await database.set_stats_message(date, 0, 0)
+
+    # Создаём новое сообщение
+    try:
+        new_msg = await bot.send_message(
+            config.GROUP_ID,
+            new_text,
+            message_thread_id=config.ANNOUNCE_TOPIC_ID,
+            parse_mode="Markdown"
+        )
+        await database.set_stats_message(date, config.GROUP_ID, new_msg.message_id)
+        return True
+    except Exception as e:
+        print(f"[STATS] Failed to send new message: {e}")
+        return False
+
+
 # =========================================================
 # 2. ХЕНДЛЕРЫ ЗАПИСИ
 # =========================================================
 
 @router.message(F.text == "🕵️ Записаться на игру", F.chat.type == "private")
 async def book(message: Message):
-    """
-    Кнопка в ЛС для открытия inline-клавиатуры записи на ближайшую игру.
-    """
     await message.answer(
         f"Запись на {get_next_friday()} в 20:00:",
         reply_markup=keyboards.booking_kb(),
@@ -115,18 +116,6 @@ async def book(message: Message):
 
 @router.callback_query(F.data.startswith("book_"))
 async def handle_book(call: CallbackQuery, bot: Bot):
-    """
-    Обработка нажатий на inline-кнопки записи:
-      - book_ontime — придёт вовремя
-      - book_late   — придёт позже
-      - book_no     — не идёт
-
-    Делает:
-      1) Обновляет/создаёт пользователя в БД.
-      2) Ставит запись на ближайшую пятницу.
-      3) Обновляет статистику в группе (сообщение с анонсом).
-      4) Шлёт админу уведомления при наборе 11 игроков.
-    """
     # Обновляем пользователя в базе
     await database.add_or_update_user(
         user_id=call.from_user.id,
@@ -134,8 +123,6 @@ async def handle_book(call: CallbackQuery, bot: Bot):
         full_name=call.from_user.full_name,
     )
     date = get_next_friday()
-
-    # ВАЖНО: сохраняем дату текущей игры/вечера для истории игр/ролей
     await database.set_current_game_date(date)
 
     # --- Пользователь идёт (вовремя или позже) ---
@@ -160,12 +147,10 @@ async def handle_book(call: CallbackQuery, bot: Bot):
         total_attending = await database.count_all_attending_for_date(date)
         ontime_count = await database.count_ontime_players_for_date(date)
 
-        # Если набралось 11 человек (любых, кто идёт)
+        # Если набралось 11 человек
         if total_attending == 11:
-            # Пишем админу в ЛС
             await bot.send_message(config.ADMIN_ID, "🔥 Стол собран!")
 
-            # Пишем в группу анонса (берём ID чата из базы)
             stats_info = await database.get_stats_message(date)
             if stats_info:
                 chat_id, _ = stats_info
@@ -174,7 +159,7 @@ async def handle_book(call: CallbackQuery, bot: Bot):
                     "🔥 **Стол собран! О времени сбора напишем позже**",
                 )
 
-        # Если именно 11 человек придут ровно к 20:00
+        # Если 11 человек будут вовремя
         if ontime_count == 11:
             await bot.send_message(
                 config.ADMIN_ID,
@@ -189,20 +174,8 @@ async def handle_book(call: CallbackQuery, bot: Bot):
                     "✅ **Отлично! 11 человек подтвердили, что будут к 20:00.**",
                 )
 
-        # Обновляем сообщение-статистику в группе (если оно есть)
-        stats_info = await database.get_stats_message(date)
-        if stats_info:
-            chat_id, msg_id = stats_info
-            new_text = await build_stats_text(date)
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=new_text,
-                )
-            except Exception:
-                # Если не удалось отредактировать — просто молча игнорируем
-                pass
+        # Обновляем сообщение статистики
+        await update_stats_message(bot, date)
 
     # --- Пользователь НЕ идёт ---
     elif call.data == "book_no":
@@ -219,19 +192,8 @@ async def handle_book(call: CallbackQuery, bot: Bot):
                 show_alert=False,
             )
 
-        # Обновляем сообщение-статистику в группе (если оно есть)
-        stats_info = await database.get_stats_message(date)
-        if stats_info:
-            chat_id, msg_id = stats_info
-            new_text = await build_stats_text(date)
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=new_text,
-                )
-            except Exception:
-                pass
+        # Обновляем сообщение статистики
+        await update_stats_message(bot, date)
 
     # Безопасное закрытие callback
     try:
@@ -246,14 +208,9 @@ async def handle_book(call: CallbackQuery, bot: Bot):
 
 @router.message(F.text == "🧾 Список игроков", F.chat.type == "private")
 async def show_players_list(message: Message):
-    """
-    Кнопка из главного меню «🧾 Список игроков».
-    Показывает список записавшихся на ближайший вечер.
-    """
     date = get_next_friday()
     text = await build_stats_text(date)
 
-    # Проверяем, есть ли хоть кто-то записанный
     ontime = await database.get_players_by_status_for_date(date, "Вовремя")
     late = await database.get_players_by_status_for_date(date, "Позже")
     total = len(ontime) + len(late)
@@ -266,7 +223,6 @@ async def show_players_list(message: Message):
         )
         return
 
-    # Добавляем пояснение для пользователей
     text += "\n\n📌 Чтобы записаться — нажми «🕵️ Записаться на игру»"
 
     await message.answer(
