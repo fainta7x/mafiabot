@@ -76,3 +76,8 @@ class GameCreateState(StatesGroup):
     kill_lh = State()  # ввод ЛХ (подозреваемых) для убитого
     kill_protocol = State()  # ввод текста протокола
     kill_opinion = State()  # ввод текста мнения
+
+    # ========== НОВЫЕ СОСТОЯНИЯ ДЛЯ ППК ==========
+    ppk_team_select = State()  # выбор команды-победителя
+    ppk_culprit_select = State()  # выбор виновника
+    ppk_confirm = State()  # подтверждение

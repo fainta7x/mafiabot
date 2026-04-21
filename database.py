@@ -18,8 +18,11 @@ async def _ensure_columns():
     """Гарантирует наличие всех нужных колонок в существующих таблицах."""
     alters = [
         ("users", ["games_played", "games_won", "points"], "INTEGER DEFAULT 0"),
+        ("users", ["kicks", "ppk_causes"], "INTEGER DEFAULT 0"),
         ("game_history", ["game_number", "global_game_number"], "INTEGER"),
         ("game_slots_history", ["will_protocol_points", "will_opinion_points"], "REAL DEFAULT 0"),
+        ("game_slots_history", ["kick", "ppk", "technical_fouls"], "INTEGER DEFAULT 0"),
+        ("game_slots_history", ["dc_points"], "REAL DEFAULT 0"),  # НОВАЯ КОЛОНКА
     ]
     async with get_db() as conn:
         for table, cols, col_type in alters:
@@ -37,20 +40,23 @@ async def init_db():
     async with get_db() as conn:
         # Основные таблицы
         await conn.execute("""
-                           CREATE TABLE IF NOT EXISTS users
+                           CREATE TABLE IF NOT EXISTS game_slots_history
                            (
-                               user_id            INTEGER PRIMARY KEY,
-                               username           TEXT,
-                               full_name          TEXT,
-                               nickname           TEXT    DEFAULT 'Не установлен',
-                               balance            INTEGER DEFAULT 0,
-                               debt               INTEGER DEFAULT 0,
-                               last_visit         TEXT    DEFAULT '-',
-                               total_paid         INTEGER DEFAULT 0,
-                               has_unpaid_session INTEGER DEFAULT 0,
-                               games_played       INTEGER DEFAULT 0,
-                               games_won          INTEGER DEFAULT 0,
-                               points             INTEGER DEFAULT 0
+                               id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                               game_date            TEXT,
+                               user_id              INTEGER,
+                               slot_num             INTEGER,
+                               role                 TEXT,
+                               team                 TEXT,
+                               base_points          REAL    DEFAULT 0,
+                               bonus_points         REAL    DEFAULT 0,
+                               lh_points            REAL    DEFAULT 0,
+                               will_protocol_points REAL    DEFAULT 0,
+                               will_opinion_points  REAL    DEFAULT 0,
+                               dc_points            REAL    DEFAULT 0,
+                               kick                 INTEGER DEFAULT 0,
+                               ppk                  INTEGER DEFAULT 0,
+                               technical_fouls      INTEGER DEFAULT 0
                            )
                            """)
         await conn.execute("""
@@ -108,7 +114,10 @@ async def init_db():
                                bonus_points         REAL DEFAULT 0,
                                lh_points            REAL DEFAULT 0,
                                will_protocol_points REAL DEFAULT 0,
-                               will_opinion_points  REAL DEFAULT 0
+                               will_opinion_points  REAL DEFAULT 0,
+                               kick                 INTEGER DEFAULT 0,
+                               ppk                  INTEGER DEFAULT 0,
+                               technical_fouls      INTEGER DEFAULT 0
                            )
                            """)
         await conn.execute("""
@@ -218,7 +227,7 @@ async def update_nickname(user_id: int, nickname: str):
 
 async def get_all_users_stat() -> list:
     async with get_db() as conn:
-        async with conn.execute("SELECT full_name, nickname, last_visit, debt, total_paid FROM users") as cur:
+        async with conn.execute("SELECT full_name, nickname, last_visit, debt, total_paid, kicks, ppk_causes FROM users") as cur:
             return await cur.fetchall()
 
 
@@ -232,6 +241,36 @@ async def get_all_user_ids() -> list:
     async with get_db() as conn:
         async with conn.execute("SELECT user_id FROM users") as cur:
             return await cur.fetchall()
+
+
+async def increment_user_kicks(user_id: int):
+    """Увеличивает счётчик удалений игрока."""
+    async with get_db() as conn:
+        await conn.execute("UPDATE users SET kicks = kicks + 1 WHERE user_id = ?", (user_id,))
+        await conn.commit()
+
+
+async def increment_user_ppk_causes(user_id: int):
+    """Увеличивает счётчик ППК игрока."""
+    async with get_db() as conn:
+        await conn.execute("UPDATE users SET ppk_causes = ppk_causes + 1 WHERE user_id = ?", (user_id,))
+        await conn.commit()
+
+
+async def get_user_kicks(user_id: int) -> int:
+    """Возвращает количество удалений игрока."""
+    async with get_db() as conn:
+        async with conn.execute("SELECT kicks FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
+async def get_user_ppk_causes(user_id: int) -> int:
+    """Возвращает количество ППК игрока."""
+    async with get_db() as conn:
+        async with conn.execute("SELECT ppk_causes FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
 
 # ========== НОВАЯ ФУНКЦИЯ: ПОИСК ПОЛЬЗОВАТЕЛЯ ПО НИКУ ==========
@@ -557,19 +596,31 @@ async def save_game_slots_history(game_date: str, slots: Union[Dict[int, dict], 
         if not isinstance(slot, dict):
             continue
         rows.append((
-            game_date, slot.get("user_id"), slot_num, slot.get("role"), slot.get("team"),
-            float(slot.get("base_points", 0) or 0), float(slot.get("bonus_points", 0) or 0),
-            float(slot.get("lh_points", 0) or 0), float(slot.get("will_protocol_points", 0) or 0),
-            float(slot.get("will_opinion_points", 0) or 0)
+            game_date,
+            slot.get("user_id"),
+            slot_num,
+            slot.get("role"),
+            slot.get("team"),
+            float(slot.get("base_points", 0) or 0),
+            float(slot.get("bonus_points", 0) or 0),
+            float(slot.get("lh_points", 0) or 0),
+            float(slot.get("will_protocol_points", 0) or 0),
+            float(slot.get("will_opinion_points", 0) or 0),
+            float(slot.get("dc_points", 0) or 0),
+            1 if slot.get("kicked", False) else 0,
+            1 if slot.get("ppk", False) else 0,
+            len([t for t in slot.get("technical_fouls", []) if t])
         ))
     if rows:
         async with get_db() as conn:
             await conn.executemany("""
-                                   INSERT INTO game_slots_history (game_date, user_id, slot_num, role, team,
-                                                                   base_points, bonus_points, lh_points,
-                                                                   will_protocol_points, will_opinion_points)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                   """, rows)
+                INSERT INTO game_slots_history (
+                    game_date, user_id, slot_num, role, team,
+                    base_points, bonus_points, lh_points,
+                    will_protocol_points, will_opinion_points,
+                    dc_points, kick, ppk, technical_fouls
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
             await conn.commit()
 
 
@@ -577,37 +628,37 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
     """Статистика по ролям пользователя."""
     async with get_db() as conn:
         async with conn.execute("""
-                                SELECT role,
-                                       COUNT(*)                                                                     AS games,
-                                       SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END)                             AS wins,
-                                       SUM(base_points + bonus_points + lh_points + will_protocol_points +
-                                           will_opinion_points)                                                     AS total_points,
-                                       SUM(bonus_points)                                                            AS total_bonus,
-                                       SUM(lh_points)                                                               AS total_lh,
-                                       SUM(CASE
-                                               WHEN (bonus_points + lh_points) < 0 THEN bonus_points + lh_points
-                                               ELSE 0 END)                                                          AS total_negative,
-                                       AVG(will_protocol_points)                                                    AS protocol_avg,
-                                       SUM(CASE WHEN will_protocol_points > 0 THEN 1 ELSE 0 END)                    AS protocol_pos_count,
-                                       SUM(CASE WHEN will_protocol_points > 0 THEN will_protocol_points ELSE 0 END) AS protocol_pos_sum,
-                                       SUM(CASE WHEN will_protocol_points < 0 THEN 1 ELSE 0 END)                    AS protocol_neg_count,
-                                       SUM(CASE WHEN will_protocol_points < 0 THEN will_protocol_points ELSE 0 END) AS protocol_neg_sum,
-                                       AVG(will_opinion_points)                                                     AS opinion_avg,
-                                       SUM(CASE WHEN will_opinion_points > 0 THEN 1 ELSE 0 END)                     AS opinion_pos_count,
-                                       SUM(CASE WHEN will_opinion_points > 0 THEN will_opinion_points ELSE 0 END)   AS opinion_pos_sum,
-                                       SUM(CASE WHEN will_opinion_points < 0 THEN 1 ELSE 0 END)                     AS opinion_neg_count,
-                                       SUM(CASE WHEN will_opinion_points < 0 THEN will_opinion_points ELSE 0 END)   AS opinion_neg_sum
-                                FROM game_slots_history
-                                WHERE user_id = ?
-                                GROUP BY role
-                                """, (user_id,)) as cur:
+            SELECT role,
+                   COUNT(*) AS games,
+                   SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END) AS wins,
+                   SUM(base_points + bonus_points + lh_points + will_protocol_points + will_opinion_points + dc_points) AS total_points,
+                   SUM(bonus_points) AS total_bonus,
+                   SUM(lh_points) AS total_lh,
+                   SUM(CASE WHEN (bonus_points + lh_points + dc_points) < 0 THEN bonus_points + lh_points + dc_points ELSE 0 END) AS total_negative,
+                   AVG(will_protocol_points) AS protocol_avg,
+                   SUM(CASE WHEN will_protocol_points > 0 THEN 1 ELSE 0 END) AS protocol_pos_count,
+                   SUM(CASE WHEN will_protocol_points > 0 THEN will_protocol_points ELSE 0 END) AS protocol_pos_sum,
+                   SUM(CASE WHEN will_protocol_points < 0 THEN 1 ELSE 0 END) AS protocol_neg_count,
+                   SUM(CASE WHEN will_protocol_points < 0 THEN will_protocol_points ELSE 0 END) AS protocol_neg_sum,
+                   AVG(will_opinion_points) AS opinion_avg,
+                   SUM(CASE WHEN will_opinion_points > 0 THEN 1 ELSE 0 END) AS opinion_pos_count,
+                   SUM(CASE WHEN will_opinion_points > 0 THEN will_opinion_points ELSE 0 END) AS opinion_pos_sum,
+                   SUM(CASE WHEN will_opinion_points < 0 THEN 1 ELSE 0 END) AS opinion_neg_count,
+                   SUM(CASE WHEN will_opinion_points < 0 THEN will_opinion_points ELSE 0 END) AS opinion_neg_sum,
+                   SUM(kick) AS total_kicks,
+                   SUM(ppk) AS total_ppk
+            FROM game_slots_history
+            WHERE user_id = ?
+            GROUP BY role
+        """, (user_id,)) as cur:
             rows = await cur.fetchall()
 
     result = []
     for row in rows:
         role, games, wins, total_points, total_bonus, total_lh, total_negative, \
             protocol_avg, protocol_pos_count, protocol_pos_sum, protocol_neg_count, protocol_neg_sum, \
-            opinion_avg, opinion_pos_count, opinion_pos_sum, opinion_neg_count, opinion_neg_sum = row
+            opinion_avg, opinion_pos_count, opinion_pos_sum, opinion_neg_count, opinion_neg_sum, \
+            total_kicks, total_ppk = row
 
         games = games or 0
         if games:
@@ -617,16 +668,27 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
             winrate = avg_points = 0.0
 
         result.append({
-            "role": role or "Не задана", "games": games, "wins": wins or 0,
-            "winrate": winrate, "avg_points": avg_points,
-            "total_points": total_points or 0.0, "total_bonus": total_bonus or 0.0,
-            "total_lh": total_lh or 0.0, "total_negative": total_negative or 0.0,
-            "protocol_avg": round(protocol_avg or 0, 2), "protocol_pos_count": protocol_pos_count or 0,
-            "protocol_pos_sum": round(protocol_pos_sum or 0, 2), "protocol_neg_count": protocol_neg_count or 0,
+            "role": role or "Не задана",
+            "games": games,
+            "wins": wins or 0,
+            "winrate": winrate,
+            "avg_points": avg_points,
+            "total_points": total_points or 0.0,
+            "total_bonus": total_bonus or 0.0,
+            "total_lh": total_lh or 0.0,
+            "total_negative": total_negative or 0.0,
+            "protocol_avg": round(protocol_avg or 0, 2),
+            "protocol_pos_count": protocol_pos_count or 0,
+            "protocol_pos_sum": round(protocol_pos_sum or 0, 2),
+            "protocol_neg_count": protocol_neg_count or 0,
             "protocol_neg_sum": round(protocol_neg_sum or 0, 2),
-            "opinion_avg": round(opinion_avg or 0, 2), "opinion_pos_count": opinion_pos_count or 0,
-            "opinion_pos_sum": round(opinion_pos_sum or 0, 2), "opinion_neg_count": opinion_neg_count or 0,
+            "opinion_avg": round(opinion_avg or 0, 2),
+            "opinion_pos_count": opinion_pos_count or 0,
+            "opinion_pos_sum": round(opinion_pos_sum or 0, 2),
+            "opinion_neg_count": opinion_neg_count or 0,
             "opinion_neg_sum": round(opinion_neg_sum or 0, 2),
+            "kicks": total_kicks or 0,
+            "ppk_causes": total_ppk or 0,
         })
     return result
 
@@ -712,7 +774,10 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
                        bonus_points,
                        lh_points,
                        will_protocol_points,
-                       will_opinion_points
+                       will_opinion_points,
+                       kick,
+                       ppk,
+                       technical_fouls
                 FROM game_slots_history
                 WHERE game_date = ?
                 ORDER BY slot_num
@@ -728,7 +793,7 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
     for row in rows:
         (user_id, slot_num, role, team,
          base_points, bonus_points, lh_points,
-         protocol_points, opinion_points) = row
+         protocol_points, opinion_points, kick, ppk, tech_fouls) = row
 
         # Получаем ник пользователя
         nickname = None
@@ -751,7 +816,7 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
             "lh_points": lh_points or 0,
             "will_protocol_points": protocol_points or 0,
             "will_opinion_points": opinion_points or 0,
-            "alive": True,  # в истории все считаются живыми для отображения
+            "alive": True,
             "status_reason": "Жив",
             "fouls": 0,
             "nominated": False,
@@ -760,6 +825,9 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
             "pu_mark": False,
             "will_protocol_raw": "",
             "will_opinion": "",
+            "kick": kick or 0,
+            "ppk": ppk or 0,
+            "technical_fouls": tech_fouls or 0,
         }
 
     return slots

@@ -148,8 +148,11 @@ def build_game_state(slots: Dict[int, dict], alive_only: bool = False) -> str:
         nom_text = " | ВЫСТАВЛЕН" if nominated else ""
         votes_text = f" | Голоса: {votes}" if votes > 0 else ""
 
+        tech_fouls_count = len(info.get("technical_fouls", []))
+        tech_text = f" | Техфолы: {tech_fouls_count}" if tech_fouls_count > 0 else ""
+
         lines.append(
-            f"{slot}. {name} — {role} | Фолы: {fouls} | Статус: {status_text}{nom_text}{votes_text}"
+            f"{slot}. {name} — {role} | Фолы: {fouls}{tech_text} | Статус: {status_text}{nom_text}{votes_text}"
         )
 
     if alive_only:
@@ -189,28 +192,12 @@ def build_votes_summary(slots: Dict[int, dict]) -> str:
 
 
 def build_protocol_text(
-    slots: Dict[int, dict],
-    updated: bool = False,
-    winner_label: str | None = None,
+        slots: Dict[int, dict],
+        updated: bool = False,
+        winner_label: str | None = None,
 ) -> str:
     """
     Собирает ТОЛЬКО ТЕЛО протокола игры из slots (HTML).
-
-    Здесь НЕ добавляем строку "📑 Протокол игры ...".
-    Шапку рисуем снаружи (где вызываем эту функцию).
-
-    Ожидаются поля в slots[slot]:
-      - base_points
-      - bonus_points
-      - lh_points             — ЛХ (первый убитый)
-      - will_protocol_points  — ПР (балл за протокол завещания)
-      - will_opinion_points   — МН (балл за мнение завещания)
-      - will_protocol_raw     — текст протокола завещания
-      - will_opinion          — текст мнения завещания
-
-    Дополнительно:
-      - slots может содержать служебный ключ "_night_kills_order": list[int]
-        — порядок ночных убийств, чтобы показать блок "Убийство №...".
     """
     lines: list[str] = []
 
@@ -228,7 +215,7 @@ def build_protocol_text(
 
     for slot_num, info in slots.items():
         if isinstance(slot_num, str) and slot_num.startswith("_"):
-            continue  # служебные записи
+            continue
         if not isinstance(slot_num, int):
             continue
 
@@ -240,7 +227,6 @@ def build_protocol_text(
         else:
             other_slots.append((slot_num, info))
 
-    # Сортируем внутри команд по номеру слота
     red_slots.sort(key=lambda x: x[0])
     black_slots.sort(key=lambda x: x[0])
     other_slots.sort(key=lambda x: x[0])
@@ -252,26 +238,50 @@ def build_protocol_text(
         for slot_num, info in items:
             raw_name = info.get("nickname") or info.get("full_name") or "Без имени"
             name = _trim_name(raw_name)
-
             role = info.get("role", "Не задана")
+            alive = info.get("alive", True)
+            status_reason = info.get("status_reason", "Жив")
+            kicked = info.get("kicked", False)
+            ppk = info.get("ppk", False)
+
+            # Формируем статус
+            if not alive:
+                if kicked:
+                    status_icon = "🚫"
+                    status_text = f"{status_icon} {status_reason}"
+                elif "Заголосован" in status_reason:
+                    status_icon = "⚖️"
+                    status_text = f"{status_icon} Заголосован"
+                elif "Убит" in status_reason:
+                    status_icon = "💀"
+                    status_text = f"{status_icon} Убит ночью"
+                else:
+                    status_icon = "💀"
+                    status_text = f"{status_icon} {status_reason}"
+            else:
+                if ppk:
+                    status_icon = "⚠️"
+                    status_text = f"{status_icon} Удалён (ППК)"
+                else:
+                    status_icon = "✅"
+                    status_text = f"{status_icon} Жив"
 
             is_pu = bool(info.get("pu_mark"))
-            pu_mark = "ПУ" if is_pu else "—"
+            pu_mark = "👑 ПУ" if is_pu else ""
 
             base_pts = float(info.get("base_points", 0.0) or 0.0)
             bonus_pts = float(info.get("bonus_points", 0.0) or 0.0)
             lh_pts = float(info.get("lh_points", 0.0) or 0.0)
             pr_pts = float(info.get("will_protocol_points", 0.0) or 0.0)
             mn_pts = float(info.get("will_opinion_points", 0.0) or 0.0)
+            dc_pts = float(info.get("dc_points", 0.0) or 0.0)
 
-            total_pts = round(base_pts + bonus_pts + lh_pts + pr_pts + mn_pts, 1)
+            total_pts = round(base_pts + bonus_pts + lh_pts + pr_pts + mn_pts + dc_pts, 1)
 
             will_protocol = (info.get("will_protocol_raw") or "").strip()
             will_opinion = (info.get("will_opinion") or "").strip()
 
-            lines.append(
-                f"{slot_num}. <b>{name}</b> — <i>{role}</i>"
-            )
+            lines.append(f"{slot_num}. <b>{name}</b> — <i>{role}</i> {status_text}")
             lines.append(
                 "   "
                 f"{pu_mark} | "
@@ -280,15 +290,14 @@ def build_protocol_text(
                 f"ЛХ: {lh_pts} | "
                 f"ПР: {pr_pts} | "
                 f"МН: {mn_pts} | "
+                f"ДЦ: {dc_pts} | "
                 f"Итого: <b>{total_pts}</b>"
             )
 
-            # без слова "Завещание" — просто "Протокол" и "Мнение"
             if will_protocol:
                 lines.append(f"   Протокол: {will_protocol}")
             if will_opinion:
                 lines.append(f"   Мнение: {will_opinion}")
-
         lines.append("")
 
     _append_group("Красные:", red_slots)

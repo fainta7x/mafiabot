@@ -48,12 +48,12 @@ def parse_slot_num(raw: str, min_slot: int = 1, max_slot: int = 10) -> tuple[boo
 
 
 def create_empty_slot(nickname: str) -> dict:
-    """Создаёт пустой слот для игрока."""
     return {
         "user_id": None, "full_name": None, "nickname": nickname, "username": None,
         "status": "Добавлен вручную", "fouls": 0, "alive": True, "status_reason": "Жив",
         "nominated": False, "votes": 0, "night_suspects": [], "role": "Не задана",
-        "team": None, "base_points": 0, "bonus_points": 0, "lh_points": 0.0, "pu_mark": False
+        "team": None, "base_points": 0, "bonus_points": 0, "lh_points": 0.0, "pu_mark": False,
+        "kicked": False, "ppk": False, "technical_fouls": [], "dc_points": 0.0
     }
 
 
@@ -377,11 +377,13 @@ async def select_mafia_callback(callback: types.CallbackQuery, state: FSMContext
 
     if slot_num in selected:
         selected.remove(slot_num)
+        action_text = f"❌ Игрок {slot_num} убран из мафии"
     else:
         if len(selected) >= 2:
             await callback.answer("Уже выбрано 2 мафии!", show_alert=True)
             return
         selected.append(slot_num)
+        action_text = f"✅ Игрок {slot_num} добавлен в мафию"
 
     await state.update_data(selected_mafia=selected)
 
@@ -392,7 +394,17 @@ async def select_mafia_callback(callback: types.CallbackQuery, state: FSMContext
             name = info.get("nickname") or info.get("full_name") or f"Слот {s_num}"
             available.append((s_num, name))
 
-    await callback.message.edit_reply_markup(reply_markup=keyboards.players_selection_kb(available, "mafia", 2, selected))
+    # Проверяем, изменилась ли клавиатура
+    new_markup = keyboards.players_selection_kb(available, "mafia", 2, selected)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=new_markup)
+    except Exception as e:
+        # Если сообщение не изменилось — просто игнорируем ошибку
+        if "message is not modified" not in str(e):
+            print(f"[ERROR] edit_reply_markup failed: {e}")
+
+    await callback.answer(action_text)
 
     if len(selected) == 2:
         slots = data.get("slots") or {}
@@ -403,8 +415,6 @@ async def select_mafia_callback(callback: types.CallbackQuery, state: FSMContext
         await state.update_data(slots=slots, selected_mafia=None)
         await state.set_state(GameCreateState.choosing_don)
         await show_players_for_role_selection(callback.message, state, "don", 1)
-
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("select_don_"))
@@ -421,8 +431,11 @@ async def select_don_callback(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(slots=slots)
     await save_slots(state, slots)
     await state.set_state(GameCreateState.choosing_sheriff)
-    await show_players_for_role_selection(callback.message, state, "sheriff", 1)
+
     await callback.answer(f"✅ Дон назначен на слот {slot_num}")
+
+    # Показываем выбор шерифа
+    await show_players_for_role_selection(callback.message, state, "sheriff", 1)
 
 
 @router.callback_query(F.data.startswith("select_sheriff_"))
@@ -560,9 +573,64 @@ async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
     if action == "city":
         winning_team = "Красные"
         winner_label = "Победа города"
+        await state.update_data(winning_team=winning_team, winner_label=winner_label)
+
+        for slot in slots.values():
+            slot["base_points"] = 1 if slot.get("team") == winning_team else 0
+
+        await save_slots(state, slots)
+        await state.set_state(GameCreateState.score_editor_select_player)
+
+        await callback.message.edit_text(
+            f"🏆 **Победитель: {winner_label}**\n\n"
+            f"🎲 **Редактор баллов**\n\n"
+            f"Выберите игрока для редактирования Доп, ПР или МН:\n\n"
+            f"🔴 Красные — победа (+1 очко за игру)\n"
+            f"⚫ Чёрные — поражение (0 очков за игру)",
+            reply_markup=keyboards.score_editor_player_kb(slots, winning_team)
+        )
+        await callback.answer()
+        return
+
     elif action == "mafia":
         winning_team = "Чёрные"
         winner_label = "Победа мафии"
+        await state.update_data(winning_team=winning_team, winner_label=winner_label)
+
+        for slot in slots.values():
+            slot["base_points"] = 1 if slot.get("team") == winning_team else 0
+
+        await save_slots(state, slots)
+        await state.set_state(GameCreateState.score_editor_select_player)
+
+        await callback.message.edit_text(
+            f"🏆 **Победитель: {winner_label}**\n\n"
+            f"🎲 **Редактор баллов**\n\n"
+            f"Выберите игрока для редактирования Доп, ПР или МН:\n\n"
+            f"⚫ Чёрные — победа (+1 очко за игру)\n"
+            f"🔴 Красные — поражение (0 очков за игру)",
+            reply_markup=keyboards.score_editor_player_kb(slots, winning_team)
+        )
+        await callback.answer()
+        return
+
+    elif action == "ppk":
+        await state.set_state(GameCreateState.ppk_team_select)
+        await callback.message.edit_text(
+            "⚠️ **ППК (Победа Противоположной Команды)**\n\n"
+            "Какая команда одержала победу?",
+            reply_markup=keyboards.ppk_team_selection_kb()
+        )
+        await callback.answer()
+        return
+
+    elif action == "cancel":
+        await clear_game_state(state)
+        await callback.message.edit_text("❌ **Игра отменена**\n\nИгра полностью удалена без сохранения.")
+        await callback.message.answer("🛠 Админ-панель", reply_markup=keyboards.admin_menu())
+        await callback.answer()
+        return
+
     else:
         await callback.answer("Неизвестное действие", show_alert=True)
         return
@@ -931,13 +999,46 @@ async def foul_add(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Игрок не найден!", show_alert=True)
         return
 
-    slots[slot_num]["fouls"] = slots[slot_num].get("fouls", 0) + 1
+    current_fouls = slots[slot_num].get("fouls", 0)
+    new_fouls = current_fouls + 1
+    slots[slot_num]["fouls"] = new_fouls
+
     await save_slots(state, slots)
+
+    if new_fouls >= 4 and slots[slot_num].get("alive", True):
+        slots[slot_num]["alive"] = False
+        slots[slot_num]["status_reason"] = "Удалён (4 фола)"
+        slots[slot_num]["kicked"] = True
+
+        # Штраф в ДЦ
+        current_dc = slots[slot_num].get("dc_points", 0.0)
+        slots[slot_num]["dc_points"] = round(current_dc - 1.0, 1)
+
+        await save_slots(state, slots)
+
+        name = slots[slot_num].get("nickname") or slots[slot_num].get("full_name") or f"Слот {slot_num}"
+        await callback.answer(f"⚠️ Игрок {name} удалён за 4 фола!", show_alert=True)
+
+        game_state = build_game_state(slots, alive_only=False)
+        await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
+
+        alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
+        if alive_slots:
+            await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
+                                          reply_markup=keyboards.foul_select_kb(alive_slots))
+            await state.set_state(GameCreateState.foul_select)
+        else:
+            await state.set_state(GameCreateState.editing_slots)
+        return
 
     await callback.answer(f"✅ Фол добавлен игроку {slot_num}")
 
+    game_state = build_game_state(slots, alive_only=False)
+    await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
+
     alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
-    await callback.message.edit_text("⚠️ **Управление фолами**\n\nВыберите игрока:", reply_markup=keyboards.foul_select_kb(alive_slots))
+    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
+                                  reply_markup=keyboards.foul_select_kb(alive_slots))
     await state.set_state(GameCreateState.foul_select)
 
 
@@ -960,8 +1061,11 @@ async def foul_remove(callback: types.CallbackQuery, state: FSMContext):
     else:
         await callback.answer("❌ У игрока нет фолов для снятия!", show_alert=True)
 
+    game_state = build_game_state(slots, alive_only=False)
+    await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
+
     alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
-    await callback.message.edit_text("⚠️ **Управление фолами**\n\nВыберите игрока:", reply_markup=keyboards.foul_select_kb(alive_slots))
+    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:", reply_markup=keyboards.foul_select_kb(alive_slots))
     await state.set_state(GameCreateState.foul_select)
 
 
@@ -976,6 +1080,356 @@ async def foul_cancel(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(build_game_state(slots, alive_only=False), reply_markup=keyboards.game_admin_menu())
     await callback.answer()
 
+
+# ========== 10. ДИСЦИПЛИНАРНЫЕ ФУНКЦИИ ==========
+
+@router.callback_query(GameCreateState.foul_action, F.data.startswith("tech_foul_small_"))
+async def tech_foul_small(callback: types.CallbackQuery, state: FSMContext):
+    slot_num = int(callback.data.split("_")[3])
+
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+
+    if slot_num not in slots:
+        await callback.answer("Игрок не найден!", show_alert=True)
+        return
+
+    tech_fouls = slots[slot_num].get("technical_fouls", [])
+    tech_fouls.append("small")
+    slots[slot_num]["technical_fouls"] = tech_fouls
+
+    # Добавляем в ДЦ (дисциплинарные), а не в Допы
+    current_dc = slots[slot_num].get("dc_points", 0.0)
+    slots[slot_num]["dc_points"] = round(current_dc - 0.3, 1)
+
+    await save_slots(state, slots)
+    await callback.answer("✅ Малый техфол (-0.3) добавлен в ДЦ")
+
+    if len(tech_fouls) >= 2 and slots[slot_num].get("alive", True):
+        slots[slot_num]["alive"] = False
+        slots[slot_num]["status_reason"] = "Удалён (2 техфола)"
+        slots[slot_num]["kicked"] = True
+        await save_slots(state, slots)
+        await callback.answer("⚠️ Игрок удалён за 2 техфола!", show_alert=True)
+
+    game_state = build_game_state(slots, alive_only=False)
+    await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
+
+    alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
+    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
+                                  reply_markup=keyboards.foul_select_kb(alive_slots))
+    await state.set_state(GameCreateState.foul_select)
+
+
+@router.callback_query(GameCreateState.foul_action, F.data.startswith("tech_foul_big_"))
+async def tech_foul_big(callback: types.CallbackQuery, state: FSMContext):
+    slot_num = int(callback.data.split("_")[3])
+
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+
+    if slot_num not in slots:
+        await callback.answer("Игрок не найден!", show_alert=True)
+        return
+
+    tech_fouls = slots[slot_num].get("technical_fouls", [])
+    tech_fouls.append("big")
+    slots[slot_num]["technical_fouls"] = tech_fouls
+
+    current_dc = slots[slot_num].get("dc_points", 0.0)
+    slots[slot_num]["dc_points"] = round(current_dc - 0.6, 1)
+
+    await save_slots(state, slots)
+    await callback.answer("✅ Большой техфол (-0.6) добавлен в ДЦ")
+
+    if len(tech_fouls) >= 2 and slots[slot_num].get("alive", True):
+        slots[slot_num]["alive"] = False
+        slots[slot_num]["status_reason"] = "Удалён (2 техфола)"
+        slots[slot_num]["kicked"] = True
+        await save_slots(state, slots)
+        await callback.answer("⚠️ Игрок удалён за 2 техфола!", show_alert=True)
+
+    game_state = build_game_state(slots, alive_only=False)
+    await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
+
+    alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
+    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
+                                  reply_markup=keyboards.foul_select_kb(alive_slots))
+    await state.set_state(GameCreateState.foul_select)
+
+
+@router.callback_query(GameCreateState.foul_action, F.data.startswith("tech_foul_big_"))
+async def tech_foul_big(callback: types.CallbackQuery, state: FSMContext):
+    # callback.data = "tech_foul_big_6" -> split = ['tech', 'foul', 'big', '6']
+    slot_num = int(callback.data.split("_")[3])
+
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+
+    if slot_num not in slots:
+        await callback.answer("Игрок не найден!", show_alert=True)
+        return
+
+    tech_fouls = slots[slot_num].get("technical_fouls", [])
+    tech_fouls.append("big")
+    slots[slot_num]["technical_fouls"] = tech_fouls
+
+    current_bonus = slots[slot_num].get("bonus_points", 0.0)
+    slots[slot_num]["bonus_points"] = round(current_bonus - 0.6, 1)
+
+    await save_slots(state, slots)
+    await callback.answer("✅ Большой техфол (-0.6) добавлен")
+
+    # Проверяем на удаление (2 техфола = удаление)
+    if len(tech_fouls) >= 2 and slots[slot_num].get("alive", True):
+        slots[slot_num]["alive"] = False
+        slots[slot_num]["status_reason"] = "Удалён (2 техфола)"
+        slots[slot_num]["kicked"] = True
+        await save_slots(state, slots)
+        await callback.answer("⚠️ Игрок удалён за 2 техфола!", show_alert=True)
+
+    game_state = build_game_state(slots, alive_only=False)
+    await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
+
+    alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
+    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
+                                  reply_markup=keyboards.foul_select_kb(alive_slots))
+    await state.set_state(GameCreateState.foul_select)
+
+
+@router.callback_query(GameCreateState.foul_action, F.data.startswith("kick_player_"))
+async def kick_player(callback: types.CallbackQuery, state: FSMContext):
+    slot_num = int(callback.data.split("_")[2])
+
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+
+    if slot_num not in slots:
+        await callback.answer("Игрок не найден!", show_alert=True)
+        return
+
+    slots[slot_num]["alive"] = False
+    slots[slot_num]["status_reason"] = "Удалён ведущим"
+    slots[slot_num]["kicked"] = True
+
+    # Штраф в ДЦ, а не в Допы
+    current_dc = slots[slot_num].get("dc_points", 0.0)
+    slots[slot_num]["dc_points"] = round(current_dc - 1.0, 1)
+
+    await save_slots(state, slots)
+    await callback.answer("🚫 Игрок удалён из игры (-1.0 в ДЦ)")
+
+    game_state = build_game_state(slots, alive_only=False)
+    await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
+
+    alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
+    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
+                                  reply_markup=keyboards.foul_select_kb(alive_slots))
+    await state.set_state(GameCreateState.foul_select)
+
+
+# ========== 11. ППК (Победа Противоположной Команды) ==========
+
+@router.callback_query(F.data == "game_end:ppk")
+async def handle_ppk_start(callback: types.CallbackQuery, state: FSMContext):
+    """Начало обработки ППК — выбор команды-победителя."""
+    await state.set_state(GameCreateState.ppk_team_select)
+    await callback.message.edit_text(
+        "⚠️ **ППК (Победа Противоположной Команды)**\n\n"
+        "Какая команда одержала победу?",
+        reply_markup=keyboards.ppk_team_selection_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCreateState.ppk_team_select, F.data.startswith("ppk_team_"))
+async def ppk_select_team(callback: types.CallbackQuery, state: FSMContext):
+    """Выбор команды-победителя при ППК."""
+    team = callback.data.split("_")[2]
+
+    if team == "red":
+        winning_team = "Красные"
+        winner_label = "ППК: Победа красных"
+    else:
+        winning_team = "Чёрные"
+        winner_label = "ППК: Победа чёрных"
+
+    await state.update_data(ppk_winning_team=winning_team, ppk_winner_label=winner_label)
+    await state.set_state(GameCreateState.ppk_culprit_select)
+
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+
+    await callback.message.edit_text(
+        f"⚠️ **ППК**\n\nПобедившая команда: {winning_team}\n\n"
+        f"Кто виноват в поражении (выберите игрока из проигравшей команды):",
+        reply_markup=keyboards.ppk_culprit_selection_kb(slots, "Красные" if team == "black" else "Чёрные")
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCreateState.ppk_culprit_select, F.data.startswith("ppk_culprit_"))
+async def ppk_select_culprit(callback: types.CallbackQuery, state: FSMContext):
+    """Выбор виновника ППК."""
+    slot_num = int(callback.data.split("_")[2])
+
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+
+    if slot_num not in slots:
+        await callback.answer("Игрок не найден!", show_alert=True)
+        return
+
+    slot_data = slots[slot_num]
+    name = slot_data.get("nickname") or slot_data.get("full_name") or f"Слот {slot_num}"
+
+    await state.update_data(ppk_culprit_slot=slot_num)
+    await state.set_state(GameCreateState.ppk_confirm)
+
+    await callback.message.edit_text(
+        f"⚠️ **ППК**\n\n"
+        f"Вы уверены, что {name} (слот {slot_num}) является виновником?\n\n"
+        f"Ему будет начислен штраф -1.5 балла.",
+        reply_markup=keyboards.ppk_confirmation_kb(slot_num, name)
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCreateState.ppk_confirm, F.data == "ppk_confirm_yes")
+async def ppk_confirm(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+    slot_num = data.get("ppk_culprit_slot")
+    winning_team = data.get("ppk_winning_team")
+    winner_label = data.get("ppk_winner_label")
+
+    # Сохраняем имя виновника для отображения в протоколе
+    culprit_name = None
+    if slot_num and slot_num in slots:
+        culprit_name = slots[slot_num].get("nickname") or slots[slot_num].get("full_name") or f"Слот {slot_num}"
+        current_dc = slots[slot_num].get("dc_points", 0.0)
+        slots[slot_num]["dc_points"] = round(current_dc - 1.5, 1)
+        slots[slot_num]["ppk"] = True
+        slots[slot_num]["alive"] = False  # Виновник становится мёртвым
+        slots[slot_num]["status_reason"] = "Удалён (ППК)"
+        slots[slot_num]["kicked"] = True
+
+    # Начисляем базовые очки
+    for slot in slots.values():
+        if slot.get("team") == winning_team:
+            slot["base_points"] = 1
+        else:
+            slot["base_points"] = 0
+
+    # Обновляем заголовок с именем виновника
+    if culprit_name:
+        winner_label = f"ППК: {winning_team} (Виновник: {culprit_name})"
+
+    await state.update_data(winning_team=winning_team, winner_label=winner_label, slots=slots)
+    await save_slots(state, slots)
+
+    await state.set_state(GameCreateState.score_editor_select_player)
+
+    await callback.message.edit_text(
+        f"🏆 **{winner_label}**\n\n"
+        f"🎲 **Редактор баллов**\n\n"
+        f"Выберите игрока для редактирования Доп, ПР или МН:",
+        reply_markup=keyboards.score_editor_player_kb(slots, winning_team)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ppk_cancel")
+async def ppk_cancel(callback: types.CallbackQuery, state: FSMContext):
+    """Отмена ППК."""
+    await state.set_state(GameCreateState.editing_slots)
+    await callback.message.delete()
+    await callback.message.answer(
+        "❌ ППК отменена. Игра продолжается.",
+        reply_markup=keyboards.game_admin_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ppk_back_to_teams")
+async def ppk_back_to_teams(callback: types.CallbackQuery, state: FSMContext):
+    """Возврат к выбору команды."""
+    await state.set_state(GameCreateState.ppk_team_select)
+    await callback.message.edit_text(
+        "⚠️ **ППК (Победа Противоположной Команды)**\n\n"
+        "Какая команда одержала победу?",
+        reply_markup=keyboards.ppk_team_selection_kb()
+    )
+    await callback.answer()
+
+
+# ========== 12. АВТОУДАЛЕНИЕ ЗА 4 ФОЛА ==========
+
+async def check_auto_kick(state: FSMContext, slot_num: int):
+    """Проверяет, не набрал ли игрок 4 фола, и автоматически удаляет его."""
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+
+    if slot_num not in slots:
+        return False
+
+    fouls = slots[slot_num].get("fouls", 0)
+
+    if fouls >= 4 and slots[slot_num].get("alive", True):
+        # Автоматическое удаление
+        slots[slot_num]["alive"] = False
+        slots[slot_num]["status_reason"] = "Удалён (4 фола)"
+        slots[slot_num]["kicked"] = True
+
+        # Штраф -1.0 к бонусным очкам
+        current_bonus = slots[slot_num].get("bonus_points", 0.0)
+        slots[slot_num]["bonus_points"] = round(current_bonus - 1.0, 1)
+
+        await state.update_data(slots=slots)
+        await save_slots(state, slots)
+
+        name = slots[slot_num].get("nickname") or slots[slot_num].get("full_name") or f"Слот {slot_num}"
+
+        # Отправляем уведомление (в ЛС админу или в чат)
+        # Здесь можно добавить отправку сообщения
+
+        return True
+
+    return False
+
+
+# Обновляем функцию foul_add для проверки автоудаления
+@router.callback_query(GameCreateState.foul_action, F.data.startswith("foul_add_"))
+async def foul_add(callback: types.CallbackQuery, state: FSMContext):
+    slot_num = int(callback.data.split("_")[2])
+
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+
+    if slot_num not in slots:
+        await callback.answer("Игрок не найден!", show_alert=True)
+        return
+
+    slots[slot_num]["fouls"] = slots[slot_num].get("fouls", 0) + 1
+    await save_slots(state, slots)
+
+    # Проверяем на автоудаление за 4 фола
+    if slots[slot_num]["fouls"] >= 4 and slots[slot_num].get("alive", True):
+        slots[slot_num]["alive"] = False
+        slots[slot_num]["status_reason"] = "Удалён (4 фола)"
+        slots[slot_num]["kicked"] = True
+        await save_slots(state, slots)
+        await callback.answer("⚠️ Игрок удалён за 4 фола!", show_alert=True)
+
+    await callback.answer(f"✅ Фол добавлен игроку {slot_num}")
+
+    game_state = build_game_state(slots, alive_only=False)
+    await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
+
+    alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
+    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
+                                  reply_markup=keyboards.foul_select_kb(alive_slots))
+    await state.set_state(GameCreateState.foul_select)
 
 # ========== 9. CATCH-ALL ==========
 @router.message(GameCreateState.editing_slots)
