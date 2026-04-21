@@ -17,20 +17,22 @@ router = Router()
 bot: Bot | None = None
 
 # =========================================================
-# ADMIN — АДМИНСКАЯ ПАНЕЛЬ И УПРАВЛЕНИЕ ВЕЧЕРОМ
+# ADMIN / JUDGE — ПАНЕЛЬ АДМИНА И УПРАВЛЕНИЕ ВЕЧЕРОМ
 #
 # ОГЛАВЛЕНИЕ:
 # 1. ОБЩИЕ ВСПОМОГАТЕЛЬНЫЕ ШТУКИ
 #    - DebtEditState              — FSM для редактирования долга
 #    - setup_admin_handlers       — сохранить инстанс Bot
 #    - _is_admin                  — проверка прав администратора
+#    - _is_judge                  — проверка, является ли пользователь судьёй
 #
 # 2. ВХОД В АДМИН-ПАНЕЛЬ
 #    - admin_panel                — команда /admin
-#    - admin_panel_button         — кнопка "🛠 Перейти в админ-панель"
+#    - admin_panel_unified        — кнопка "🛠 Админ-панель"
 #
-# 3. АДМИН-МЕНЮ (СПИСКИ ИГРОКОВ/ПОЛЬЗОВАТЕЛЕЙ)
-#    - admin_show_players_btn     — "📋 Игроки" (запись на вечер)
+# 3. МЕНЮ СПИСКОВ
+#    - admin_show_players_btn     — "📋 Игроки" (админ)
+#    - judge_show_players_btn     — "📋 Игроки" (судья)
 #    - admin_all_users_btn        — "👥 Все пользователи"
 #
 # 4. ФИНАЛ ВЕЧЕРА: СЧЕТА / ОТМЕНА / АНОНСЫ
@@ -76,6 +78,20 @@ def _is_admin(user_id: int) -> bool:
     return user_id in config.ADMIN_IDS
 
 
+async def _is_judge(user_id: int) -> bool:
+    """
+    Проверка, является ли пользователь судьёй.
+    Судьями считаем:
+      - админов,
+      - пользователей из таблицы game_judges.
+    """
+    if _is_admin(user_id):
+        return True
+
+    judges = await database.get_game_judges()
+    return user_id in judges
+
+
 # =========================================================
 # 2. ВХОД В АДМИН-ПАНЕЛЬ
 # =========================================================
@@ -100,9 +116,12 @@ async def admin_panel_unified(message: types.Message):
     Общий обработчик для всех вариантов входа в админ-панель.
     """
     if not _is_admin(message.from_user.id):
+        # обычным игрокам / судьям при попытке входа в админку — мягко отказываем
         await message.answer(
             "⛔ Эта кнопка доступна только администраторам.",
-            reply_markup=keyboards.main_menu()
+            reply_markup=keyboards.main_menu_judge()
+            if await _is_judge(message.from_user.id)
+            else keyboards.main_menu()
         )
         return
 
@@ -113,16 +132,25 @@ async def admin_panel_unified(message: types.Message):
 
 
 # =========================================================
-# 3. АДМИН-МЕНЮ (СПИСКИ ИГРОКОВ/ПОЛЬЗОВАТЕЛЕЙ)
+# 3. МЕНЮ СПИСКОВ
 # =========================================================
 
 @router.message(F.text == "📋 Игроки", F.chat.type == "private")
-async def admin_show_players_btn(message: types.Message):
+async def show_players_btn(message: types.Message):
     """
-    Админский список игроков на ближайший вечер —
-    в том же виде, как в анонсе (build_stats_text).
+    Список игроков на ближайший вечер в том же виде, как в анонсе (build_stats_text).
+    Поведение:
+      - Админ: показывает список и остаётся в админ-меню.
+      - Судья (не админ): показывает список и возвращает в judge-меню.
+      - Остальные: игнорируем (кнопки у них нет).
     """
-    if not _is_admin(message.from_user.id):
+    user_id = message.from_user.id
+
+    is_admin = _is_admin(user_id)
+    is_judge = await _is_judge(user_id)
+
+    # Если ни админ, ни судья — просто игнорируем (до кнопки они не должны дотянуться)
+    if not is_admin and not is_judge:
         return
 
     date_str = get_next_friday()
@@ -132,9 +160,16 @@ async def admin_show_players_btn(message: types.Message):
         await message.answer(f"На ближайший вечер {date_str} пока никто не записался.")
         return
 
+    # Выбираем правильное меню под роль
+    if is_admin:
+        reply_kb = keyboards.admin_menu()
+    else:
+        # судья, но не админ — внутренняя судейская панель
+        reply_kb = keyboards.judge_menu()
+
     await message.answer(
         text,
-        reply_markup=keyboards.admin_menu(),
+        reply_markup=reply_kb,
     )
 
 
@@ -145,6 +180,7 @@ async def admin_all_users_btn(message: types.Message):
       - имя, ник, последний визит, долг, всего оплачено;
       - топ по посещениям;
       - кто давно не был.
+    Доступно только админам.
     """
     if not _is_admin(message.from_user.id):
         return
@@ -155,7 +191,6 @@ async def admin_all_users_btn(message: types.Message):
         return
 
     text = "👥 **База игроков:**\n\n"
-    # Вариант 1: распаковываем все 7 значений (первые 5 используем, остальные игнорируем)
     for name, nick, visit, debt, total_paid, *_ in users:
         if not visit or visit == "-":
             visit_text = "Ещё не был на вечерах"
@@ -168,7 +203,6 @@ async def admin_all_users_btn(message: types.Message):
             f"   Визит: {visit_text} | Долг: {debt}₽ | Всего оплачено: {total_paid}₽\n\n"
         )
 
-    # Топ по посещениям
     top_players = await database.get_top_players_by_visits(limit=10)
     if top_players:
         text += "🏆 **Топ по посещениям:**\n"
@@ -177,7 +211,6 @@ async def admin_all_users_btn(message: types.Message):
             text += f"{i}. {full_name} ({nick_part}) — {visits_count} вечеров\n"
         text += "\n"
 
-    # Кто давно не был
     inactive_raw = await database.get_inactive_players()
     threshold_days = 30
     now = datetime.utcnow()
@@ -218,11 +251,8 @@ async def admin_all_users_btn(message: types.Message):
 @router.message(F.text == "💸 Разослать счета", F.chat.type == "private")
 async def admin_send_bills_btn(message: types.Message):
     """
-    Разослать счета всем игрокам, участвовавшим в вечере:
-      - начислить долг,
-      - пометить неоплаченную сессию,
-      - отправить сообщение с кнопкой оплаты,
-      - архивировать текущий вечер.
+    Разослать счета всем игрокам, участвовавшим в вечере.
+    Доступно только админам.
     """
     if not _is_admin(message.from_user.id):
         return
@@ -239,7 +269,6 @@ async def admin_send_bills_btn(message: types.Message):
 
     for (p_id,) in players:
         try:
-            # Если уже есть неоплаченная сессия — не дублируем
             if await database.has_unpaid_session(p_id):
                 continue
 
@@ -268,10 +297,8 @@ async def admin_send_bills_btn(message: types.Message):
 @router.message(F.text == "❌ Отменить вечер", F.chat.type == "private")
 async def admin_cancel_evening(message: types.Message):
     """
-    Отменить текущий вечер:
-      - разослать уведомление всем записанным игрокам,
-      - продублировать в группу,
-      - очистить записи на вечер.
+    Отменить текущий вечер: уведомить игроков, написать в группу, очистить записи.
+    Доступно только админам.
     """
     if not _is_admin(message.from_user.id):
         return
@@ -297,7 +324,6 @@ async def admin_cancel_evening(message: types.Message):
         except Exception:
             continue
 
-    # Сообщение в группу анонсов
     try:
         await bot.send_message(
             config.GROUP_ID,
@@ -320,10 +346,8 @@ async def admin_cancel_evening(message: types.Message):
 @router.message(F.text == "📣 Сделать анонс", F.chat.type == "private")
 async def admin_announce_evening(message: types.Message, bot: Bot):
     """
-    Сделать анонс вечера:
-      - личные сообщения всем пользователям,
-      - пост в группе с inline-клавиатурой записи,
-      - отдельное сообщение со статистикой (stats_message) для обновлений.
+    Сделать анонс вечера.
+    Доступно только админам.
     """
     if not _is_admin(message.from_user.id):
         return
@@ -347,7 +371,6 @@ async def admin_announce_evening(message: types.Message, bot: Bot):
         f"📋 Список записавшихся игроков: {players_link}"
     )
 
-    # Рассылка в ЛС
     sent = 0
     for (u_id,) in users:
         try:
@@ -360,9 +383,7 @@ async def admin_announce_evening(message: types.Message, bot: Bot):
         except Exception:
             continue
 
-    # Пост в группе
     try:
-        # Удаляем старое сообщение со статистикой, если есть
         stats_info = await database.get_stats_message(date_str)
         if stats_info:
             chat_id, msg_id = stats_info
@@ -372,7 +393,6 @@ async def admin_announce_evening(message: types.Message, bot: Bot):
                 pass
             await database.set_stats_message(date_str, 0, 0)
 
-        # Отправляем новый анонс
         await bot.send_message(
             config.GROUP_ID,
             text,
@@ -380,7 +400,6 @@ async def admin_announce_evening(message: types.Message, bot: Bot):
             message_thread_id=config.ANNOUNCE_TOPIC_ID,
         )
 
-        # Отправляем сообщение со статистикой
         stats_text = await build_stats_text(date_str)
         stats_msg = await bot.send_message(
             config.GROUP_ID,
@@ -410,8 +429,8 @@ async def admin_announce_evening(message: types.Message, bot: Bot):
 @router.message(F.text == "💰 Должники", F.chat.type == "private")
 async def admin_debtors_btn(message: types.Message):
     """
-    Показать список должников с кнопкой «✏️ Изменить сумму»
-    для каждого (запускает FSM редактирования долга).
+    Показать список должников с кнопкой «✏️ Изменить сумму».
+    Доступно только админам.
     """
     if not _is_admin(message.from_user.id):
         return
@@ -447,9 +466,8 @@ async def admin_debtors_btn(message: types.Message):
 @router.callback_query(F.data.startswith("editdebt_"))
 async def admin_edit_debt_start(call: CallbackQuery, state: FSMContext):
     """
-    Старт редактирования долга:
-      - сохраняем user_id должника в FSM,
-      - переводим FSM в состояние ожидания суммы.
+    Старт редактирования долга.
+    Доступно только админам.
     """
     if not _is_admin(call.from_user.id):
         await call.answer("Недостаточно прав.", show_alert=True)
@@ -475,9 +493,8 @@ async def admin_edit_debt_start(call: CallbackQuery, state: FSMContext):
 @router.message(DebtEditState.waiting_for_amount)
 async def admin_edit_debt_set_amount(message: types.Message, state: FSMContext):
     """
-    Обработка введённой суммы долга:
-      - сохраняем новую сумму,
-      - при 0 — снимаем флаг неоплаченной сессии.
+    Обработка введённой суммы долга.
+    Доступно только админам.
     """
     if not _is_admin(message.from_user.id):
         return
@@ -519,6 +536,7 @@ async def admin_edit_debt_set_amount(message: types.Message, state: FSMContext):
 async def admin_history_menu(message: types.Message):
     """
     Показать список последних вечеров (даты) с кнопками.
+    Доступно только админам.
     """
     if not _is_admin(message.from_user.id):
         return
@@ -538,9 +556,8 @@ async def admin_history_menu(message: types.Message):
 @router.callback_query(F.data.startswith("hist_"))
 async def admin_history_detail(call: CallbackQuery):
     """
-    Подробности по конкретному вечеру:
-      - список игроков, статус, сколько оплатил,
-      - суммарная сумма за вечер.
+    Подробности по конкретному вечеру.
+    Доступно только админам.
     """
     if not _is_admin(call.from_user.id):
         await call.answer("Недостаточно прав.", show_alert=True)

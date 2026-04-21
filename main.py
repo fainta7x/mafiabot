@@ -8,9 +8,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import config
 from database import init_db
 from handlers import start_profile, payment, booking, debug, profile
+from handlers import admin_judges   # ← НОВЫЙ ИМПОРТ РОУТЕРА СУДЕЙ
 import admin
 from game import router as game_router
-from commands import setup_bot_commands  # ← ДОБАВИТЬ импорт
+from commands import setup_bot_commands  # импорт команд
+
 
 # 1. Описываем класс логгера ВНЕ функции main, чтобы Python его видел
 class MyLoggerMiddleware(BaseMiddleware):
@@ -18,14 +20,22 @@ class MyLoggerMiddleware(BaseMiddleware):
         if event.message:
             user = event.message.from_user
             # Добавили @username в вывод
-            print(f"📩 СООБЩЕНИЕ | {user.full_name} (@{user.username}) | ID: {user.id} | Текст: {event.message.text}")
+            print(
+                f"📩 СООБЩЕНИЕ | {user.full_name} (@{user.username}) "
+                f"| ID: {user.id} | Текст: {event.message.text}"
+            )
         elif event.callback_query:
             user = event.callback_query.from_user
-            print(f"🔘 КНОПКА | {user.full_name} (@{user.username}) | Нажал: {event.callback_query.data}")
+            print(
+                f"🔘 КНОПКА | {user.full_name} (@{user.username}) "
+                f"| Нажал: {event.callback_query.data}"
+            )
         return await handler(event, data)
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 async def main():
     storage = MemoryStorage()
@@ -46,15 +56,17 @@ async def main():
     dp.include_router(payment.router)
     dp.include_router(booking.router)
     dp.include_router(admin.router)
+    dp.include_router(admin_judges.router)   # ← АККУРАТНО ДОБАВЛЕН РОУТЕР СУДЕЙ
     dp.include_router(debug.router)
 
-    # ========== ДОБАВИТЬ: Устанавливаем команды для кнопки меню ==========
+    # ========== Устанавливаем команды для кнопки меню ==========
     await setup_bot_commands(bot)
     logger.info("✅ Команды для меню установлены!")
 
     await init_db()
     logger.info("Бот успешно запущен!")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     try:

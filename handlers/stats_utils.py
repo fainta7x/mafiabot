@@ -15,7 +15,7 @@ async def build_user_stats_data(user_id: int) -> dict:
     """
     Собирает данные для картинки профиля из БД.
     """
-    # Получаем профиль пользователя
+    # Профиль
     user_profile = await database.get_user_profile(user_id)
     if user_profile:
         full_name, nickname, debt, last_visit = user_profile
@@ -23,7 +23,7 @@ async def build_user_stats_data(user_id: int) -> dict:
         full_name = None
         nickname = None
 
-    # Получаем игровые счётчики
+    # Игровые счётчики
     counters = await database.get_user_game_counters(user_id)
     if not counters or counters["games_played"] == 0:
         # Нет игр — возвращаем пустую статистику
@@ -46,6 +46,12 @@ async def build_user_stats_data(user_id: int) -> dict:
             "mn_plus_sum": 0.0,
             "discipline_minus_sum": 0.0,
             "roles": {},
+            # новые поля, чтобы не ломать картинку даже при нуле игр
+            "pu_count": 0,
+            "avg_lh": 0.0,
+            "removed_count": 0,
+            "techfouls_total": 0,
+            "ppk_guilty_count": 0,
         }
 
     games_played = counters["games_played"]
@@ -55,10 +61,10 @@ async def build_user_stats_data(user_id: int) -> dict:
     winrate = round(games_won / games_played * 100, 1) if games_played > 0 else 0.0
     avg_points = round(points / games_played, 2) if games_played > 0 else 0.0
 
-    # Получаем статистику по ролям
+    # Статистика по ролям
     roles_stats = await database.get_user_roles_stats(user_id)
 
-    # Агрегируем ПР/МН и минуса
+    # Агрегация ПР/МН и дисциплинарных минусов
     (
         pr_avg_all,
         pr_neg_count_all,
@@ -73,7 +79,15 @@ async def build_user_stats_data(user_id: int) -> dict:
         total_negative_all,
     ) = _aggregate_pr_mn_and_negative(roles_stats)
 
-    # Форматируем статистику по ролям для картинки
+    # Дополнительные агрегаты по игроку (ПУ, ЛХ, удаления, техфолы, ППК)
+    extra = await database.get_user_extra_stats(user_id)
+    pu_count = extra.get("pu_count", 0)
+    avg_lh = extra.get("avg_lh", 0.0)
+    removed_count = extra.get("removed_count", 0)
+    techfouls_total = extra.get("techfouls_total", 0)
+    ppk_guilty_count = extra.get("ppk_guilty_count", 0)
+
+    # Формат для ролей (картинка профиля)
     roles_for_pic = {}
     for r in roles_stats:
         role = r["role"]
@@ -105,6 +119,12 @@ async def build_user_stats_data(user_id: int) -> dict:
         "mn_plus_sum": mn_pos_sum_all,
         "discipline_minus_sum": total_negative_all,
         "roles": roles_for_pic,
+        # НОВЫЕ ПОЛЯ ДЛЯ КАРТИНКИ ПРОФИЛЯ
+        "pu_count": pu_count,
+        "avg_lh": avg_lh,
+        "removed_count": removed_count,
+        "techfouls_total": techfouls_total,
+        "ppk_guilty_count": ppk_guilty_count,
     }
 
 

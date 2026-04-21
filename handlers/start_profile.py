@@ -10,14 +10,42 @@ import keyboards
 import database
 import config
 from handlers.payment import payment_kb
-from handlers.booking import build_stats_text, get_next_friday  # ТУТ только build_stats_text
-from stats_utils import build_user_stats_text  # импорт функции статистики (понадобится, если где-то ещё используешь)
+from handlers.booking import build_stats_text, get_next_friday
+from stats_utils import build_user_stats_text
 
 router = Router()
 
 
 class Form(StatesGroup):
     waiting_for_nickname = State()
+
+
+async def _is_judge(user_id: int) -> bool:
+    """
+    Пользователь считается судьёй, если:
+    - он в ADMIN_IDS, или
+    - он в списке game_judges в БД.
+    """
+    if user_id in config.ADMIN_IDS:
+        return True
+
+    judges = await database.get_game_judges()
+    return user_id in judges
+
+
+def _get_main_menu_for_user(is_admin: bool, is_judge: bool):
+    """
+    Выбор ГЛАВНОГО меню (то, что показывается на /start и '🏠 В главное меню'):
+
+    - админ -> main_menu_admin (игровое меню + '🛠 Админ-панель')
+    - судья (но не админ) -> main_menu_judge (игровое меню + '⚖ Панель судьи')
+    - обычный игрок -> main_menu
+    """
+    if is_admin:
+        return keyboards.main_menu_admin()
+    if is_judge:
+        return keyboards.main_menu_judge()
+    return keyboards.main_menu()
 
 
 @router.message(Command("start"), F.chat.type == "private")
@@ -29,6 +57,11 @@ async def start(m: Message, command: CommandObject):
         m.from_user.full_name
     )
 
+    user_id = m.from_user.id
+    is_admin = user_id in config.ADMIN_IDS
+    is_judge = await _is_judge(user_id)
+    kb = _get_main_menu_for_user(is_admin, is_judge)
+
     args = (command.args or "").strip()
 
     if args == "players":
@@ -37,21 +70,45 @@ async def start(m: Message, command: CommandObject):
 
         await m.answer(
             text,
-            reply_markup=keyboards.main_menu()
+            reply_markup=kb
         )
         return
 
+    date = get_next_friday()
     await m.answer(
-        f"🎭 Привет! Ближайшая игра {get_next_friday()} в 20:00",
-        reply_markup=keyboards.main_menu()
+        f"🎭 Привет! Ближайшая игра {date} в 20:00",
+        reply_markup=kb
     )
 
 
 @router.message(F.text == "🏠 В главное меню", F.chat.type == "private")
 async def back_to_main_menu(message: Message):
+    user_id = message.from_user.id
+    is_admin = user_id in config.ADMIN_IDS
+    is_judge = await _is_judge(user_id)
+    kb = _get_main_menu_for_user(is_admin, is_judge)
+
+    date = get_next_friday()
     await message.answer(
-        f"🎭 Привет! Ближайшая игра {get_next_friday()} в 20:00",
-        reply_markup=keyboards.main_menu()
+        f"🎭 Привет! Ближайшая игра {date} в 20:00",
+        reply_markup=kb
+    )
+
+
+@router.message(F.text == "⚖ Панель судьи", F.chat.type == "private")
+async def open_judge_panel(message: Message):
+    """
+    Открывает ВНУТРЕННЮЮ панель судьи.
+    Доступно только для судей/админов.
+    """
+    user_id = message.from_user.id
+    if not await _is_judge(user_id):
+        await message.answer("⛔ Эта панель доступна только судьям.")
+        return
+
+    await message.answer(
+        "⚖ Панель судьи.\nЗдесь управление играми.",
+        reply_markup=keyboards.judge_menu()
     )
 
 
@@ -86,17 +143,21 @@ async def show_profile(message: Message):
 async def show_players_for_user(message: Message):
     """
     Показывает список игроков на ближайший вечер
-    в том же виде, как в анонсе (build_stats_text + get_next_friday).
+    в том же виде, как в анонсе.
     """
     date_str = get_next_friday()
     text = await build_stats_text(date_str)
 
-    # Если на эту дату никого нет (всего 0)
     if "всего 0" in text:
         await message.answer(f"На ближайший вечер {date_str} пока никто не записался.")
         return
 
-    await message.answer(text, reply_markup=keyboards.main_menu())
+    user_id = message.from_user.id
+    is_admin = user_id in config.ADMIN_IDS
+    is_judge = await _is_judge(user_id)
+    kb = _get_main_menu_for_user(is_admin, is_judge)
+
+    await message.answer(text, reply_markup=kb)
 
 
 @router.callback_query(F.data == "edit_nickname")
@@ -114,9 +175,15 @@ async def change_nick_step2(message: Message, state: FSMContext):
         return
     await database.update_nickname(message.from_user.id, new_nick)
     await state.clear()
+
+    user_id = message.from_user.id
+    is_admin = user_id in config.ADMIN_IDS
+    is_judge = await _is_judge(user_id)
+    kb = _get_main_menu_for_user(is_admin, is_judge)
+
     await message.answer(
         f"✅ Ник изменён на: {new_nick}",
-        reply_markup=keyboards.main_menu()
+        reply_markup=kb
     )
 
 

@@ -1,5 +1,4 @@
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
-from aiogram.types import WebAppInfo
 from aiogram.types import InlineKeyboardMarkup
 
 
@@ -12,9 +11,12 @@ def _mobile_adjust(*sizes: int, max_per_row: int = 3):
     return min(max_per_row, max(sizes)) if len(sizes) == 1 else sizes
 
 
-# ========== ГЛАВНОЕ МЕНЮ ПОЛЬЗОВАТЕЛЯ ==========
+# ========== ГЛАВНЫЕ МЕНЮ ПОЛЬЗОВАТЕЛЯ / СУДЬИ / АДМИНА ==========
 def main_menu():
-    """Главное меню — оптимизировано для мобильных (3 кнопки в ряд максимум)."""
+    """
+    Главное меню обычного игрока:
+    без админки и без панели судьи.
+    """
     builder = ReplyKeyboardBuilder()
     buttons = [
         "🕵️ Записаться на игру",
@@ -24,12 +26,108 @@ def main_menu():
         "📊 Статистика",
         "📜 Мои игры",
         "📜 Все игры",
-        "🛠 Админ-панель"
     ]
     for btn in buttons:
         builder.button(text=btn)
 
-    builder.adjust(3, 2, 3)
+    builder.adjust(3, 2, 2)
+    return builder.as_markup(resize_keyboard=True, is_persistent=True)
+
+
+def main_menu_judge():
+    """
+    Главное меню для судьи:
+    всё как у обычного игрока + кнопка '⚖ Панель судьи'.
+    """
+    builder = ReplyKeyboardBuilder()
+    buttons = [
+        "🕵️ Записаться на игру",
+        "🧾 Список игроков",
+        "👤 Мой профиль",
+        "💳 Оплатить",
+        "📊 Статистика",
+        "📜 Мои игры",
+        "📜 Все игры",
+        "⚖ Панель судьи",
+    ]
+    for btn in buttons:
+        builder.button(text=btn)
+
+    builder.adjust(3, 3, 2)
+    return builder.as_markup(resize_keyboard=True, is_persistent=True)
+
+
+def main_menu_admin():
+    """
+    Главное меню для админа:
+    всё как у обычного игрока + кнопка '🛠 Админ-панель'.
+    В саму админку он попадает по этой кнопке / команде /admin.
+    """
+    builder = ReplyKeyboardBuilder()
+    buttons = [
+        "🕵️ Записаться на игру",
+        "🧾 Список игроков",
+        "👤 Мой профиль",
+        "💳 Оплатить",
+        "📊 Статистика",
+        "📜 Мои игры",
+        "📜 Все игры",
+        "🛠 Админ-панель",
+    ]
+    for btn in buttons:
+        builder.button(text=btn)
+
+    builder.adjust(3, 3, 2)
+    return builder.as_markup(resize_keyboard=True, is_persistent=True)
+
+
+# ========== АДМИН-МЕНЮ (REPLY, ВНУТРЕННЯЯ ПАНЕЛЬ) ==========
+def admin_menu():
+    """
+    ВНУТРЕННЯЯ панель администратора:
+    используется после входа через '🛠 Админ-панель' или /admin.
+    """
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="🎲 Новая игра")
+    builder.button(text="♻️ Продолжить игру")
+    builder.button(text="📋 Игроки")
+    builder.button(text="👥 Все пользователи")
+    builder.button(text="💰 Должники")
+    builder.button(text="📣 Сделать анонс")
+    builder.button(text="💸 Разослать счета")
+    builder.button(text="📚 История вечеров")
+    builder.button(text="❌ Отменить вечер")
+    builder.button(text="⚖ Судьи")
+    builder.button(text="🏠 В главное меню")
+    builder.adjust(2, 3, 2, 2, 2)
+    return builder.as_markup(resize_keyboard=True, is_persistent=True)
+
+
+def game_admin_menu():
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="Ок")
+    builder.button(text="Выставить")
+    builder.button(text="Голоса")
+    builder.button(text="Фол")
+    builder.button(text="Убить")
+    builder.button(text="✏️ Редактировать")
+    builder.button(text="⏹ Остановить")
+    builder.button(text="🏁 Завершить")
+    builder.adjust(3, 2, 2, 1)
+    return builder.as_markup(resize_keyboard=True, is_persistent=True)
+
+
+def judge_menu():
+    """
+    ВНУТРЕННЯЯ панель судьи (после нажатия '⚖ Панель судьи'):
+    управление играми и возврат в главное меню.
+    """
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="🎲 Новая игра")
+    builder.button(text="♻️ Продолжить игру")
+    builder.button(text="📋 Игроки")
+    builder.button(text="🏠 В главное меню")
+    builder.adjust(2, 2)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
@@ -74,37 +172,6 @@ def profile_kb(debt: int):
     return builder.as_markup()
 
 
-# ========== АДМИН-МЕНЮ (REPLY) ==========
-def admin_menu():
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="🎲 Новая игра")
-    builder.button(text="♻️ Продолжить игру")
-    builder.button(text="📋 Игроки")
-    builder.button(text="👥 Все пользователи")
-    builder.button(text="💰 Должники")
-    builder.button(text="📣 Сделать анонс")
-    builder.button(text="💸 Разослать счета")
-    builder.button(text="📚 История вечеров")
-    builder.button(text="❌ Отменить вечер")
-    builder.button(text="🏠 В главное меню")
-    builder.adjust(2, 3, 2, 2, 1)
-    return builder.as_markup(resize_keyboard=True, is_persistent=True)
-
-
-def game_admin_menu():
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="Ок")
-    builder.button(text="Выставить")
-    builder.button(text="Голоса")
-    builder.button(text="Фол")
-    builder.button(text="Убить")
-    builder.button(text="✏️ Редактировать")
-    builder.button(text="⏹ Остановить")
-    builder.button(text="🏁 Завершить")
-    builder.adjust(3, 2, 2, 1)
-    return builder.as_markup(resize_keyboard=True, is_persistent=True)
-
-
 # ========== INLINE КЛАВИАТУРЫ ==========
 def evenings_history_kb(evenings: list):
     builder = InlineKeyboardBuilder()
@@ -126,7 +193,7 @@ def game_finish_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="🏙 Победа города", callback_data="game_end:city")
     builder.button(text="💀 Победа мафии", callback_data="game_end:mafia")
-    builder.button(text="⚠️ ППК", callback_data="game_end:ppk")  # НОВАЯ КНОПКА
+    builder.button(text="⚠️ ППК", callback_data="game_end:ppk")
     builder.button(text="❌ Отмена", callback_data="game_end:cancel")
     builder.adjust(1)
     return builder.as_markup()
@@ -170,7 +237,6 @@ def confirmation_kb(action: str):
 
 
 # ========== НОВЫЕ КЛАВИАТУРЫ ДЛЯ РЕЖИМА РЕДАКТИРОВАНИЯ ==========
-
 def edit_slot_selection_kb(slots: dict) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for slot_num, info in slots.items():
@@ -296,7 +362,6 @@ def numeric_selection_kb(selected: list = None) -> InlineKeyboardMarkup:
 
 
 # ========== НОВЫЕ КЛАВИАТУРЫ ДЛЯ СОЗДАНИЯ ИГРЫ ==========
-
 def game_confirm_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Подтвердить", callback_data="game_confirm_yes")
@@ -320,7 +385,6 @@ def players_selection_kb(players: list, action: str, max_select: int, selected: 
 
 
 # ========== КЛАВИАТУРЫ ДЛЯ УПРАВЛЕНИЯ ФОЛАМИ ==========
-
 def foul_select_kb(slots: dict) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for slot_num, info in slots.items():
@@ -342,8 +406,8 @@ def foul_action_kb(slot_num: int, current_fouls: int) -> InlineKeyboardMarkup:
     builder.button(text="➕ +1 фол", callback_data=f"foul_add_{slot_num}")
     if current_fouls > 0:
         builder.button(text="➖ -1 фол", callback_data=f"foul_remove_{slot_num}")
-    builder.button(text="📋 Техфол малый (-0.3)", callback_data=f"tech_foul_small_{slot_num}")  # -0.3
-    builder.button(text="⚠️ Техфол большой (-0.6)", callback_data=f"tech_foul_big_{slot_num}")  # -0.6
+    builder.button(text="📋 Техфол малый (-0.3)", callback_data=f"tech_foul_small_{slot_num}")
+    builder.button(text="⚠️ Техфол большой (-0.6)", callback_data=f"tech_foul_big_{slot_num}")
     builder.button(text="🚫 Удалить игрока (-1.0)", callback_data=f"kick_player_{slot_num}")
     builder.button(text="❌ Отмена", callback_data="foul_cancel")
     builder.adjust(2, 2, 2, 1)
@@ -351,7 +415,6 @@ def foul_action_kb(slot_num: int, current_fouls: int) -> InlineKeyboardMarkup:
 
 
 # ========== КЛАВИАТУРЫ ДЛЯ ВЫСТАВЛЕНИЯ (НОМИНАЦИИ) ==========
-
 def nominate_select_kb(slots: dict, current_nominated: list = None) -> InlineKeyboardMarkup:
     current_nominated = current_nominated or []
     builder = InlineKeyboardBuilder()
@@ -372,7 +435,7 @@ def nominate_select_kb(slots: dict, current_nominated: list = None) -> InlineKey
     for i in range(buttons_count):
         if i % 2 == 0:
             rows.append(2)
-    if buttons_count % 2 == 1:
+    if buttons_count % 2 == 1 and rows:
         rows[-1] = 1
 
     if rows:
@@ -385,7 +448,6 @@ def nominate_select_kb(slots: dict, current_nominated: list = None) -> InlineKey
 
 
 # ========== КЛАВИАТУРЫ ДЛЯ ГОЛОСОВАНИЯ ==========
-
 def vote_value_kb(slot_num: int, max_votes: int, remaining_voters: int = None,
                   remaining_candidates: int = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -427,7 +489,6 @@ def vote_value_kb(slot_num: int, max_votes: int, remaining_voters: int = None,
 
 
 # ========== КЛАВИАТУРЫ ДЛЯ РЕДАКТОРА БАЛЛОВ ПОСЛЕ ИГРЫ ==========
-
 def score_editor_player_kb(slots: dict, winning_team: str = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for slot_num, info in slots.items():
@@ -484,7 +545,6 @@ edit_actions_kb = get_edit_menu_keyboard
 
 
 # ========== КЛАВИАТУРЫ ДЛЯ УБИЙСТВА ==========
-
 def kill_select_kb(slots: dict) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for slot_num, info in slots.items():
@@ -527,7 +587,6 @@ def kill_opinion_kb() -> InlineKeyboardMarkup:
 
 
 # ========== НОВЫЕ КЛАВИАТУРЫ ДЛЯ ППК ==========
-
 def ppk_team_selection_kb() -> InlineKeyboardMarkup:
     """Выбор победившей команды при ППК."""
     builder = InlineKeyboardBuilder()
@@ -557,5 +616,70 @@ def ppk_confirmation_kb(slot_num: int, name: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text=f"✅ Да, {name} виноват", callback_data="ppk_confirm_yes")
     builder.button(text="❌ Нет, отмена", callback_data="ppk_cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+# ========== НОВЫЕ КЛАВИАТУРЫ ДЛЯ УПРАВЛЕНИЯ СУДЬЯМИ ==========
+def judges_menu_kb() -> InlineKeyboardMarkup:
+    """
+    Главное меню управления судьями (для админа).
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Список судей", callback_data="judge_list")
+    builder.button(text="➕ Назначить судью", callback_data="judge_add")
+    builder.button(text="❌ Закрыть", callback_data="judge_back")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def judges_list_kb(judges: list) -> InlineKeyboardMarkup:
+    """
+    Список судей.
+    judges: list[tuple[user_id, name]]
+    """
+    builder = InlineKeyboardBuilder()
+    if not judges:
+        builder.button(text="Пока нет назначенных судей", callback_data="judge_empty")
+        builder.adjust(1)
+        builder.button(text="◀️ Назад", callback_data="judge_back")
+        builder.adjust(1)
+        return builder.as_markup()
+
+    for user_id, name in judges:
+        if len(name) > 20:
+            name = name[:17] + "..."
+        builder.button(
+            text=f"⚖ {name} ({user_id})",
+            callback_data=f"judge_remove_{user_id}"
+        )
+    builder.adjust(1)
+    builder.button(text="◀️ Назад", callback_data="judge_back")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def judge_candidate_kb(user_id: int, name: str) -> InlineKeyboardMarkup:
+    """
+    Подтверждение назначения конкретного пользователя судьёй.
+    """
+    builder = InlineKeyboardBuilder()
+    if len(name) > 20:
+        name = name[:17] + "..."
+    builder.button(
+        text=f"✅ Назначить {name} судьёй",
+        callback_data=f"judge_confirm_add_{user_id}"
+    )
+    builder.button(text="❌ Отмена", callback_data="judge_cancel_add")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def judge_back_kb() -> InlineKeyboardMarkup:
+    """
+    Простой «Назад» / закрыть меню судей.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="◀️ Назад", callback_data="judge_back")
     builder.adjust(1)
     return builder.as_markup()

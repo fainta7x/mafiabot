@@ -1,5 +1,7 @@
 from typing import Dict, List, Tuple
 
+import database  # нужен для получения имени судьи в протоколе
+
 
 # =========================================================
 # UTILS — ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ОТОБРАЖЕНИЯ ИГРЫ
@@ -80,15 +82,27 @@ def _parse_slots_list(text: str) -> list[int]:
 # 2. ТЕКСТОВЫЕ ПРЕДСТАВЛЕНИЯ
 # =========================================================
 
-def build_slots_text(slots: Dict[int, dict]) -> str:
+def build_slots_text(
+    slots: Dict[int, dict],
+    judge_name: str | None = None,
+) -> str:
     """
     Черновик новой игры:
       - показывает список слотов и имена игроков;
-      - даёт подсказку, как переименовать или добавить слот.
+      - даёт подсказку, как переименовать или добавить слот;
+      - ДОБАВЛЕНО: выводит Судью, если передан judge_name.
     """
     sorted_slots = dict(sorted(slots.items(), key=lambda x: x[0]))
 
-    lines = ["🎲 Черновик новой игры.\n", "Текущие слоты игроков:\n"]
+    lines: list[str] = []
+
+    # Шапка с Судьёй
+    if judge_name:
+        lines.append(f"🎲 Черновик новой игры.\nСудья: <b>{judge_name}</b>\n")
+    else:
+        lines.append("🎲 Черновик новой игры.\n")
+
+    lines.append("Текущие слоты игроков:\n")
     for slot, info in sorted_slots.items():
         name_part = _format_player_name(info.get("full_name"), info.get("nickname"))
         lines.append(f"{slot}. {name_part}")
@@ -119,7 +133,11 @@ def build_roles_summary(slots: Dict[int, dict]) -> str:
     return "\n".join(lines)
 
 
-def build_game_state(slots: Dict[int, dict], alive_only: bool = False) -> str:
+def build_game_state(
+    slots: Dict[int, dict],
+    alive_only: bool = False,
+    judge_name: str | None = None,
+) -> str:
     """
     Отображение текущего состояния игры:
       - слот, имя, роль;
@@ -128,10 +146,19 @@ def build_game_state(slots: Dict[int, dict], alive_only: bool = False) -> str:
       - отметка «ВЫСТАВЛЕН»;
       - количество голосов.
     Если alive_only=True — показываются только живые игроки.
+    ДОБАВЛЕНО: в шапке выводится Судья, если judge_name не пуст.
     """
     sorted_slots = dict(sorted(slots.items(), key=lambda x: x[0]))
 
-    lines: List[str] = ["📋 Текущее состояние игры:\n"]
+    if alive_only:
+        header = "📋 ЖИВЫЕ игроки на данный момент:\n"
+    else:
+        header = "📋 Текущее состояние игры:\n"
+
+    if judge_name:
+        header = header.rstrip() + f"\nСудья: <b>{judge_name}</b>\n"
+
+    lines: List[str] = [header]
     for slot, info in sorted_slots.items():
         if alive_only and not info.get("alive", True):
             continue
@@ -152,12 +179,9 @@ def build_game_state(slots: Dict[int, dict], alive_only: bool = False) -> str:
         tech_text = f" | Техфолы: {tech_fouls_count}" if tech_fouls_count > 0 else ""
 
         lines.append(
-            f"{slot}. {name} — {role} | Фолы: {fouls}{tech_text} | Статус: {status_text}{nom_text}{votes_text}"
+            f"{slot}. {name} — {role} | Фолы: {fouls}{tech_text} | "
+            f"Статус: {status_text}{nom_text}{votes_text}"
         )
-
-    if alive_only:
-        # Переписываем заголовок, если показываем только живых
-        lines[0] = "📋 ЖИВЫЕ игроки на данный момент:\n"
 
     return "\n".join(lines)
 
@@ -191,15 +215,25 @@ def build_votes_summary(slots: Dict[int, dict]) -> str:
     return "\n".join(lines)
 
 
-def build_protocol_text(
-        slots: Dict[int, dict],
-        updated: bool = False,
-        winner_label: str | None = None,
+async def build_protocol_text(
+    slots: Dict[int, dict],
+    updated: bool = False,
+    winner_label: str | None = None,
 ) -> str:
     """
     Собирает ТОЛЬКО ТЕЛО протокола игры из slots (HTML).
+    ДОБАВЛЕНО: в шапке выводится Судья (берётся из БД), если сохранён.
     """
     lines: list[str] = []
+
+    # --- ШАПКА С СУДЬЁЙ И ИТОГО РЕЗУЛЬТАТОМ ---
+    judge_name = await database.get_current_game_judge_name()
+    if judge_name:
+        lines.append(f"<b>Судья:</b> {judge_name}")
+    if winner_label:
+        lines.append(f"<b>Результат:</b> {winner_label}")
+    if lines:
+        lines.append("")  # пустая строка после шапки
 
     # Вытаскиваем служебный ключ порядка убийств, если он есть
     night_kills_order: list[int] = []
@@ -276,7 +310,9 @@ def build_protocol_text(
             mn_pts = float(info.get("will_opinion_points", 0.0) or 0.0)
             dc_pts = float(info.get("dc_points", 0.0) or 0.0)
 
-            total_pts = round(base_pts + bonus_pts + lh_pts + pr_pts + mn_pts + dc_pts, 1)
+            total_pts = round(
+                base_pts + bonus_pts + lh_pts + pr_pts + mn_pts + dc_pts, 1
+            )
 
             will_protocol = (info.get("will_protocol_raw") or "").strip()
             will_opinion = (info.get("will_opinion") or "").strip()

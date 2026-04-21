@@ -4,7 +4,7 @@ from datetime import datetime
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, CallbackQuery  # ← ДОБАВИЛИ CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import config
@@ -14,28 +14,95 @@ from .state import GameCreateState
 from .text import build_slots_text, build_game_state, build_protocol_text
 from .pic_endgame import create_endgame_pic_summary
 
+# ========== ПРОВЕРКИ ПРАВ СУДЬИ ДЛЯ ИГРОВЫХ ХЕНДЛЕРОВ ==========
+
+async def _is_judge(user_id: int) -> bool:
+    """
+    Пользователь имеет право вести игры, если:
+    - он в списке game_judges в БД,
+    - или он в ADMIN_IDS (из config).
+    """
+    if user_id in config.ADMIN_IDS:
+        return True
+
+    judges = await database.get_game_judges()
+    return user_id in judges
+
+
+async def ensure_judge_cb(callback: CallbackQuery) -> bool:
+    """
+    Проверка: callback от судьи (или админа).
+    Если нет прав — показываем алерт и возвращаем False.
+    """
+    user_id = callback.from_user.id
+
+    if not await _is_judge(user_id):
+        await callback.answer("❌ У вас нет прав судьи.", show_alert=True)
+        return False
+
+    # Если хочешь ограничить управление только личкой — оставляем эту проверку.
+    # Если можно и в группе, можно эту часть убрать.
+    if callback.message.chat.type != "private":
+        await callback.answer("⚠️ Управление игрой доступно только в личке с ботом.", show_alert=True)
+        return False
+
+    return True
+
 router = Router()
 
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ПРАВ ДОСТУПА ==========
+
 def is_admin_pm(message: types.Message) -> bool:
-    return message.from_user and message.from_user.id in config.ADMIN_IDS and message.chat.type == "private"
+    """
+    Синхронная проверка:
+    - сообщение из лички
+    - пользователь в ADMIN_IDS.
+    """
+    if not message.from_user or message.chat.type != "private":
+        return False
+    return message.from_user.id in config.ADMIN_IDS
 
 
 async def ensure_admin_pm(message: types.Message) -> bool:
-    if not is_admin_pm(message):
+    """
+    Строгая админ-проверка:
+    доступ ТОЛЬКО для супер-админов (ADMIN_IDS).
+    Используется для анонсов, счетов, истории, должников и т.п.
+    """
+    if not message.from_user or message.chat.type != "private":
         return False
-    return True
+    user_id = message.from_user.id
+    return user_id in config.ADMIN_IDS
 
 
-async def get_slots(message: types.Message, state: FSMContext, allow_empty: bool = False) -> dict:
-    data = await state.get_data()
-    slots = data.get("slots") or {}
-    if not slots and not allow_empty:
-        await message.answer("Слоты пустые. Нажми «🎲 Новая игра», чтобы начать новую партию.",
-                             reply_markup=keyboards.game_admin_menu())
-    return slots
+async def ensure_judge_pm(message: types.Message) -> bool:
+    """
+    Проверка прав ведущего игры:
+    - личка
+    - либо супер-админ (ADMIN_IDS)
+    - либо судья из БД (game_judges).
+    ЭТИМ пользуемся во всех игровых хендлерах: новая игра, продолжить, фолы, ППК, кик и т.п.
+    """
+    if not message.from_user or message.chat.type != "private":
+        return False
 
+    user_id = message.from_user.id
+
+    # Супер-админ всегда имеет доступ
+    if user_id in config.ADMIN_IDS:
+        return True
+
+    # Судья из настроек БД
+    if await database.is_game_judge(user_id):
+        return True
+
+    # Здесь можно при желании отвечать сообщением о нехватке прав
+    # await message.answer("❌ У вас нет прав судьи для управления игрой.")
+    return False
+
+
+# ========== ПРОЧИЕ УТИЛИТЫ ==========
 
 def parse_slot_num(raw: str, min_slot: int = 1, max_slot: int = 10) -> tuple[bool, int | None, str | None]:
     text = (raw or "").strip()
@@ -47,13 +114,46 @@ def parse_slot_num(raw: str, min_slot: int = 1, max_slot: int = 10) -> tuple[boo
     return True, num, None
 
 
+async def get_slots(message: types.Message, state: FSMContext, allow_empty: bool = False) -> dict:
+    """
+    Возвращает слоты из FSM-состояния.
+    Если слотов нет и allow_empty=False — пишет сообщение и возвращает {}.
+    """
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+
+    if not slots and not allow_empty:
+        await message.answer(
+            "Слоты пустые. Нажмите «🎲 Новая игра», чтобы начать новую партию.",
+            reply_markup=keyboards.game_admin_menu()
+        )
+
+    return slots
+
+
 def create_empty_slot(nickname: str) -> dict:
     return {
-        "user_id": None, "full_name": None, "nickname": nickname, "username": None,
-        "status": "Добавлен вручную", "fouls": 0, "alive": True, "status_reason": "Жив",
-        "nominated": False, "votes": 0, "night_suspects": [], "role": "Не задана",
-        "team": None, "base_points": 0, "bonus_points": 0, "lh_points": 0.0, "pu_mark": False,
-        "kicked": False, "ppk": False, "technical_fouls": [], "dc_points": 0.0
+        "user_id": None,
+        "full_name": None,
+        "nickname": nickname,
+        "username": None,
+        "status": "Добавлен вручную",
+        "fouls": 0,
+        "alive": True,
+        "status_reason": "Жив",
+        "nominated": False,
+        "votes": 0,
+        "night_suspects": [],
+        "role": "Не задана",
+        "team": None,
+        "base_points": 0,
+        "bonus_points": 0,
+        "lh_points": 0.0,
+        "pu_mark": False,
+        "kicked": False,
+        "ppk": False,
+        "technical_fouls": [],
+        "dc_points": 0.0,
     }
 
 
@@ -86,30 +186,174 @@ async def clear_game_state(state: FSMContext):
 
 
 async def show_game_state_all(message: types.Message, state: FSMContext):
-    """Показывает текущее состояние игры."""
+    """Показывает текущее состояние игры (для ведущего)."""
     data = await state.get_data()
     slots = data.get("slots") or {}
     print(f"[DIAG] show_game_state_all: slots keys = {list(slots.keys())}")
     if 6 in slots:
         print(f"[DIAG] Слот 6: alive={slots[6].get('alive')}")
     if slots:
-        await message.answer(build_game_state(slots, alive_only=False), reply_markup=keyboards.game_admin_menu())
+        judge_name = await database.get_current_game_judge_name()
+        await message.answer(
+            build_game_state(slots, alive_only=False, judge_name=judge_name),
+            reply_markup=keyboards.game_admin_menu()
+        )
 
 
 # ========== 1. НОВАЯ ИГРА (ИНТЕРАКТИВНАЯ) ==========
+
+async def show_players_list_for_game(
+    message: types.Message,
+    state: FSMContext,
+    booked: list | None = None
+):
+    """Показывает предварительный список всех 10 слотов + судью."""
+    if booked is None:
+        data = await state.get_data()
+        booked = data.get("booked_players", []) or []
+
+    # Берём судью из БД
+    judge_name = await database.get_current_game_judge_name()
+
+    lines: list[str] = []
+
+    header = "📋 Предварительный состав игры (10 слотов):\n"
+    if judge_name:
+        header = header + f"\nСудья: {judge_name}\n"
+    lines.append(header)
+
+    lines.append("")
+    for slot_num in range(1, 11):
+        if slot_num <= len(booked) and booked[slot_num - 1]:
+            user_id, full_name, username, nickname, status = booked[slot_num - 1]
+            name = nickname or full_name or f"Игрок {user_id}"
+            lines.append(f"{slot_num}. ✅ {name}")
+        else:
+            lines.append(f"{slot_num}. ⬜ Свободно")
+
+    real_players = len(
+        [
+            p for p in booked
+            if p
+            and p[3] not in [None, "Свободно", ""]
+            and p[1] not in ["Свободно"]
+        ]
+    )
+
+    lines.append("")
+    lines.append(f"👥 Заполнено слотов: {real_players}/10")
+    lines.append("")
+    if real_players < 4:
+        lines.append("⚠️ Минимальное количество игроков: 4")
+    else:
+        lines.append("✅ Можно начинать игру!")
+
+    lines.append("")
+    lines.append("Подтвердите состав или отредактируйте слоты.")
+
+    text = "\n".join(lines)
+
+    await message.answer(
+        text,
+        reply_markup=keyboards.game_confirm_kb(),
+        parse_mode="Markdown"
+    )
+
+
+async def show_current_players_list(message: types.Message, state: FSMContext):
+    """Показывает текущий список слотов с инлайн-кнопкой Готово."""
+    data = await state.get_data()
+    booked = data.get("booked_players", []) or []
+
+    players_text = "📋 **Текущий состав (10 слотов):**\n\n"
+
+    for slot_num in range(1, 11):
+        if slot_num <= len(booked) and booked[slot_num - 1]:
+            user_id, full_name, username, nickname, status = booked[slot_num - 1]
+            name = nickname or full_name or f"Игрок {user_id}"
+            if len(name) > 20:
+                name = name[:17] + "..."
+            players_text += f"{slot_num}. {name}\n"
+        else:
+            players_text += f"{slot_num}. ⬜ Свободно\n"
+
+    real_players = len(
+        [
+            p for p in booked
+            if p
+            and p[3] not in [None, "Свободно", ""]
+            and p[1] not in ["Свободно"]
+        ]
+    )
+
+    players_text += f"\n✏️ **Заполнено: {real_players}/10**\n\n"
+    players_text += "**Команды:**\n"
+    players_text += "• `<номер> <ник>` — заполнить слот\n"
+    players_text += "• `очистить <номер>` — очистить слот\n\n"
+    players_text += "Когда закончите редактирование — нажмите кнопку **Готово**"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Готово", callback_data="edit_players_done")
+    builder.adjust(1)
+
+    await message.answer(
+        players_text,
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+
+
 @router.message(F.text == "🎲 Новая игра")
 async def start_new_game(message: types.Message, state: FSMContext):
-    if not await ensure_admin_pm(message):
+    """
+    Создание новой игры.
+    Доступно и админам, и судьям (ensure_judge_pm).
+    """
+    if not await ensure_judge_pm(message):
         return
 
     if await database.get_setting("game_active") == "1":
-        await message.answer("Уже есть активная игра. Сначала завершите её.", reply_markup=keyboards.game_admin_menu())
+        await message.answer(
+            "Уже есть активная игра. Сначала завершите её.",
+            reply_markup=keyboards.game_admin_menu()
+        )
         return
 
     booked = await database.get_booked_players_for_game()
     if not booked:
-        await message.answer("На вечер никто не записан.", reply_markup=keyboards.admin_menu())
+        # Админу покажем админ-меню, судье — меню судьи
+        if message.from_user.id in config.ADMIN_IDS:
+            rm = keyboards.admin_menu()
+        else:
+            rm = keyboards.judge_menu()
+        await message.answer(
+            "На вечер никто не записан.",
+            reply_markup=rm
+        )
         return
+
+    # Сохраняем Судью текущей игры
+    judge_id = message.from_user.id
+
+    # Пытаемся взять ник Судьи из БД
+    db_user = await database.get_user_by_id(judge_id)
+    if db_user:
+        _, full_name, username, nickname = db_user
+        judge_name = nickname or full_name or username or str(judge_id)
+    else:
+        # Фоллбек, если в users ещё нет записи
+        judge_name = (
+            message.from_user.username
+            or message.from_user.full_name
+            or str(judge_id)
+        )
+
+    await database.set_current_game_judge_id(judge_id)
+    await database.set_current_game_judge_name(judge_name)
+
+    # Убираем Судью из записанных игроков, если он там есть
+    # booked: (user_id, full_name, username, nickname, status)
+    booked = [p for p in booked if not (p and p[0] == judge_id)]
 
     # Сохраняем список записанных игроков
     await state.update_data(
@@ -127,82 +371,33 @@ async def start_new_game(message: types.Message, state: FSMContext):
         votes_received={},
         remaining_voters=0,
         protocol_chat_id=None,
-        protocol_message_id=None
+        protocol_message_id=None,
     )
 
     await show_players_list_for_game(message, state, booked)
-
-
-async def show_players_list_for_game(message: types.Message, state: FSMContext, booked: list = None):
-    """Показывает предварительный список всех 10 слотов."""
-    if booked is None:
-        data = await state.get_data()
-        booked = data.get("booked_players", [])
-
-    players_text = "📋 **Предварительный состав игры (10 слотов):**\n\n"
-
-    for slot_num in range(1, 11):
-        if slot_num <= len(booked) and booked[slot_num - 1]:
-            user_id, full_name, username, nickname, status = booked[slot_num - 1]
-            name = nickname or full_name or f"Игрок {user_id}"
-            players_text += f"{slot_num}. ✅ {name}\n"
-        else:
-            players_text += f"{slot_num}. ⬜ Свободно\n"
-
-    real_players = len([p for p in booked if p and p[3] not in [None, "Свободно", ""] and p[1] not in ["Свободно"]])
-
-    players_text += f"\n👥 **Заполнено слотов:** {real_players}/10\n"
-
-    if real_players < 4:
-        players_text += "\n⚠️ **Минимальное количество игроков: 4**\n"
-    else:
-        players_text += "\n✅ Можно начинать игру!\n"
-
-    players_text += "\nПодтвердите состав или отредактируйте слоты."
-
-    await message.answer(players_text, reply_markup=keyboards.game_confirm_kb(), parse_mode="Markdown")
-
-
-async def show_current_players_list(message: types.Message, state: FSMContext):
-    """Показывает текущий список слотов с инлайн-кнопкой Готово."""
-    data = await state.get_data()
-    booked = data.get("booked_players", [])
-
-    players_text = "📋 **Текущий состав (10 слотов):**\n\n"
-
-    for slot_num in range(1, 11):
-        if slot_num <= len(booked) and booked[slot_num - 1]:
-            user_id, full_name, username, nickname, status = booked[slot_num - 1]
-            name = nickname or full_name or f"Игрок {user_id}"
-            if len(name) > 20:
-                name = name[:17] + "..."
-            players_text += f"{slot_num}. {name}\n"
-        else:
-            players_text += f"{slot_num}. ⬜ Свободно\n"
-
-    real_players = len([p for p in booked if p and p[3] not in [None, "Свободно", ""] and p[1] not in ["Свободно"]])
-    players_text += f"\n✏️ **Заполнено: {real_players}/10**\n\n"
-    players_text += "**Команды:**\n"
-    players_text += "• `<номер> <ник>` — заполнить слот\n"
-    players_text += "• `очистить <номер>` — очистить слот\n\n"
-    players_text += "Когда закончите редактирование — нажмите кнопку **Готово**"
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Готово", callback_data="edit_players_done")
-    builder.adjust(1)
-
-    await message.answer(players_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
 
 @router.callback_query(F.data == "game_confirm_yes")
 async def confirm_game_players(callback: types.CallbackQuery, state: FSMContext):
     """Подтверждение состава игроков и переход к раздаче ролей."""
     data = await state.get_data()
-    booked = data.get("booked_players", [])
+    booked = data.get("booked_players", []) or []
+
+    # Узнаём Судью, чтобы точно не посадить его за стол
+    judge_id = await database.get_current_game_judge_id()
 
     real_players = []
     for p in booked:
-        if p and p[3] not in [None, "Свободно", ""] and p[1] not in ["Свободно"]:
+        if not p:
+            continue
+        user_id, full_name, username, nickname, status = p
+
+        # пропускаем Судью
+        if judge_id and user_id == judge_id:
+            continue
+
+        # логика "реальный игрок"
+        if nickname not in [None, "Свободно", ""] and full_name not in ["Свободно"]:
             real_players.append(p)
 
     if len(real_players) < 4:
@@ -220,7 +415,14 @@ async def confirm_game_players(callback: types.CallbackQuery, state: FSMContext)
     slots = {}
     for i, (user_id, full_name, username, nickname, status) in enumerate(real_players, 1):
         slots[i] = create_empty_slot(nickname)
-        slots[i].update({"user_id": user_id, "full_name": full_name, "username": username, "status": status})
+        slots[i].update(
+            {
+                "user_id": user_id,
+                "full_name": full_name,
+                "username": username,
+                "status": status,
+            }
+        )
 
     await state.update_data(slots=slots, booked_players=None)
     await save_slots(state, slots)
@@ -234,7 +436,7 @@ async def confirm_game_players(callback: types.CallbackQuery, state: FSMContext)
 @router.callback_query(F.data == "game_confirm_no")
 async def reshuffle_players(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    booked = data.get("booked_players", [])
+    booked = data.get("booked_players", []) or []
 
     if booked:
         random.shuffle(booked)
@@ -254,7 +456,7 @@ async def edit_players_list(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "edit_players_done")
 async def edit_players_done(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    booked = data.get("booked_players", [])
+    booked = data.get("booked_players", []) or []
 
     try:
         await callback.message.delete()
@@ -268,7 +470,11 @@ async def edit_players_done(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(GameCreateState.editing_players_list, F.text.regexp(r"^\d+\s+"))
 async def edit_player_by_number(message: types.Message, state: FSMContext):
-    if not await ensure_admin_pm(message):
+    """
+    Редактирование списка игроков по номеру слота.
+    Это чисто игровая функция, поэтому доступна и админам, и судьям.
+    """
+    if not await ensure_judge_pm(message):
         return
 
     parts = message.text.strip().split(maxsplit=1)
@@ -292,24 +498,42 @@ async def edit_player_by_number(message: types.Message, state: FSMContext):
         return
 
     data = await state.get_data()
-    booked = data.get("booked_players", [])
+    booked = data.get("booked_players", []) or []
 
     user_data = await database.get_user_by_nickname(new_nick)
 
     while len(booked) < slot_num:
-        booked.append((-(len(booked) + 1), "Свободно", None, "Свободно", "Пусто"))
+        booked.append(
+            (-(len(booked) + 1), "Свободно", None, "Свободно", "Пусто")
+        )
 
     old_name = booked[slot_num - 1][3] or booked[slot_num - 1][1]
 
     if user_data:
         user_id, full_name, username, nickname = user_data
-        booked[slot_num - 1] = (user_id, full_name, username, nickname, "Добавлен вручную")
+        booked[slot_num - 1] = (
+            user_id,
+            full_name,
+            username,
+            nickname,
+            "Добавлен вручную",
+        )
         await state.update_data(booked_players=booked)
-        await message.answer(f"✅ Слот {slot_num}: {old_name} → {nickname} (найден в БД)")
+        await message.answer(
+            f"✅ Слот {slot_num}: {old_name} → {nickname} (найден в БД)"
+        )
     else:
-        booked[slot_num - 1] = (-slot_num, new_nick, None, new_nick, "Добавлен вручную")
+        booked[slot_num - 1] = (
+            -slot_num,
+            new_nick,
+            None,
+            new_nick,
+            "Добавлен вручную",
+        )
         await state.update_data(booked_players=booked)
-        await message.answer(f"⚠️ Слот {slot_num}: {old_name} → {new_nick} (не найден в БД, статистика не сохранится)")
+        await message.answer(
+            f"⚠️ Слот {slot_num}: {old_name} → {new_nick} (не найден в БД, статистика не сохранится)"
+        )
 
     await show_current_players_list(message, state)
 
@@ -322,7 +546,9 @@ async def clear_player_by_number(message: types.Message, state: FSMContext):
     try:
         slot_num = int(message.text.replace("очистить", "").strip())
     except ValueError:
-        await message.answer("❌ Формат: `очистить <номер>`\nПример: `очистить 7`")
+        await message.answer(
+            "❌ Формат: `очистить <номер>`\nПример: `очистить 7`"
+        )
         return
 
     if slot_num < 1 or slot_num > 10:
@@ -330,10 +556,16 @@ async def clear_player_by_number(message: types.Message, state: FSMContext):
         return
 
     data = await state.get_data()
-    booked = data.get("booked_players", [])
+    booked = data.get("booked_players", []) or []
 
     if slot_num <= len(booked):
-        booked[slot_num - 1] = (-slot_num, "Свободно", None, "Свободно", "Пусто")
+        booked[slot_num - 1] = (
+            -slot_num,
+            "Свободно",
+            None,
+            "Свободно",
+            "Пусто",
+        )
         await state.update_data(booked_players=booked)
         await message.answer(f"✅ Слот {slot_num} очищен")
     else:
@@ -343,33 +575,68 @@ async def clear_player_by_number(message: types.Message, state: FSMContext):
 
 
 # ========== 2. РАЗДАЧА РОЛЕЙ ==========
-async def show_players_for_role_selection(message: types.Message, state: FSMContext, role_key: str, count: int):
+async def show_players_for_role_selection(
+    message: types.Message,
+    state: FSMContext,
+    role_key: str,
+    count: int,
+):
     data = await state.get_data()
     slots = data.get("slots") or {}
+
+    # Берём судью
+    judge_name = await database.get_current_game_judge_name()
 
     available = []
     for slot_num, info in slots.items():
         if info.get("alive", True) and info.get("role") == "Не задана":
-            name = info.get("nickname") or info.get("full_name") or f"Слот {slot_num}"
+            name = (
+                info.get("nickname")
+                or info.get("full_name")
+                or f"Слот {slot_num}"
+            )
             available.append((slot_num, name))
 
     if len(available) < count:
-        await message.answer(f"❌ Недостаточно свободных игроков для выбора {count} {role_key}.")
+        await message.answer(
+            f"❌ Недостаточно свободных игроков для выбора {count} {role_key}."
+        )
         return
 
     role_names = {"mafia": "мафий", "don": "дона", "sheriff": "шерифа"}
     role_name = role_names.get(role_key, role_key)
 
-    text = f"🎭 **Выберите {count} {role_name}**\n\n"
-    for slot_num, name in available:
-        text += f"• Слот {slot_num}: {name}\n"
-    text += f"\nНажмите на игрока, чтобы выбрать."
+    lines: list[str] = []
 
-    await message.answer(text, reply_markup=keyboards.players_selection_kb(available, role_key, count), parse_mode="Markdown")
+    title = f"🎭 Выберите {count} {role_name}\n"
+    if judge_name:
+        title = title + f"\nСудья: {judge_name}\n"
+    lines.append(title)
+
+    for slot_num, name in available:
+        lines.append(f"• Слот {slot_num}: {name}")
+
+    lines.append("")
+    lines.append("Нажмите на игрока, чтобы выбрать.")
+
+    text = "\n".join(lines)
+
+    await message.answer(
+        text,
+        reply_markup=keyboards.players_selection_kb(
+            available, role_key, count
+        ),
+        parse_mode="Markdown",
+    )
 
 
 @router.callback_query(F.data.startswith("select_mafia_"))
 async def select_mafia_callback(callback: types.CallbackQuery, state: FSMContext):
+    # Проверка: админ или судья
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     slot_num = int(callback.data.split("_")[2])
 
     data = await state.get_data()
@@ -391,16 +658,18 @@ async def select_mafia_callback(callback: types.CallbackQuery, state: FSMContext
     available = []
     for s_num, info in slots.items():
         if info.get("alive", True) and info.get("role") == "Не задана":
-            name = info.get("nickname") or info.get("full_name") or f"Слот {s_num}"
+            name = (
+                info.get("nickname")
+                or info.get("full_name")
+                or f"Слот {s_num}"
+            )
             available.append((s_num, name))
 
-    # Проверяем, изменилась ли клавиатура
     new_markup = keyboards.players_selection_kb(available, "mafia", 2, selected)
 
     try:
         await callback.message.edit_reply_markup(reply_markup=new_markup)
     except Exception as e:
-        # Если сообщение не изменилось — просто игнорируем ошибку
         if "message is not modified" not in str(e):
             print(f"[ERROR] edit_reply_markup failed: {e}")
 
@@ -419,6 +688,11 @@ async def select_mafia_callback(callback: types.CallbackQuery, state: FSMContext
 
 @router.callback_query(F.data.startswith("select_don_"))
 async def select_don_callback(callback: types.CallbackQuery, state: FSMContext):
+    # Проверка: админ или судья
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     slot_num = int(callback.data.split("_")[2])
 
     data = await state.get_data()
@@ -434,12 +708,16 @@ async def select_don_callback(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.answer(f"✅ Дон назначен на слот {slot_num}")
 
-    # Показываем выбор шерифа
     await show_players_for_role_selection(callback.message, state, "sheriff", 1)
 
 
 @router.callback_query(F.data.startswith("select_sheriff_"))
 async def select_sheriff_callback(callback: types.CallbackQuery, state: FSMContext):
+    # Проверка: админ или судья
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     slot_num = int(callback.data.split("_")[2])
 
     data = await state.get_data()
@@ -449,6 +727,7 @@ async def select_sheriff_callback(callback: types.CallbackQuery, state: FSMConte
         slots[slot_num]["role"] = "Шериф"
         slots[slot_num]["team"] = "Красные"
 
+    # всем оставшимся живым — Мирный, Красные
     for s_num, info in slots.items():
         if info.get("role") == "Не задана" and info.get("alive", True):
             info["role"] = "Мирный"
@@ -475,10 +754,12 @@ async def select_sheriff_callback(callback: types.CallbackQuery, state: FSMConte
     except Exception:
         pass
 
+    judge_name = await database.get_current_game_judge_name()
+
     await callback.message.answer(
         f"✅ **Игра создана!**\n\n"
         f"🎲 Игра №{evening_num} ({game_date}): №{global_num} по общей истории\n\n"
-        f"{build_slots_text(slots)}",
+        f"{build_slots_text(slots, judge_name=judge_name)}",
         reply_markup=keyboards.game_admin_menu(),
         parse_mode="Markdown"
     )
@@ -490,18 +771,33 @@ async def select_sheriff_callback(callback: types.CallbackQuery, state: FSMConte
 # ========== 4. ПРОДОЛЖИТЬ ИГРУ ==========
 @router.message(F.text == "♻️ Продолжить игру")
 async def resume_game(message: types.Message, state: FSMContext):
-    if not await ensure_admin_pm(message):
+    # Уже ОК: админ или судья
+    if not await ensure_judge_pm(message):
         return
 
     if await database.get_setting("game_active") != "1":
-        await message.answer("Нет активной сохранённой игры.", reply_markup=keyboards.admin_menu())
+        # здесь логично тоже развести меню админ/судья
+        if message.from_user.id in config.ADMIN_IDS:
+            rm = keyboards.admin_menu()
+        else:
+            rm = keyboards.judge_menu()
+        await message.answer(
+            "Нет активной сохранённой игры.", reply_markup=rm
+        )
         return
 
     slots = await database.load_current_game_slots()
     metadata = await database.load_current_game_metadata()
 
     if not slots:
-        await message.answer("Не удалось найти сохранённые слоты.", reply_markup=keyboards.admin_menu())
+        if message.from_user.id in config.ADMIN_IDS:
+            rm = keyboards.admin_menu()
+        else:
+            rm = keyboards.judge_menu()
+        await message.answer(
+            "Не удалось найти сохранённые слоты.",
+            reply_markup=rm,
+        )
         return
 
     await state.set_state(GameCreateState.editing_slots)
@@ -518,45 +814,64 @@ async def resume_game(message: types.Message, state: FSMContext):
         winner_label=metadata.get("winner_label"),
         winning_team=metadata.get("winning_team"),
         protocol_chat_id=None,
-        protocol_message_id=None
+        protocol_message_id=None,
     )
 
-    await message.answer(f"Продолжаем незавершённую игру.\n\n{build_game_state(slots, alive_only=False)}",
-                         reply_markup=keyboards.game_admin_menu())
+    await message.answer(
+        f"Продолжаем незавершённую игру.\n\n"
+        f"{build_game_state(slots, alive_only=False)}",
+        reply_markup=keyboards.game_admin_menu(),
+    )
 
 
 # ========== 5. ПОКАЗ СОСТОЯНИЯ ==========
 @router.message(GameCreateState.editing_slots, F.text == "⏹ Остановить")
 async def ask_game_finish_reason(message: types.Message, state: FSMContext):
-    if await ensure_admin_pm(message):
-        await message.answer("⚠️ **Остановка игры**\n\nВыберите результат:", reply_markup=keyboards.game_finish_keyboard())
+    # Остановка игры — это всё ещё игровое действие → судья тоже может
+    if not await ensure_judge_pm(message):
+        return
+
+    await message.answer(
+        "⚠️ **Остановка игры**\n\nВыберите результат:",
+        reply_markup=keyboards.game_finish_keyboard(),
+    )
 
 
 @router.message(GameCreateState.editing_slots, F.text.casefold() == "игра")
 async def show_game_state_all_handler(message: types.Message, state: FSMContext):
-    if await ensure_admin_pm(message):
-        await show_game_state_all(message, state)
+    if not await ensure_judge_pm(message):
+        return
+
+    await show_game_state_all(message, state)
 
 
 @router.message(GameCreateState.editing_slots, F.text.casefold() == "игра живые")
 async def show_game_state_alive(message: types.Message, state: FSMContext):
-    if await ensure_admin_pm(message):
-        slots = await get_slots(message, state)
-        if slots:
-            await message.answer(build_game_state(slots, alive_only=True), reply_markup=keyboards.game_admin_menu())
+    if not await ensure_judge_pm(message):
+        return
+
+    slots = await get_slots(message, state)
+    if slots:
+        await message.answer(
+            build_game_state(slots, alive_only=True),
+            reply_markup=keyboards.game_admin_menu(),
+        )
 
 
 @router.message(GameCreateState.editing_slots, F.text.casefold() == "ок")
 async def ok_show_state(message: types.Message, state: FSMContext):
-    if await ensure_admin_pm(message):
-        await show_game_state_all(message, state)
+    if not await ensure_judge_pm(message):
+        return
+
+    await show_game_state_all(message, state)
 
 
 # ========== 6. ЗАВЕРШЕНИЕ ИГРЫ И РЕДАКТОР БАЛЛОВ ==========
 @router.callback_query(F.data.startswith("game_end:"))
 async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in config.ADMIN_IDS:
-        await callback.answer("Недостаточно прав.", show_alert=True)
+    # раньше было только ADMIN_IDS — делаем админ или судья
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
         return
 
     data = await state.get_data()
@@ -566,6 +881,8 @@ async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
     if action == "cancel":
         await clear_game_state(state)
         await callback.message.edit_text("❌ **Игра отменена**\n\nИгра полностью удалена без сохранения.")
+        # здесь логичнее вернуть в меню в зависимости от роли, но
+        # если функция используется только админами, можно оставить admin_menu
         await callback.message.answer("🛠 Админ-панель", reply_markup=keyboards.admin_menu())
         await callback.answer()
         return
@@ -635,6 +952,8 @@ async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Неизвестное действие", show_alert=True)
         return
 
+    # (нижний код на практике не выполняется из-за ретурнов выше,
+    # но я оставил его как у тебя, можно удалить как мёртвый)
     await state.update_data(winning_team=winning_team, winner_label=winner_label)
 
     for slot in slots.values():
@@ -656,6 +975,11 @@ async def handle_game_finish(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(GameCreateState.score_editor_select_player, F.data.startswith("score_edit_"))
 async def score_editor_select_player(callback: types.CallbackQuery, state: FSMContext):
+    # редактирование баллов — часть постигровой работы судьи → тоже проверяем права
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     slot_num = int(callback.data.split("_")[2])
 
     data = await state.get_data()
@@ -701,6 +1025,10 @@ async def score_editor_select_player(callback: types.CallbackQuery, state: FSMCo
 
 @router.callback_query(GameCreateState.score_editor_select_type, F.data.startswith("score_type_"))
 async def score_editor_select_type(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     parts = callback.data.split("_")
     score_type = parts[2]
     slot_num = int(parts[3])
@@ -737,6 +1065,10 @@ async def score_editor_select_type(callback: types.CallbackQuery, state: FSMCont
 
 @router.callback_query(GameCreateState.score_editor_select_value, F.data.startswith("score_val_"))
 async def score_editor_set_value(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     value = float(callback.data.split("_")[2])
 
     data = await state.get_data()
@@ -776,6 +1108,10 @@ async def score_editor_set_value(callback: types.CallbackQuery, state: FSMContex
 
 @router.callback_query(F.data == "score_back_to_players")
 async def score_back_to_players(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     data = await state.get_data()
     slots = data.get("slots") or {}
     winning_team = data.get("winning_team")
@@ -792,6 +1128,10 @@ async def score_back_to_players(callback: types.CallbackQuery, state: FSMContext
 
 @router.callback_query(F.data == "score_back_to_types")
 async def score_back_to_types(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     data = await state.get_data()
     slot_num = data.get("score_edit_slot")
     slots = data.get("slots") or {}
@@ -813,6 +1153,10 @@ async def score_back_to_types(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "score_back_to_values")
 async def score_back_to_values(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     data = await state.get_data()
     old_value = data.get("score_old_value", 0)
 
@@ -829,6 +1173,11 @@ async def score_back_to_values(callback: types.CallbackQuery, state: FSMContext)
 
 @router.callback_query(F.data == "score_finish")
 async def score_finish(callback: types.CallbackQuery, state: FSMContext):
+    # Только судья/админ могут финализировать баллы
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     data = await state.get_data()
     slots = data.get("slots") or {}
     winning_team = data.get("winning_team")
@@ -848,7 +1197,7 @@ async def score_finish(callback: types.CallbackQuery, state: FSMContext):
     evening_num = await database.get_current_game_number() or 1
     global_num = await database.get_current_global_game_number() or 1
 
-    protocol_body = build_protocol_text(slots, updated=False, winner_label=winner_label)
+    protocol_body = await build_protocol_text(slots, updated=False, winner_label=winner_label)
     await database.save_game_history(game_date, winner_label, protocol_body, evening_num, global_num)
     await database.save_game_slots_history(game_date, slots)
 
@@ -871,6 +1220,11 @@ async def score_finish(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "score_cancel")
 async def score_cancel(callback: types.CallbackQuery, state: FSMContext):
+    # Отмена редактирования тоже только для судьи/админа
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     data = await state.get_data()
     slots = data.get("slots") or {}
 
@@ -890,12 +1244,18 @@ async def score_cancel(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(F.text == "🏁 Завершить")
 async def final_finish_game(message: types.Message, state: FSMContext):
-    if not await ensure_admin_pm(message):
+    # Завершить игру (графический протокол) — игровое действие → судья тоже может
+    if not await ensure_judge_pm(message):
         return
 
     active = await database.get_setting("game_active")
     if active != "1":
-        await message.answer("Сейчас нет активной игры.", reply_markup=keyboards.admin_menu())
+        # Разводим меню: если судья, можно сделать отдельное judge_menu()
+        if message.from_user.id in config.ADMIN_IDS:
+            rm = keyboards.admin_menu()
+        else:
+            rm = keyboards.judge_menu()
+        await message.answer("Сейчас нет активной игры.", reply_markup=rm)
         return
 
     data = await state.get_data()
@@ -903,7 +1263,11 @@ async def final_finish_game(message: types.Message, state: FSMContext):
     slots = data.get("slots") or await database.load_current_game_slots()
 
     if not slots:
-        await message.answer("Нет данных об игре.", reply_markup=keyboards.admin_menu())
+        if message.from_user.id in config.ADMIN_IDS:
+            rm = keyboards.admin_menu()
+        else:
+            rm = keyboards.judge_menu()
+        await message.answer("Нет данных об игре.", reply_markup=rm)
         await clear_game_state(state)
         return
 
@@ -924,13 +1288,20 @@ async def final_finish_game(message: types.Message, state: FSMContext):
         await message.answer_photo(photo, caption="Итоговый графический протокол игры 📸")
 
     await clear_game_state(state)
-    await message.answer("✅ Игра полностью завершена. Можно запускать новую.", reply_markup=keyboards.admin_menu())
+
+    if message.from_user.id in config.ADMIN_IDS:
+        rm = keyboards.admin_menu()
+    else:
+        rm = keyboards.judge_menu()
+
+    await message.answer("✅ Игра полностью завершена. Можно запускать новую.", reply_markup=rm)
 
 
 # ========== 7. РЕЖИМ РЕДАКТИРОВАНИЯ ==========
 @router.message(GameCreateState.editing_slots, F.text == "✏️ Редактировать")
 async def enter_edit_mode(message: types.Message, state: FSMContext):
-    if not await ensure_admin_pm(message):
+    # Режим редактирования игры — тоже судья/админ
+    if not await ensure_judge_pm(message):
         return
 
     data = await state.get_data()
@@ -952,7 +1323,7 @@ async def enter_edit_mode(message: types.Message, state: FSMContext):
 # ========== 8. УПРАВЛЕНИЕ ФОЛАМИ ==========
 @router.message(GameCreateState.editing_slots, F.text == "Фол")
 async def foul_start(message: types.Message, state: FSMContext):
-    if not await ensure_admin_pm(message):
+    if not await ensure_judge_pm(message):
         return
 
     slots = await get_slots(message, state)
@@ -966,11 +1337,18 @@ async def foul_start(message: types.Message, state: FSMContext):
         return
 
     await state.set_state(GameCreateState.foul_select)
-    await message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:", reply_markup=keyboards.foul_select_kb(alive_slots))
+    await message.answer(
+        "⚠️ **Управление фолами**\n\nВыберите игрока:",
+        reply_markup=keyboards.foul_select_kb(alive_slots)
+    )
 
 
 @router.callback_query(GameCreateState.foul_select, F.data.startswith("foul_select_"))
 async def foul_select_player(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     slot_num = int(callback.data.split("_")[2])
 
     data = await state.get_data()
@@ -997,6 +1375,10 @@ async def foul_select_player(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(GameCreateState.foul_action, F.data.startswith("foul_add_"))
 async def foul_add(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     slot_num = int(callback.data.split("_")[2])
 
     data = await state.get_data()
@@ -1031,8 +1413,10 @@ async def foul_add(callback: types.CallbackQuery, state: FSMContext):
 
         alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
         if alive_slots:
-            await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
-                                          reply_markup=keyboards.foul_select_kb(alive_slots))
+            await callback.message.answer(
+                "⚠️ **Управление фолами**\n\nВыберите игрока:",
+                reply_markup=keyboards.foul_select_kb(alive_slots)
+            )
             await state.set_state(GameCreateState.foul_select)
         else:
             await state.set_state(GameCreateState.editing_slots)
@@ -1044,13 +1428,19 @@ async def foul_add(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
 
     alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
-    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
-                                  reply_markup=keyboards.foul_select_kb(alive_slots))
+    await callback.message.answer(
+        "⚠️ **Управление фолами**\n\nВыберите игрока:",
+        reply_markup=keyboards.foul_select_kb(alive_slots)
+    )
     await state.set_state(GameCreateState.foul_select)
 
 
 @router.callback_query(GameCreateState.foul_action, F.data.startswith("foul_remove_"))
 async def foul_remove(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     slot_num = int(callback.data.split("_")[2])
 
     data = await state.get_data()
@@ -1072,19 +1462,29 @@ async def foul_remove(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
 
     alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
-    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:", reply_markup=keyboards.foul_select_kb(alive_slots))
+    await callback.message.answer(
+        "⚠️ **Управление фолами**\n\nВыберите игрока:",
+        reply_markup=keyboards.foul_select_kb(alive_slots)
+    )
     await state.set_state(GameCreateState.foul_select)
 
 
 @router.callback_query(F.data == "foul_cancel")
 async def foul_cancel(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     await state.set_state(GameCreateState.editing_slots)
 
     data = await state.get_data()
     slots = data.get("slots") or {}
 
     await callback.message.delete()
-    await callback.message.answer(build_game_state(slots, alive_only=False), reply_markup=keyboards.game_admin_menu())
+    await callback.message.answer(
+        build_game_state(slots, alive_only=False),
+        reply_markup=keyboards.game_admin_menu()
+    )
     await callback.answer()
 
 
@@ -1092,6 +1492,10 @@ async def foul_cancel(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(GameCreateState.foul_action, F.data.startswith("tech_foul_small_"))
 async def tech_foul_small(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     slot_num = int(callback.data.split("_")[3])
 
     data = await state.get_data()
@@ -1123,50 +1527,19 @@ async def tech_foul_small(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
 
     alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
-    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
-                                  reply_markup=keyboards.foul_select_kb(alive_slots))
+    await callback.message.answer(
+        "⚠️ **Управление фолами**\n\nВыберите игрока:",
+        reply_markup=keyboards.foul_select_kb(alive_slots)
+    )
     await state.set_state(GameCreateState.foul_select)
 
 
 @router.callback_query(GameCreateState.foul_action, F.data.startswith("tech_foul_big_"))
 async def tech_foul_big(callback: types.CallbackQuery, state: FSMContext):
-    slot_num = int(callback.data.split("_")[3])
-
-    data = await state.get_data()
-    slots = data.get("slots") or {}
-
-    if slot_num not in slots:
-        await callback.answer("Игрок не найден!", show_alert=True)
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
         return
 
-    tech_fouls = slots[slot_num].get("technical_fouls", [])
-    tech_fouls.append("big")
-    slots[slot_num]["technical_fouls"] = tech_fouls
-
-    current_dc = slots[slot_num].get("dc_points", 0.0)
-    slots[slot_num]["dc_points"] = round(current_dc - 0.6, 1)
-
-    await save_slots(state, slots)
-    await callback.answer("✅ Большой техфол (-0.6) добавлен в ДЦ")
-
-    if len(tech_fouls) >= 2 and slots[slot_num].get("alive", True):
-        slots[slot_num]["alive"] = False
-        slots[slot_num]["status_reason"] = "Удалён (2 техфола)"
-        slots[slot_num]["kicked"] = True
-        await save_slots(state, slots)
-        await callback.answer("⚠️ Игрок удалён за 2 техфола!", show_alert=True)
-
-    game_state = build_game_state(slots, alive_only=False)
-    await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
-
-    alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
-    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
-                                  reply_markup=keyboards.foul_select_kb(alive_slots))
-    await state.set_state(GameCreateState.foul_select)
-
-
-@router.callback_query(GameCreateState.foul_action, F.data.startswith("tech_foul_big_"))
-async def tech_foul_big(callback: types.CallbackQuery, state: FSMContext):
     # callback.data = "tech_foul_big_6" -> split = ['tech', 'foul', 'big', '6']
     slot_num = int(callback.data.split("_")[3])
 
@@ -1181,11 +1554,12 @@ async def tech_foul_big(callback: types.CallbackQuery, state: FSMContext):
     tech_fouls.append("big")
     slots[slot_num]["technical_fouls"] = tech_fouls
 
-    current_bonus = slots[slot_num].get("bonus_points", 0.0)
-    slots[slot_num]["bonus_points"] = round(current_bonus - 0.6, 1)
+    # Вариант с ДЦ (основной)
+    current_dc = slots[slot_num].get("dc_points", 0.0)
+    slots[slot_num]["dc_points"] = round(current_dc - 0.6, 1)
 
     await save_slots(state, slots)
-    await callback.answer("✅ Большой техфол (-0.6) добавлен")
+    await callback.answer("✅ Большой техфол (-0.6) добавлен в ДЦ")
 
     # Проверяем на удаление (2 техфола = удаление)
     if len(tech_fouls) >= 2 and slots[slot_num].get("alive", True):
@@ -1199,13 +1573,19 @@ async def tech_foul_big(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
 
     alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
-    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
-                                  reply_markup=keyboards.foul_select_kb(alive_slots))
+    await callback.message.answer(
+        "⚠️ **Управление фолами**\n\nВыберите игрока:",
+        reply_markup=keyboards.foul_select_kb(alive_slots)
+    )
     await state.set_state(GameCreateState.foul_select)
 
 
 @router.callback_query(GameCreateState.foul_action, F.data.startswith("kick_player_"))
 async def kick_player(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     slot_num = int(callback.data.split("_")[2])
 
     data = await state.get_data()
@@ -1230,8 +1610,10 @@ async def kick_player(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
 
     alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
-    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
-                                  reply_markup=keyboards.foul_select_kb(alive_slots))
+    await callback.message.answer(
+        "⚠️ **Управление фолами**\n\nВыберите игрока:",
+        reply_markup=keyboards.foul_select_kb(alive_slots)
+    )
     await state.set_state(GameCreateState.foul_select)
 
 
@@ -1240,6 +1622,10 @@ async def kick_player(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "game_end:ppk")
 async def handle_ppk_start(callback: types.CallbackQuery, state: FSMContext):
     """Начало обработки ППК — выбор команды-победителя."""
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     await state.set_state(GameCreateState.ppk_team_select)
     await callback.message.edit_text(
         "⚠️ **ППК (Победа Противоположной Команды)**\n\n"
@@ -1252,6 +1638,10 @@ async def handle_ppk_start(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(GameCreateState.ppk_team_select, F.data.startswith("ppk_team_"))
 async def ppk_select_team(callback: types.CallbackQuery, state: FSMContext):
     """Выбор команды-победителя при ППК."""
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     team = callback.data.split("_")[2]
 
     if team == "red":
@@ -1278,6 +1668,10 @@ async def ppk_select_team(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(GameCreateState.ppk_culprit_select, F.data.startswith("ppk_culprit_"))
 async def ppk_select_culprit(callback: types.CallbackQuery, state: FSMContext):
     """Выбор виновника ППК."""
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     slot_num = int(callback.data.split("_")[2])
 
     data = await state.get_data()
@@ -1304,6 +1698,10 @@ async def ppk_select_culprit(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(GameCreateState.ppk_confirm, F.data == "ppk_confirm_yes")
 async def ppk_confirm(callback: types.CallbackQuery, state: FSMContext):
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     data = await state.get_data()
     slots = data.get("slots") or {}
     slot_num = data.get("ppk_culprit_slot")
@@ -1349,6 +1747,10 @@ async def ppk_confirm(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "ppk_cancel")
 async def ppk_cancel(callback: types.CallbackQuery, state: FSMContext):
     """Отмена ППК."""
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     await state.set_state(GameCreateState.editing_slots)
     await callback.message.delete()
     await callback.message.answer(
@@ -1361,6 +1763,10 @@ async def ppk_cancel(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "ppk_back_to_teams")
 async def ppk_back_to_teams(callback: types.CallbackQuery, state: FSMContext):
     """Возврат к выбору команды."""
+    if not await ensure_judge_cb(callback):
+        await callback.answer("Недостаточно прав судьи.", show_alert=True)
+        return
+
     await state.set_state(GameCreateState.ppk_team_select)
     await callback.message.edit_text(
         "⚠️ **ППК (Победа Противоположной Команды)**\n\n"
@@ -1395,54 +1801,22 @@ async def check_auto_kick(state: FSMContext, slot_num: int):
         await state.update_data(slots=slots)
         await save_slots(state, slots)
 
-        name = slots[slot_num].get("nickname") or slots[slot_num].get("full_name") or f"Слот {slot_num}"
-
-        # Отправляем уведомление (в ЛС админу или в чат)
-        # Здесь можно добавить отправку сообщения
-
+        # Здесь можно добавить отправку сообщения о том, что игрок автоудалён
         return True
 
     return False
 
 
-# Обновляем функцию foul_add для проверки автоудаления
-@router.callback_query(GameCreateState.foul_action, F.data.startswith("foul_add_"))
-async def foul_add(callback: types.CallbackQuery, state: FSMContext):
-    slot_num = int(callback.data.split("_")[2])
-
-    data = await state.get_data()
-    slots = data.get("slots") or {}
-
-    if slot_num not in slots:
-        await callback.answer("Игрок не найден!", show_alert=True)
-        return
-
-    slots[slot_num]["fouls"] = slots[slot_num].get("fouls", 0) + 1
-    await save_slots(state, slots)
-
-    # Проверяем на автоудаление за 4 фола
-    if slots[slot_num]["fouls"] >= 4 and slots[slot_num].get("alive", True):
-        slots[slot_num]["alive"] = False
-        slots[slot_num]["status_reason"] = "Удалён (4 фола)"
-        slots[slot_num]["kicked"] = True
-        await save_slots(state, slots)
-        await callback.answer("⚠️ Игрок удалён за 4 фола!", show_alert=True)
-
-    await callback.answer(f"✅ Фол добавлен игроку {slot_num}")
-
-    game_state = build_game_state(slots, alive_only=False)
-    await callback.message.answer(game_state, reply_markup=keyboards.game_admin_menu())
-
-    alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
-    await callback.message.answer("⚠️ **Управление фолами**\n\nВыберите игрока:",
-                                  reply_markup=keyboards.foul_select_kb(alive_slots))
-    await state.set_state(GameCreateState.foul_select)
-
 # ========== 9. CATCH-ALL ==========
 @router.message(GameCreateState.editing_slots)
 async def catch_all_in_game(message: types.Message, state: FSMContext):
-    if not await ensure_admin_pm(message):
+    # Любой текст в состоянии игры — тоже доступен судье
+    if not await ensure_judge_pm(message):
         return
+
     slots = await get_slots(message, state)
     if slots:
-        await message.answer(build_game_state(slots, alive_only=False), reply_markup=keyboards.game_admin_menu())
+        await message.answer(
+            build_game_state(slots, alive_only=False),
+            reply_markup=keyboards.game_admin_menu()
+        )
