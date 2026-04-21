@@ -1,7 +1,5 @@
-# game/pic_endgame.py
-
 import os
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -119,6 +117,19 @@ def _draw_badge(
     return x2
 
 
+def _lerp_color(c1: Tuple[int, int, int], c2: Tuple[int, int, int], t: float) -> Tuple[int, int, int]:
+    """
+    Линейная интерполяция между цветами c1 -> c2.
+    t=0 -> c1, t=1 -> c2.
+    """
+    t = max(0.0, min(1.0, t))
+    return (
+        int(c1[0] + (c2[0] - c1[0]) * t),
+        int(c1[1] + (c2[1] - c1[1]) * t),
+        int(c1[2] + (c2[2] - c1[2]) * t),
+    )
+
+
 def create_endgame_pic_summary(
     slots: Dict[int, dict],
     game_date: str,
@@ -129,15 +140,17 @@ def create_endgame_pic_summary(
     """
     Современный общий протокол игры:
       - тёмная тема, цветные рамки по ролям;
-      - один выразительный номер слева;
-      - soft-square итоговый балл справа;
+      - номер слева, затем Ник • роль • статус в одну строку;
+      - soft-square итоговый балл справа (всегда яркий);
       - аккуратные бейджи очков;
-      - блок убийств с цветной подсветкой +/-.
+      - фолы / техфолы / ДЦ;
+      - блок убийств с цветной подсветкой +/-;
+      - живые игроки — насыщенные, вылетевшие — сильно приглушённые.
     """
     # --- Подготовка данных по командам ---
-    red_slots: list[Tuple[int, dict]] = []
-    black_slots: list[Tuple[int, dict]] = []
-    other_slots: list[Tuple[int, dict]] = []
+    red_slots: List[Tuple[int, dict]] = []
+    black_slots: List[Tuple[int, dict]] = []
+    other_slots: List[Tuple[int, dict]] = []
 
     for slot_num, info in slots.items():
         if isinstance(slot_num, str) and slot_num.startswith("_"):
@@ -158,7 +171,7 @@ def create_endgame_pic_summary(
     other_slots.sort(key=lambda x: x[0])
 
     # --- Подготовка данных по убийствам ---
-    night_kills_order: list[int] = []
+    night_kills_order: List[int] = []
     nk = slots.get("_night_kills_order")
     if isinstance(nk, list):
         night_kills_order = [int(x) for x in nk if isinstance(x, int)]
@@ -168,10 +181,14 @@ def create_endgame_pic_summary(
     base_height = 800
 
     # Оценка высоты
-    def count_group_items(group: list[Tuple[int, dict]]) -> int:
+    def count_group_items(group: List[Tuple[int, dict]]) -> int:
         return len(group)
 
-    total_items = count_group_items(red_slots) + count_group_items(black_slots) + count_group_items(other_slots)
+    total_items = (
+        count_group_items(red_slots)
+        + count_group_items(black_slots)
+        + count_group_items(other_slots)
+    )
     row_height = 80  # увеличенный для воздуха
     kills_block_height = 0
     if night_kills_order:
@@ -195,25 +212,34 @@ def create_endgame_pic_summary(
     font_title = _load_font(int(40 * scale / 2))
     font_subtitle = _load_font(int(24 * scale / 2))
     font_group = _load_font(int(26 * scale / 2))
-    font_name = _load_font(int(30 * scale / 2))   # ник крупнее
+    font_name = _load_font(int(30 * scale / 2))
     font_role = _load_font(int(20 * scale / 2))
-    font_small = _load_font(int(20 * scale / 2))
+    font_small = _load_font(int(18 * scale / 2))   # мелкий
+    font_status = _load_font(int(22 * scale / 2))  # статус/доп. текст
     font_badge = _load_font(int(18 * scale / 2))
-    font_total_big = _load_font(int(32 * scale / 2))  # итог крупный
+    font_total_big = _load_font(int(32 * scale / 2))
 
-    # Итог и цвет победителя
-    if winner_label and "город" in winner_label.lower():
+    # --- Итог и цвет победителя (учитываем ППК) ---
+    wl = (winner_label or "").lower()
+
+    if "город" in wl:
         winner_team = "red"
         result_text = "СТАТУС: ПОБЕДА КРАСНЫХ"
-    elif winner_label and "маф" in winner_label.lower():
+    elif "маф" in wl:
         winner_team = "black"
         result_text = "СТАТУС: ПОБЕДА ЧЁРНЫХ"
+    elif "ппк" in wl and "красн" in wl:
+        winner_team = "red"
+        result_text = f"СТАТУС: {winner_label}"
+    elif "ппк" in wl and "чёрн" in wl:
+        winner_team = "black"
+        result_text = f"СТАТУС: {winner_label}"
     else:
         winner_team = "none"
         result_text = "СТАТУС: БЕЗ ПОДВЕДЕНИЯ РЕЗУЛЬТАТА"
 
     top_accent_red = (192, 57, 43)
-    top_accent_black = (52, 73, 94)   # тот же оттенок, что и для мафии/слотов
+    top_accent_black = (52, 73, 94)
     top_accent_neutral = (96, 125, 139)
 
     if winner_team == "red":
@@ -223,14 +249,14 @@ def create_endgame_pic_summary(
     else:
         top_accent = top_accent_neutral
 
-    # Заголовок — центрируем по ширине
+    # Заголовок
     title = "ПРОТОКОЛ ИГРЫ"
     title_w, title_h = _text_size(draw, title, font_title)
     title_x = width / 2
     draw.text((title_x, y), title, fill=(236, 240, 241), font=font_title, anchor="ma")
     y += title_h + int(8 * scale)
 
-    # Плашка ИТОГ — тоже центрируем под заголовком
+    # Плашка ИТОГ
     result_w, result_h = _text_size(draw, result_text, font_subtitle)
     res_pad_x = int(10 * scale)
     res_pad_y = int(4 * scale)
@@ -260,7 +286,7 @@ def create_endgame_pic_summary(
 
     y = res_y2 + int(10 * scale)
 
-    # Подзаголовок с датой и номерами (выравниваем по левому padding_x)
+    # Подзаголовок с датой и номерами
     header_line_1 = f"Игра №{evening_game_number} • {game_date}"
     header_line_2 = f"№{global_game_number} по истории"
 
@@ -308,16 +334,53 @@ def create_endgame_pic_summary(
     row_gap = int(10 * scale)
     row_height_scaled = int(row_height * scale)
 
-    # Общая ширина карточек (~90% ширины)
-    card_width = int((card_right - card_left) * 0.92)
+    # Общая ширина карточек
+    card_width = int((card_right - card_left) * 0.90)
     card_x1 = card_left + int(((card_right - card_left) - card_width) / 2)
     card_x2 = card_x1 + card_width
 
-    def draw_group(title: str, group: list[Tuple[int, dict]], y_pos: int, team_key: str) -> int:
+    def draw_group(title: str, group: List[Tuple[int, dict]], y_pos: int, team_key: str) -> int:
         if not group:
             return y_pos
 
-        # Заголовок с ПОБЕДОЙ/ПОРАЖЕНИЕМ
+        # Функция статуса игрока + цвет
+        def get_status_label(slot_info: dict) -> tuple[str, Tuple[int, int, int]]:
+            alive = slot_info.get("alive", True)
+            reason = (slot_info.get("status_reason") or "").strip()
+
+            green_live = (46, 204, 113)    # Жив — насыщенный зелёный
+            red_dead = (244, 67, 54)       # Удалён
+            grey_passive = (158, 158, 158) # Убит/Заголосован
+            grey_neutral = (189, 195, 199)
+
+            r_low = reason.lower()
+
+            if alive:
+                if not reason or "жив" in r_low:
+                    return "Жив", green_live
+                return reason, green_live
+
+            # не за столом
+            if "ппк" in r_low:
+                return "Удалён (ППК)", red_dead
+            if "ведущ" in r_low:
+                return "Удалён ведущим", red_dead
+            if "4 фола" in r_low:
+                return "Удалён (4 фола)", red_dead
+            if "2 техфол" in r_low:
+                return "Удалён (2 техфола)", red_dead
+
+            if "заголос" in r_low:
+                return "Заголосован", grey_passive
+            if "убит" in r_low:
+                return reason or "Убит", grey_passive
+
+            if "фол" in r_low or "тех" in r_low:
+                return reason, red_dead
+
+            return reason or "Мёртв", grey_neutral
+
+        # Заголовок группы
         suffix = ""
         if winner_team == team_key:
             suffix = " — ПОБЕДА"
@@ -335,7 +398,6 @@ def create_endgame_pic_summary(
         _, gh = _text_size(draw, title_text, font_group)
         y_pos += gh + int(6 * scale)
 
-        # Разделительная линия
         draw.line(
             [(card_x1, y_pos), (card_x2, y_pos)],
             fill=(35, 35, 35),
@@ -348,21 +410,27 @@ def create_endgame_pic_summary(
             name = _shorten(raw_name, max_len=22)
             role = info.get("role", "Не задана")
             role_caps = (role or "").upper()
+            alive = info.get("alive", True)
 
             accent, bg_soft = _role_color(role)
+
+            # Сильное приглушение для тех, кто не за столом
+            if not alive:
+                bg_soft = _lerp_color(bg_soft, (12, 12, 12), 0.85)
+                accent = _lerp_color(accent, (60, 60, 60), 0.85)
 
             row_top = y_pos
             row_bottom = y_pos + row_height_scaled - row_gap
 
-            # Фон + рамка карточки
             base_bg = (
-                max(bg_soft[0], 20),
-                max(bg_soft[1], 20),
-                max(bg_soft[2], 20),
+                max(bg_soft[0], 15),
+                max(bg_soft[1], 15),
+                max(bg_soft[2], 15),
             )
 
             outline_color = accent
 
+            # Карточка игрока
             _draw_rounded_rect(
                 draw,
                 card_x1,
@@ -379,7 +447,7 @@ def create_endgame_pic_summary(
             inner_right = card_x2 - int(16 * scale)
             inner_top = row_top + int(10 * scale)
 
-            # Номер слота — один badge, крупнее ника
+            # --- Номер слота внутри рамки (слева) ---
             slot_text = str(slot_num)
             font_slot = _load_font(int(36 * scale / 2))
             slot_w, slot_h = _text_size(draw, slot_text, font_slot)
@@ -403,57 +471,53 @@ def create_endgame_pic_summary(
                 width=0,
             )
 
-            # Цвет номера:
-            # - для дона — фиолетовый (accent)
-            # - для обычной мафии/чёрных — белый
-            # - для остальных — accent
             slot_team = (info.get("team") or "").lower()
             slot_role = (role or "").lower()
             is_black_team = "чёрн" in slot_team or "маф" in slot_role
             is_don = "дон" in slot_role
 
             if is_don:
-                slot_color = accent
+                num_color = accent if alive else _lerp_color(accent, (140, 140, 140), 0.8)
             elif is_black_team:
-                slot_color = (240, 240, 240)
+                num_color = (240, 240, 240) if alive else (140, 140, 140)
             else:
-                slot_color = accent
+                num_color = accent if alive else _lerp_color(accent, (140, 140, 140), 0.8)
 
             draw.text(
                 ((slot_x1 + slot_x2) / 2, (slot_y1 + slot_y2) / 2 - int(1 * scale)),
                 slot_text,
-                fill=slot_color,
+                fill=num_color,
                 font=font_slot,
                 anchor="mm",
             )
 
-            # Ник — начинается сразу после бейджа слота, небольшой отступ
+            # Начало строки с ником/ролью/статусом
             x_name_start = slot_x2 + int(18 * scale)
 
-            # Ник (жирный, главный)
+            # Ник
+            name_color_alive = (236, 240, 241)
+            name_color_dead = (130, 130, 130)
+            name_color = name_color_alive if alive else name_color_dead
+
             draw.text(
                 (x_name_start, inner_top),
                 name,
-                fill=(236, 240, 241),
+                fill=name_color,
                 font=font_name,
             )
             name_w, _ = _text_size(draw, name, font_name)
 
-            # Кружок между ником и ролью
+            # Точка между ником и ролью
             dot_x = x_name_start + name_w + int(10 * scale)
             dot_y = inner_top + int(10 * scale)
             dot_r = int(4 * scale)
 
-            # Цвет точки:
-            # - для дона — фиолетовый (accent)
-            # - для обычной мафии — белый
-            # - для остальных — accent
             if is_don:
-                dot_color = accent
+                dot_color = accent if alive else _lerp_color(accent, (120, 120, 120), 0.85)
             elif is_black_team:
-                dot_color = (240, 240, 240)
+                dot_color = (240, 240, 240) if alive else (135, 135, 135)
             else:
-                dot_color = accent
+                dot_color = accent if alive else _lerp_color(accent, (120, 120, 120), 0.85)
 
             draw.ellipse(
                 (dot_x - dot_r, dot_y - dot_r, dot_x + dot_r, dot_y + dot_r),
@@ -461,23 +525,43 @@ def create_endgame_pic_summary(
                 outline=None,
             )
 
-            # Роль (капс, меньше, немного правее и ниже)
+            # Роль
             role_x = dot_x + int(10 * scale)
             role_y = inner_top + int(4 * scale)
+            role_color = (189, 195, 199) if alive else (120, 120, 120)
             draw.text(
                 (role_x, role_y),
                 role_caps,
-                fill=(189, 195, 199),
+                fill=role_color,
                 font=font_role,
             )
 
-            # Правый soft square: итоговый балл
+            # --- Статус после роли ---
+            status_label, status_color = get_status_label(info)
+            status_label_short = _shorten(status_label, max_len=26)
+
+            status_x = role_x + _text_size(draw, role_caps, font_role)[0] + int(12 * scale)
+            status_y = inner_top + int(4 * scale)
+
+            if not alive:
+                status_color = _lerp_color(status_color, (130, 130, 130), 0.7)
+
+            draw.text(
+                (status_x, status_y),
+                status_label_short,
+                fill=status_color,
+                font=font_status,
+            )
+
+            # Итоговые очки — всегда яркие
             base_pts = float(info.get("base_points", 0.0) or 0.0)
             bonus_pts = float(info.get("bonus_points", 0.0) or 0.0)
             lh_pts = float(info.get("lh_points", 0.0) or 0.0)
             pr_pts = float(info.get("will_protocol_points", 0.0) or 0.0)
             mn_pts = float(info.get("will_opinion_points", 0.0) or 0.0)
-            total_pts = round(base_pts + bonus_pts + lh_pts + pr_pts + mn_pts, 1)
+            dc_pts = float(info.get("dc_points", 0.0) or 0.0)
+
+            total_pts = round(base_pts + bonus_pts + lh_pts + pr_pts + mn_pts + dc_pts, 1)
             total_text = str(total_pts)
 
             tw, th = _text_size(draw, total_text, font_total_big)
@@ -496,6 +580,8 @@ def create_endgame_pic_summary(
                 int(255 * 0.10),
                 int(255 * 0.10),
             )
+            # НЕ глушим итоговый блок
+            sq_outline = accent
             _draw_rounded_rect(
                 draw,
                 sq_x1,
@@ -503,23 +589,27 @@ def create_endgame_pic_summary(
                 sq_x2,
                 sq_y2,
                 radius=int(16 * scale),
-                outline=accent,
+                outline=sq_outline,
                 fill=sq_fill,
                 width=int(2 * scale),
             )
 
-            # Центрирование итога строго по центру soft-square
             cx = (sq_x1 + sq_x2) / 2
             cy = (sq_y1 + sq_y2) / 2
+            total_color = (236, 240, 241)
             draw.text(
-                (cx, cy - int(1 * scale)),  # лёгкий подъём на 1px в масштабе
+                (cx, cy - int(1 * scale)),
                 total_text,
-                fill=(236, 240, 241),
+                fill=total_color,
                 font=font_total_big,
                 anchor="mm",
             )
 
-            # Нижняя строка: ПУ + очки бейджами
+            # Дисциплина
+            fouls = int(info.get("fouls", 0) or 0)
+            technical_fouls = info.get("technical_fouls") or []
+
+            # Нижняя строка бейджей
             badges_y = row_top + int(row_height_scaled * 0.56)
             badges_x = x_name_start
 
@@ -540,7 +630,7 @@ def create_endgame_pic_summary(
 
             def add_points_badge(label: str, value: float) -> int:
                 nonlocal badges_x
-                txt = f"{label}: {value}"
+                txt = f"{label}: {value:+.1f}"
                 if value > 0:
                     badges_x = _draw_badge(
                         draw,
@@ -587,14 +677,54 @@ def create_endgame_pic_summary(
             add_points_badge("ЛХ", lh_pts)
             add_points_badge("ПР", pr_pts)
             add_points_badge("МН", mn_pts)
+            if abs(dc_pts) > 0.0:
+                add_points_badge("ДЦ", dc_pts)
+
+            if fouls > 0:
+                fouls_bg = minus_bg if fouls >= 4 else zero_bg
+                fouls_fg = minus_fg if fouls >= 4 else zero_fg
+                badges_x = _draw_badge(
+                    draw,
+                    badges_x,
+                    badges_y,
+                    f"Фолы: {fouls}",
+                    font_badge,
+                    bg_color=fouls_bg,
+                    fg_color=fouls_fg,
+                    padding_x=int(6 * scale),
+                    padding_y=int(4 * scale),
+                    radius=int(8 * scale),
+                ) + int(6 * scale)
+
+            if technical_fouls:
+                small_count = sum(1 for t in technical_fouls if t == "small")
+                big_count = sum(1 for t in technical_fouls if t == "big")
+                parts = []
+                if small_count:
+                    parts.append(f"{small_count}S")
+                if big_count:
+                    parts.append(f"{big_count}B")
+                tech_text = "Тех: " + "/".join(parts)
+                badges_x = _draw_badge(
+                    draw,
+                    badges_x,
+                    badges_y,
+                    tech_text,
+                    font_badge,
+                    bg_color=minus_bg,
+                    fg_color=minus_fg,
+                    padding_x=int(6 * scale),
+                    padding_y=int(4 * scale),
+                    radius=int(8 * scale),
+                ) + int(6 * scale)
 
             y_pos = row_bottom + row_gap
 
         y_pos += int(8 * scale)
         return y_pos
 
-    # --- Победившая команда всегда сверху ---
-    groups_order: list[Tuple[str, list[Tuple[int, dict]], str]] = [
+    # --- Порядок групп по победителю ---
+    groups_order: List[Tuple[str, List[Tuple[int, dict]], str]] = [
         ("ГОРОД (КРАСНЫЕ):", red_slots, "red"),
         ("МАФИЯ (ЧЁРНЫЕ):", black_slots, "black"),
         ("БЕЗ КОМАНДЫ:", other_slots, "none"),
@@ -616,7 +746,7 @@ def create_endgame_pic_summary(
     for title, group, key in groups_order:
         y = draw_group(title, group, y, team_key=key)
 
-    # Блок "Убийства (ночные завещания)"
+    # --- Блок "Убийства (ночные завещания)" ---
     if night_kills_order:
         y += int(10 * scale)
         draw.line(
@@ -626,13 +756,14 @@ def create_endgame_pic_summary(
         )
         y += int(14 * scale)
 
+        kills_title = "Убийства (ночные завещания):"
         draw.text(
             (card_x1, y),
-            "Убийства (ночные завещания):",
+            kills_title,
             fill=(189, 195, 199),
             font=font_group,
         )
-        _, kh = _text_size(draw, "Убийства (ночные завещания):", font_group)
+        _, kh = _text_size(draw, kills_title, font_group)
         y += kh + int(8 * scale)
 
         for killed_slot in night_kills_order:
@@ -660,7 +791,7 @@ def create_endgame_pic_summary(
             x_text = card_x1 + int(14 * scale)
             y_text = block_top + int(8 * scale)
 
-            kill_title = f"Убийство №{killed_slot}"
+            kill_title = f"Убийство слота {killed_slot}"
             draw.text(
                 (x_text, y_text),
                 kill_title,
@@ -670,7 +801,6 @@ def create_endgame_pic_summary(
             _, t_h = _text_size(draw, kill_title, font_small)
             y_text += t_h + int(6 * scale)
 
-            # Протокол — разрезанная строка с цветным +/- в скобках
             base_text_proto = f"Протокол — {proto_text}"
             draw.text(
                 (x_text, y_text),
@@ -689,8 +819,10 @@ def create_endgame_pic_summary(
                 font=font_small,
             )
 
-            delta_proto_txt = f"{proto_pts}"
-            delta_color_proto = plus_fg if proto_pts > 0 else minus_fg if proto_pts < 0 else zero_fg
+            delta_proto_txt = f"{proto_pts:+.1f}"
+            delta_color_proto = (
+                plus_fg if proto_pts > 0 else minus_fg if proto_pts < 0 else zero_fg
+            )
             draw.text(
                 (x_text + base_w_proto + paren_open_w, y_text),
                 delta_proto_txt,
@@ -709,7 +841,6 @@ def create_endgame_pic_summary(
             _, t_h2 = _text_size(draw, base_text_proto, font=font_small)
             y_text += t_h2 + int(4 * scale)
 
-            # Мнение — аналогично
             base_text_op = f"Мнение — {op_text}"
             draw.text(
                 (x_text, y_text),
@@ -727,8 +858,10 @@ def create_endgame_pic_summary(
                 font=font_small,
             )
 
-            delta_op_txt = f"{op_pts}"
-            delta_color_op = plus_fg if op_pts > 0 else minus_fg if op_pts < 0 else zero_fg
+            delta_op_txt = f"{op_pts:+.1f}"
+            delta_color_op = (
+                plus_fg if op_pts > 0 else minus_fg if op_pts < 0 else zero_fg
+            )
             draw.text(
                 (x_text + base_w_op + paren_open_w2, y_text),
                 delta_op_txt,
@@ -746,7 +879,7 @@ def create_endgame_pic_summary(
 
             y = block_bottom + int(6 * scale)
 
-    # --- Даунскейл для сглаживания ---
+    # --- Даунскейл ---
     final_img = img.resize((base_width, base_height), resample=Image.LANCZOS)
 
     filename = f"endgame_summary_{game_date.replace('.', '-')}_{global_game_number}.png"

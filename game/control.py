@@ -899,12 +899,19 @@ async def final_finish_game(message: types.Message, state: FSMContext):
         return
 
     data = await state.get_data()
+    # Берём слоты из FSM или из БД
     slots = data.get("slots") or await database.load_current_game_slots()
 
     if not slots:
         await message.answer("Нет данных об игре.", reply_markup=keyboards.admin_menu())
         await clear_game_state(state)
         return
+
+    # Переносим порядок ночных убийств в slots, чтобы картинка увидела завещания
+    night_kills_order = data.get("night_kills_order") or data.get("_night_kills_order") or []
+    # Сохраняем только если там что‑то есть
+    if night_kills_order:
+        slots["_night_kills_order"] = night_kills_order
 
     game_date = await database.get_current_game_date() or "-"
     evening_num = await database.get_current_game_number() or 1
