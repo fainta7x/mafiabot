@@ -155,7 +155,8 @@ async def admin_all_users_btn(message: types.Message):
         return
 
     text = "👥 **База игроков:**\n\n"
-    for name, nick, visit, debt, total_paid in users:
+    # Вариант 1: распаковываем все 7 значений (первые 5 используем, остальные игнорируем)
+    for name, nick, visit, debt, total_paid, *_ in users:
         if not visit or visit == "-":
             visit_text = "Ещё не был на вечерах"
         else:
