@@ -8,18 +8,17 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import config
 from database import init_db
 from handlers import start_profile, payment, booking, debug, profile
-from handlers import admin_judges   # ← НОВЫЙ ИМПОРТ РОУТЕРА СУДЕЙ
+from handlers import admin_judges
 import admin
-from game import router as game_router
-from commands import setup_bot_commands  # импорт команд
+from game import router as game_router          # игровой роутер (controls.py / game package)
+from history import router as history_router    # НОВОЕ: роутер истории / протоколов
+from commands import setup_bot_commands
 
 
-# 1. Описываем класс логгера ВНЕ функции main, чтобы Python его видел
 class MyLoggerMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: Update, data):
         if event.message:
             user = event.message.from_user
-            # Добавили @username в вывод
             print(
                 f"📩 СООБЩЕНИЕ | {user.full_name} (@{user.username}) "
                 f"| ID: {user.id} | Текст: {event.message.text}"
@@ -42,29 +41,33 @@ async def main():
     bot = Bot(token=config.TOKEN)
     dp = Dispatcher(storage=storage)
 
-    # 2. Регистрируем логгер СРАЗУ после создания dp
+    # Логгер
     dp.update.outer_middleware(MyLoggerMiddleware())
 
     # Передаём bot в модули, где он нужен
     payment.setup_payment_handlers(bot)
     admin.setup_admin_handlers(bot)
 
-    # Регистрируем все роутеры (по одному разу)
-    dp.include_router(game_router)
+    # Регистрируем все роутеры (важен только факт include, порядок оставляем логичным)
+    dp.include_router(game_router)          # игровая логика
+    dp.include_router(history_router)       # просмотр/редактирование истории игр
+
     dp.include_router(start_profile.router)
     dp.include_router(profile.router)
     dp.include_router(payment.router)
     dp.include_router(booking.router)
     dp.include_router(admin.router)
-    dp.include_router(admin_judges.router)   # ← АККУРАТНО ДОБАВЛЕН РОУТЕР СУДЕЙ
+    dp.include_router(admin_judges.router)
     dp.include_router(debug.router)
 
-    # ========== Устанавливаем команды для кнопки меню ==========
+    # Команды меню
     await setup_bot_commands(bot)
     logger.info("✅ Команды для меню установлены!")
 
+    # Инициализация БД
     await init_db()
     logger.info("Бот успешно запущен!")
+
     await dp.start_polling(bot)
 
 

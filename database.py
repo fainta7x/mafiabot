@@ -23,7 +23,6 @@ async def _ensure_columns():
         ("game_slots_history", ["will_protocol_points", "will_opinion_points"], "REAL DEFAULT 0"),
         ("game_slots_history", ["kick", "ppk", "technical_fouls"], "INTEGER DEFAULT 0"),
         ("game_slots_history", ["dc_points"], "REAL DEFAULT 0"),
-        # ↓↓↓ НОВОЕ
         ("game_slots_history", ["pu"], "INTEGER DEFAULT 0"),
     ]
     async with get_db() as conn:
@@ -40,7 +39,6 @@ async def _ensure_columns():
 async def init_db():
     """Инициализация всех таблиц."""
     async with get_db() as conn:
-        # Основные таблицы
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS game_slots_history
             (
@@ -58,7 +56,8 @@ async def init_db():
                 dc_points            REAL    DEFAULT 0,
                 kick                 INTEGER DEFAULT 0,
                 ppk                  INTEGER DEFAULT 0,
-                technical_fouls      INTEGER DEFAULT 0
+                technical_fouls      INTEGER DEFAULT 0,
+                pu                   INTEGER DEFAULT 0
             )
         """)
         await conn.execute("""
@@ -101,25 +100,6 @@ async def init_db():
             (
                 key   TEXT PRIMARY KEY,
                 value TEXT
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS game_slots_history
-            (
-                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_date            TEXT,
-                user_id              INTEGER,
-                slot_num             INTEGER,
-                role                 TEXT,
-                team                 TEXT,
-                base_points          REAL DEFAULT 0,
-                bonus_points         REAL DEFAULT 0,
-                lh_points            REAL DEFAULT 0,
-                will_protocol_points REAL DEFAULT 0,
-                will_opinion_points  REAL DEFAULT 0,
-                kick                 INTEGER DEFAULT 0,
-                ppk                  INTEGER DEFAULT 0,
-                technical_fouls      INTEGER DEFAULT 0
             )
         """)
         await conn.execute("""
@@ -369,7 +349,6 @@ async def get_user_by_nickname(nickname: str) -> Optional[Tuple[int, str, str, s
     Возвращает (user_id, full_name, username, nickname) или None.
     """
     async with get_db() as conn:
-        # Ищем по нику (точное совпадение)
         async with conn.execute(
             "SELECT user_id, full_name, username, nickname FROM users WHERE nickname = ?",
             (nickname,)
@@ -378,7 +357,6 @@ async def get_user_by_nickname(nickname: str) -> Optional[Tuple[int, str, str, s
             if row:
                 return row
 
-        # Если не нашли, ищем по полному имени (точное совпадение)
         async with conn.execute(
             "SELECT user_id, full_name, username, nickname FROM users WHERE full_name = ?",
             (nickname,)
@@ -387,7 +365,6 @@ async def get_user_by_nickname(nickname: str) -> Optional[Tuple[int, str, str, s
             if row:
                 return row
 
-        # Если не нашли, ищем по частичному совпадению в нике
         async with conn.execute(
             "SELECT user_id, full_name, username, nickname FROM users WHERE nickname LIKE ?",
             (f"%{nickname}%",)
@@ -969,9 +946,11 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
                    lh_points,
                    will_protocol_points,
                    will_opinion_points,
+                   dc_points,
                    kick,
                    ppk,
-                   technical_fouls
+                   technical_fouls,
+                   pu
             FROM game_slots_history
             WHERE game_date = ?
             ORDER BY slot_num
@@ -983,13 +962,13 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
     if not rows:
         return None
 
-    slots = {}
+    slots: Dict[int, dict] = {}
     for row in rows:
         (user_id, slot_num, role, team,
          base_points, bonus_points, lh_points,
-         protocol_points, opinion_points, kick, ppk, tech_fouls) = row
+         protocol_points, opinion_points, dc_points,
+         kick, ppk, tech_fouls, pu) = row
 
-        # Получаем ник пользователя
         nickname = None
         full_name = None
         username = None
@@ -1010,13 +989,14 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
             "lh_points": lh_points or 0,
             "will_protocol_points": protocol_points or 0,
             "will_opinion_points": opinion_points or 0,
+            "dc_points": dc_points or 0,
             "alive": True,
             "status_reason": "Жив",
             "fouls": 0,
             "nominated": False,
             "votes": 0,
             "night_suspects": [],
-            "pu_mark": False,
+            "pu_mark": bool(pu),
             "will_protocol_raw": "",
             "will_opinion": "",
             "kick": kick or 0,
@@ -1025,3 +1005,70 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
         }
 
     return slots
+
+# ========== 9. ОБНОВЛЕНИЕ ИСХОДА ИГРЫ ==========
+
+async def update_game_outcome(game_id: int, winner_label: str) -> None:
+    """
+    Обновляет исход игры в таблице game_history:
+    - winner_label: текст вида 'Победа города', 'Победа мафии',
+      'ППК: Красные (Виновник: ...)' и т.п.
+    """
+    async with get_db() as conn:
+        await conn.execute(
+            "UPDATE game_history SET winner_label = ? WHERE id = ?",
+            (winner_label, game_id),
+        )
+        await conn.commit()
+
+async def update_game_slot(
+    game_date: str,
+    slot_num: int,
+    *,
+    role: Optional[str] = None,
+    team: Optional[str] = None,
+    base_points: Optional[float] = None,
+    bonus_points: Optional[float] = None,
+    lh_points: Optional[float] = None,
+    will_protocol_points: Optional[float] = None,
+    will_opinion_points: Optional[float] = None,
+    dc_points: Optional[float] = None,
+    kick: Optional[int] = None,
+    ppk: Optional[int] = None,
+    technical_fouls: Optional[int] = None,
+    pu: Optional[int] = None,
+) -> None:
+    """Частичное обновление одного слота игры по дате и номеру слота."""
+    fields: List[str] = []
+    params: List[Any] = []
+
+    def add(field: str, value: Any):
+        if value is not None:
+            fields.append(f"{field} = ?")
+            params.append(value)
+
+    add("role", role)
+    add("team", team)
+    add("base_points", base_points)
+    add("bonus_points", bonus_points)
+    add("lh_points", lh_points)
+    add("will_protocol_points", will_protocol_points)
+    add("will_opinion_points", will_opinion_points)
+    add("dc_points", dc_points)
+    add("kick", kick)
+    add("ppk", ppk)
+    add("technical_fouls", technical_fouls)
+    add("pu", pu)
+
+    if not fields:
+        return
+
+    params.extend([game_date, slot_num])
+
+    async with get_db() as conn:
+        await conn.execute(
+            f"UPDATE game_slots_history SET {', '.join(fields)} "
+            "WHERE game_date = ? AND slot_num = ?",
+            tuple(params),
+        )
+        await conn.commit()

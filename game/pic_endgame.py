@@ -1,5 +1,5 @@
 import os
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Any
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -131,22 +131,28 @@ def _lerp_color(c1: Tuple[int, int, int], c2: Tuple[int, int, int], t: float) ->
 
 
 def create_endgame_pic_summary(
-    slots: Dict[int, dict],
-    game_date: str,
-    evening_game_number: int,
-    global_game_number: int,
-    winner_label: str | None,
+        slots: Dict[Any, dict],
+        game_date: str,
+        evening_game_number: int,
+        global_game_number: int,
+        winner_label: str | None,
 ) -> str:
     """
-    Современный общий протокол игры:
-      - тёмная тема, цветные рамки по ролям;
-      - номер слева, затем Ник • роль • статус в одну строку;
-      - soft-square итоговый балл справа (всегда яркий);
-      - аккуратные бейджи очков;
-      - фолы / техфолы / ДЦ;
-      - блок убийств с цветной подсветкой +/-;
-      - живые игроки — насыщенные, вылетевшие — сильно приглушённые.
+    Современный общий протокол игры.
     """
+    # ========== ФИЛЬТРУЕМ СЛОТЫ - оставляем только числовые ключи 1-10 ==========
+    clean_slots = {}
+    night_kills_order = []
+
+    for key, value in slots.items():
+        if isinstance(key, int) and 1 <= key <= 10:
+            clean_slots[key] = value
+        elif key == "_night_kills_order" and isinstance(value, list):
+            night_kills_order = value
+
+    slots = clean_slots
+    # ========== КОНЕЦ ФИЛЬТРАЦИИ ==========
+
     # --- Подготовка данных по командам ---
     red_slots: List[Tuple[int, dict]] = []
     black_slots: List[Tuple[int, dict]] = []
@@ -170,12 +176,6 @@ def create_endgame_pic_summary(
     black_slots.sort(key=lambda x: x[0])
     other_slots.sort(key=lambda x: x[0])
 
-    # --- Подготовка данных по убийствам ---
-    night_kills_order: List[int] = []
-    nk = slots.get("_night_kills_order")
-    if isinstance(nk, list):
-        night_kills_order = [int(x) for x in nk if isinstance(x, int)]
-
     # Базовый логический размер (до масштабирования)
     base_width = 1200
     base_height = 800
@@ -189,7 +189,7 @@ def create_endgame_pic_summary(
         + count_group_items(black_slots)
         + count_group_items(other_slots)
     )
-    row_height = 80  # увеличенный для воздуха
+    row_height = 80
     kills_block_height = 0
     if night_kills_order:
         kills_block_height = 40 + len(night_kills_order) * 80
@@ -214,8 +214,8 @@ def create_endgame_pic_summary(
     font_group = _load_font(int(26 * scale / 2))
     font_name = _load_font(int(30 * scale / 2))
     font_role = _load_font(int(20 * scale / 2))
-    font_small = _load_font(int(18 * scale / 2))   # мелкий
-    font_status = _load_font(int(22 * scale / 2))  # статус/доп. текст
+    font_small = _load_font(int(18 * scale / 2))
+    font_status = _load_font(int(22 * scale / 2))
     font_badge = _load_font(int(18 * scale / 2))
     font_total_big = _load_font(int(32 * scale / 2))
 
@@ -348,9 +348,9 @@ def create_endgame_pic_summary(
             alive = slot_info.get("alive", True)
             reason = (slot_info.get("status_reason") or "").strip()
 
-            green_live = (46, 204, 113)    # Жив — насыщенный зелёный
-            red_dead = (244, 67, 54)       # Удалён
-            grey_passive = (158, 158, 158) # Убит/Заголосован
+            green_live = (46, 204, 113)
+            red_dead = (244, 67, 54)
+            grey_passive = (158, 158, 158)
             grey_neutral = (189, 195, 199)
 
             r_low = reason.lower()
@@ -360,7 +360,6 @@ def create_endgame_pic_summary(
                     return "Жив", green_live
                 return reason, green_live
 
-            # не за столом
             if "ппк" in r_low:
                 return "Удалён (ППК)", red_dead
             if "ведущ" in r_low:
@@ -369,12 +368,10 @@ def create_endgame_pic_summary(
                 return "Удалён (4 фола)", red_dead
             if "2 техфол" in r_low:
                 return "Удалён (2 техфола)", red_dead
-
             if "заголос" in r_low:
                 return "Заголосован", grey_passive
             if "убит" in r_low:
                 return reason or "Убит", grey_passive
-
             if "фол" in r_low or "тех" in r_low:
                 return reason, red_dead
 
@@ -414,7 +411,6 @@ def create_endgame_pic_summary(
 
             accent, bg_soft = _role_color(role)
 
-            # Сильное приглушение для тех, кто не за столом
             if not alive:
                 bg_soft = _lerp_color(bg_soft, (12, 12, 12), 0.85)
                 accent = _lerp_color(accent, (60, 60, 60), 0.85)
@@ -430,7 +426,6 @@ def create_endgame_pic_summary(
 
             outline_color = accent
 
-            # Карточка игрока
             _draw_rounded_rect(
                 draw,
                 card_x1,
@@ -447,7 +442,7 @@ def create_endgame_pic_summary(
             inner_right = card_x2 - int(16 * scale)
             inner_top = row_top + int(10 * scale)
 
-            # --- Номер слота внутри рамки (слева) ---
+            # Номер слота
             slot_text = str(slot_num)
             font_slot = _load_font(int(36 * scale / 2))
             slot_w, slot_h = _text_size(draw, slot_text, font_slot)
@@ -491,10 +486,8 @@ def create_endgame_pic_summary(
                 anchor="mm",
             )
 
-            # Начало строки с ником/ролью/статусом
             x_name_start = slot_x2 + int(18 * scale)
 
-            # Ник
             name_color_alive = (236, 240, 241)
             name_color_dead = (130, 130, 130)
             name_color = name_color_alive if alive else name_color_dead
@@ -507,7 +500,6 @@ def create_endgame_pic_summary(
             )
             name_w, _ = _text_size(draw, name, font_name)
 
-            # Точка между ником и ролью
             dot_x = x_name_start + name_w + int(10 * scale)
             dot_y = inner_top + int(10 * scale)
             dot_r = int(4 * scale)
@@ -525,7 +517,6 @@ def create_endgame_pic_summary(
                 outline=None,
             )
 
-            # Роль
             role_x = dot_x + int(10 * scale)
             role_y = inner_top + int(4 * scale)
             role_color = (189, 195, 199) if alive else (120, 120, 120)
@@ -536,7 +527,6 @@ def create_endgame_pic_summary(
                 font=font_role,
             )
 
-            # --- Статус после роли ---
             status_label, status_color = get_status_label(info)
             status_label_short = _shorten(status_label, max_len=26)
 
@@ -553,7 +543,7 @@ def create_endgame_pic_summary(
                 font=font_status,
             )
 
-            # Итоговые очки — всегда яркие
+            # Очки
             base_pts = float(info.get("base_points", 0.0) or 0.0)
             bonus_pts = float(info.get("bonus_points", 0.0) or 0.0)
             lh_pts = float(info.get("lh_points", 0.0) or 0.0)
@@ -580,7 +570,6 @@ def create_endgame_pic_summary(
                 int(255 * 0.10),
                 int(255 * 0.10),
             )
-            # НЕ глушим итоговый блок
             sq_outline = accent
             _draw_rounded_rect(
                 draw,
@@ -605,11 +594,7 @@ def create_endgame_pic_summary(
                 anchor="mm",
             )
 
-            # Дисциплина
-            fouls = int(info.get("fouls", 0) or 0)
-            technical_fouls = info.get("technical_fouls") or []
-
-            # Нижняя строка бейджей
+            # Бейджи
             badges_y = row_top + int(row_height_scaled * 0.56)
             badges_x = x_name_start
 
@@ -680,6 +665,7 @@ def create_endgame_pic_summary(
             if abs(dc_pts) > 0.0:
                 add_points_badge("ДЦ", dc_pts)
 
+            fouls = int(info.get("fouls", 0) or 0)
             if fouls > 0:
                 fouls_bg = minus_bg if fouls >= 4 else zero_bg
                 fouls_fg = minus_fg if fouls >= 4 else zero_fg
@@ -696,6 +682,7 @@ def create_endgame_pic_summary(
                     radius=int(8 * scale),
                 ) + int(6 * scale)
 
+            technical_fouls = info.get("technical_fouls") or []
             if technical_fouls:
                 small_count = sum(1 for t in technical_fouls if t == "small")
                 big_count = sum(1 for t in technical_fouls if t == "big")
@@ -723,7 +710,7 @@ def create_endgame_pic_summary(
         y_pos += int(8 * scale)
         return y_pos
 
-    # --- Порядок групп по победителю ---
+    # Порядок групп
     groups_order: List[Tuple[str, List[Tuple[int, dict]], str]] = [
         ("ГОРОД (КРАСНЫЕ):", red_slots, "red"),
         ("МАФИЯ (ЧЁРНЫЕ):", black_slots, "black"),
@@ -746,7 +733,7 @@ def create_endgame_pic_summary(
     for title, group, key in groups_order:
         y = draw_group(title, group, y, team_key=key)
 
-    # --- Блок "Убийства (ночные завещания)" ---
+    # Блок убийств
     if night_kills_order:
         y += int(10 * scale)
         draw.line(
@@ -879,7 +866,7 @@ def create_endgame_pic_summary(
 
             y = block_bottom + int(6 * scale)
 
-    # --- Даунскейл ---
+    # Сохраняем
     final_img = img.resize((base_width, base_height), resample=Image.LANCZOS)
 
     filename = f"endgame_summary_{game_date.replace('.', '-')}_{global_game_number}.png"
