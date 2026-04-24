@@ -1,5 +1,5 @@
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton, ReplyKeyboardMarkup
 
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
@@ -683,3 +683,16 @@ def judge_back_kb() -> InlineKeyboardMarkup:
     builder.button(text="◀️ Назад", callback_data="judge_back")
     builder.adjust(1)
     return builder.as_markup()
+
+# ========== КЛАВИАТУРА ДЛЯ ПОДТВЕРЖДЕНИЯ АНОНСА ==========
+
+def announce_confirm_kb(date: str) -> InlineKeyboardMarkup:
+    """
+    Клавиатура для подтверждения публикации анонса о сборе стола.
+    """
+    buttons = [
+        [InlineKeyboardButton(text="🕐 Указать точное время", callback_data=f"announce_confirm_time_{date}")],
+        [InlineKeyboardButton(text="⏰ Напишем позже", callback_data=f"announce_confirm_later_time_{date}")],
+        [InlineKeyboardButton(text="❌ Отложить", callback_data=f"announce_confirm_later_{date}")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

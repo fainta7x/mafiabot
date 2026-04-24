@@ -108,7 +108,7 @@ async def build_user_stats_data(user_id: int) -> dict:
         "win_points_sum": points,
         "avg_points": avg_points,
         "pr_avg": pr_avg_all,
-        "pr_minus_count": pr_neg_count_all,
+        "pr_minus_count": pr_neg_count_allа,
         "pr_minus_sum": pr_neg_sum_all,
         "pr_plus_count": pr_pos_count_all,
         "pr_plus_sum": pr_pos_sum_all,

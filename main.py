@@ -7,11 +7,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 import config
 from database import init_db
-from handlers import start_profile, payment, booking, debug, profile
-from handlers import admin_judges
+from handlers import start_profile, payment, booking, profile, admin_judges
 import admin
-from game import router as game_router          # игровой роутер (controls.py / game package)
-from history import router as history_router    # НОВОЕ: роутер истории / протоколов
+from game import router as game_router  # игровой роутер
+from history import router as history_router  # роутер истории игр
 from commands import setup_bot_commands
 
 
@@ -41,24 +40,31 @@ async def main():
     bot = Bot(token=config.TOKEN)
     dp = Dispatcher(storage=storage)
 
-    # Логгер
+    # Логгер (перехватывает все апдейты)
     dp.update.outer_middleware(MyLoggerMiddleware())
 
     # Передаём bot в модули, где он нужен
     payment.setup_payment_handlers(bot)
     admin.setup_admin_handlers(bot)
 
-    # Регистрируем все роутеры (важен только факт include, порядок оставляем логичным)
-    dp.include_router(game_router)          # игровая логика
-    dp.include_router(history_router)       # просмотр/редактирование истории игр
+    # ========== РЕГИСТРАЦИЯ РОУТЕРОВ (ВАЖНЫЙ ПОРЯДОК!) ==========
 
-    dp.include_router(start_profile.router)
-    dp.include_router(profile.router)
-    dp.include_router(payment.router)
-    dp.include_router(booking.router)
-    dp.include_router(admin.router)
-    dp.include_router(admin_judges.router)
-    dp.include_router(debug.router)
+    # 1. Сначала самые специфичные хендлеры с фильтрами
+    dp.include_router(admin_judges.router)  # управление судьями
+    dp.include_router(admin.router)  # админ-панель
+
+    # 2. Пользовательские хендлеры
+    dp.include_router(start_profile.router)  # /start
+    dp.include_router(profile.router)  # профиль
+    dp.include_router(payment.router)  # оплата
+    dp.include_router(booking.router)  # запись на игру
+
+    # 3. Игровые роутеры
+    dp.include_router(game_router)  # игровая логика
+    dp.include_router(history_router)  # история игр
+
+    # 4. Дебаг-роутер (обычно без фильтров, в самом конце)
+    # dp.include_router(debug.router)            # раскомментируйте, если файл существует
 
     # Команды меню
     await setup_bot_commands(bot)
@@ -66,7 +72,9 @@ async def main():
 
     # Инициализация БД
     await init_db()
-    logger.info("Бот успешно запущен!")
+    logger.info("✅ БД инициализирована")
+
+    logger.info("🚀 Бот успешно запущен!")
 
     await dp.start_polling(bot)
 
@@ -75,4 +83,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Бот выключен")
+        print("❌ Бот выключен")

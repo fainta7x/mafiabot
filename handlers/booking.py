@@ -3,6 +3,8 @@ from typing import List, Tuple, Optional
 
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 import config
 import keyboards
@@ -14,6 +16,14 @@ router = Router()
 # =========================================================
 # BOOKING — ЗАПИСЬ НА ВЕЧЕР МАФИИ
 # =========================================================
+
+
+# =========================================================
+# 0. FSM ДЛЯ ПОДТВЕРЖДЕНИЯ АНОНСА
+# =========================================================
+
+class AnnounceConfirm(StatesGroup):
+    waiting_for_confirmation = State()
 
 
 # =========================================================
@@ -102,6 +112,42 @@ async def update_stats_message(bot: Bot, date: str) -> bool:
         return False
 
 
+async def notify_admins(bot: Bot, message: str):
+    """
+    Отправляет сообщение всем администраторам.
+    """
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, message)
+        except Exception as e:
+            print(f"[ADMIN_NOTIFY] Failed to send to {admin_id}: {e}")
+
+
+async def check_and_request_announcement(bot: Bot, date: str, total_attending: int):
+    """
+    Проверяет, нужно ли запросить подтверждение анонса.
+    Отправляет запрос только один раз.
+    """
+    # Проверяем, отправляли ли уже запрос на подтверждение
+    announcement_requested = await database.get_announcement_requested(date)
+
+    if total_attending == 11 and not announcement_requested:
+        # Отмечаем, что запрос отправлен
+        await database.set_announcement_requested(date, True)
+
+        # Отправляем запрос всем админам
+        for admin_id in config.ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"🔥 **Стол собран!** ({date})\n\n"
+                    f"Хотите опубликовать анонс в группе?",
+                    reply_markup=keyboards.announce_confirm_kb(date)
+                )
+            except Exception as e:
+                print(f"[ANNOUNCE] Failed to send to {admin_id}: {e}")
+
+
 # =========================================================
 # 2. ХЕНДЛЕРЫ ЗАПИСИ
 # =========================================================
@@ -147,32 +193,12 @@ async def handle_book(call: CallbackQuery, bot: Bot):
         total_attending = await database.count_all_attending_for_date(date)
         ontime_count = await database.count_ontime_players_for_date(date)
 
-        # Если набралось 11 человек
-        if total_attending == 11:
-            await bot.send_message(config.ADMIN_ID, "🔥 Стол собран!")
+        # Проверяем, нужно ли запросить подтверждение анонса
+        await check_and_request_announcement(bot, date, total_attending)
 
-            stats_info = await database.get_stats_message(date)
-            if stats_info:
-                chat_id, _ = stats_info
-                await bot.send_message(
-                    chat_id,
-                    "🔥 **Стол собран! О времени сбора напишем позже**",
-                )
-
-        # Если 11 человек будут вовремя
+        # Если 11 человек будут вовремя (только уведомление админам)
         if ontime_count == 11:
-            await bot.send_message(
-                config.ADMIN_ID,
-                "✅ Все 11 человек будут вовремя!",
-            )
-
-            stats_info = await database.get_stats_message(date)
-            if stats_info:
-                chat_id, _ = stats_info
-                await bot.send_message(
-                    chat_id,
-                    "✅ **Отлично! 11 человек подтвердили, что будут к 20:00.**",
-                )
+            await notify_admins(bot, f"✅ Все 11 человек будут вовремя! ({date})")
 
         # Обновляем сообщение статистики
         await update_stats_message(bot, date)
@@ -195,6 +221,12 @@ async def handle_book(call: CallbackQuery, bot: Bot):
         # Обновляем сообщение статистики
         await update_stats_message(bot, date)
 
+        # Проверяем, может стол перестал быть полным
+        total_attending = await database.count_all_attending_for_date(date)
+        if total_attending < 11:
+            # Сбрасываем флаг запроса, если стол больше не полный
+            await database.set_announcement_requested(date, False)
+
     # Безопасное закрытие callback
     try:
         await call.answer()
@@ -203,7 +235,79 @@ async def handle_book(call: CallbackQuery, bot: Bot):
 
 
 # =========================================================
-# 3. ХЕНДЛЕРЫ ПРОСМОТРА
+# 3. ОБРАБОТКА ПОДТВЕРЖДЕНИЯ АНОНСА ОТ АДМИНА
+# =========================================================
+
+@router.callback_query(F.data.startswith("announce_confirm_"))
+async def handle_announce_confirm(callback: CallbackQuery, bot: Bot, state: FSMContext):
+    """
+    Обрабатывает выбор админа: опубликовать анонс или отложить.
+    """
+    _, option, date = callback.data.split("_", 2)
+
+    if option == "later":
+        await callback.message.edit_text(
+            f"⏰ Анонс отложен. Вы можете опубликовать его позже через админ-панель."
+        )
+        await callback.answer()
+        return
+
+    elif option == "time":
+        # Админ выбрал указать точное время
+        await callback.message.edit_text(
+            f"🕐 Введите время сбора в формате ЧЧ:ММ (например, 20:00 или 19:30):"
+        )
+        await state.update_data(date=date)
+        await state.set_state(AnnounceConfirm.waiting_for_confirmation)
+        await callback.answer()
+
+    elif option == "later_time":
+        # Админ выбрал "Напишем позже"
+        await callback.message.edit_text(
+            f"✅ Анонс опубликован в группе!"
+        )
+
+        # Отправляем анонс в группу
+        await bot.send_message(
+            config.GROUP_ID,
+            f"🔥 **Стол собран!** ({date})\n\nО времени сбора напишем позже.",
+            message_thread_id=config.ANNOUNCE_TOPIC_ID,
+            parse_mode="Markdown"
+        )
+        await callback.answer()
+
+
+@router.message(AnnounceConfirm.waiting_for_confirmation)
+async def process_announce_time(message: Message, bot: Bot, state: FSMContext):
+    """
+    Получаем время от админа и публикуем анонс.
+    """
+    time_str = message.text.strip()
+    data = await state.get_data()
+    date = data.get('date')
+
+    # Простая валидация формата времени
+    import re
+    if not re.match(r'^\d{1,2}:\d{2}$', time_str):
+        await message.answer(
+            "❌ Неверный формат. Введите время в формате ЧЧ:ММ (например, 20:00 или 19:30):"
+        )
+        return
+
+    # Отправляем анонс в группу
+    await bot.send_message(
+        config.GROUP_ID,
+        f"🔥 **Стол собран!** ({date})\n\n🕐 Сбор к {time_str}",
+        message_thread_id=config.ANNOUNCE_TOPIC_ID,
+        parse_mode="Markdown"
+    )
+
+    await message.answer(f"✅ Анонс опубликован в группе! Время сбора: {time_str}")
+    await state.clear()
+
+
+# =========================================================
+# 4. ХЕНДЛЕРЫ ПРОСМОТРА
 # =========================================================
 
 @router.message(F.text == "🧾 Список игроков", F.chat.type == "private")

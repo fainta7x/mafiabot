@@ -1072,3 +1072,75 @@ async def update_game_slot(
             tuple(params),
         )
         await conn.commit()
+
+
+# ========== 10. АНОНСЫ СТОЛА ==========
+
+async def get_announcement_requested(date: str) -> bool:
+    """
+    Проверяет, отправляли ли уже запрос на подтверждение анонса для этой даты.
+    """
+    async with get_db() as conn:
+        # Сначала проверяем, существует ли таблица game_dates
+        await conn.execute("""
+                           CREATE TABLE IF NOT EXISTS game_dates
+                           (
+                               date                   TEXT PRIMARY KEY,
+                               announcement_requested INTEGER DEFAULT 0
+                           )
+                           """)
+        await conn.commit()
+
+        async with conn.execute(
+                "SELECT announcement_requested FROM game_dates WHERE date = ?",
+                (date,)
+        ) as cur:
+            row = await cur.fetchone()
+            return bool(row and row[0])
+
+
+# ========== 10. АНОНСЫ СТОЛА ==========
+
+async def get_announcement_requested(date: str) -> bool:
+    """
+    Проверяет, отправляли ли уже запрос на подтверждение анонса для этой даты.
+    """
+    async with get_db() as conn:
+        # Сначала проверяем, существует ли таблица game_dates
+        await conn.execute("""
+                           CREATE TABLE IF NOT EXISTS game_dates
+                           (
+                               date                   TEXT PRIMARY KEY,
+                               announcement_requested INTEGER DEFAULT 0
+                           )
+                           """)
+        await conn.commit()
+
+        async with conn.execute(
+                "SELECT announcement_requested FROM game_dates WHERE date = ?",
+                (date,)
+        ) as cur:
+            row = await cur.fetchone()
+            return bool(row and row[0])
+
+
+async def set_announcement_requested(date: str, requested: bool):
+    """
+    Устанавливает флаг отправки запроса на подтверждение анонса.
+    """
+    async with get_db() as conn:
+        # Сначала проверяем, существует ли таблица game_dates
+        await conn.execute("""
+                           CREATE TABLE IF NOT EXISTS game_dates
+                           (
+                               date                   TEXT PRIMARY KEY,
+                               announcement_requested INTEGER DEFAULT 0
+                           )
+                           """)
+
+        await conn.execute("""
+                           INSERT INTO game_dates (date, announcement_requested)
+                           VALUES (?, ?)
+                           ON CONFLICT(date) DO UPDATE SET announcement_requested = excluded.announcement_requested
+                           """, (date, 1 if requested else 0))
+        await conn.commit()

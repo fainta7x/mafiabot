@@ -8,45 +8,90 @@ from config import ADMIN_IDS  # список админов
 router = Router()
 
 
-# ========== ВСПОМОГАТЕЛЬНАЯ ПРОВЕРКА ПРАВ АДМИНА ==========
+# ========== ФУНКЦИИ ПРОВЕРКИ ПРАВ ==========
+
+async def is_admin(user_id: int) -> bool:
+    """Проверка, является ли пользователь глобальным администратором"""
+    return user_id in ADMIN_IDS
+
+
+async def is_judge(user_id: int) -> bool:
+    """Проверка, является ли пользователь судьёй"""
+    judges = await database.get_game_judges()
+    return user_id in judges
+
 
 async def ensure_admin_pm(message: Message) -> bool:
-    """Проверка: сообщение от админа в ЛС с ботом."""
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("❌ У вас нет прав администратора.")
+    """Проверка прав для ДОСТУПА К АДМИН-ПАНЕЛИ (только глобальные админы)"""
+    if not message.from_user:
         return False
-    if message.chat.type != "private":
-        await message.answer("⚠️ Управление судьями доступно только в личке с ботом.")
+
+    user_id = message.from_user.id
+
+    if not await is_admin(user_id):
+        await message.answer("⛔ У вас нет прав администратора для доступа к админ-панели.")
         return False
+
     return True
 
 
 async def ensure_admin_cb(callback: CallbackQuery) -> bool:
-    """Проверка: callback от админа в ЛС."""
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("❌ У вас нет прав администратора.", show_alert=True)
+    """Проверка прав для ДОСТУПА К АДМИН-ПАНЕЛИ (только глобальные админы)"""
+    if not callback.from_user:
         return False
-    if callback.message.chat.type != "private":
-        await callback.answer("⚠️ Только в личке с ботом.", show_alert=True)
+
+    user_id = callback.from_user.id
+
+    if not await is_admin(user_id):
+        await callback.answer("⛔ У вас нет прав администратора для доступа к админ-панели.", show_alert=True)
         return False
+
     return True
+
+
+async def ensure_judge_or_admin_pm(message: Message) -> bool:
+    """Проверка прав для ДОСТУПА К ПАНЕЛИ СУДЕЙ (админы или судьи)"""
+    if not message.from_user:
+        return False
+
+    user_id = message.from_user.id
+
+    if await is_admin(user_id) or await is_judge(user_id):
+        return True
+
+    await message.answer("⛔ У вас нет прав судьи для доступа к этой панели.")
+    return False
+
+
+async def ensure_judge_or_admin_cb(callback: CallbackQuery) -> bool:
+    """Проверка прав для ДОСТУПА К ПАНЕЛИ СУДЕЙ (админы или судьи)"""
+    if not callback.from_user:
+        return False
+
+    user_id = callback.from_user.id
+
+    if await is_admin(user_id) or await is_judge(user_id):
+        return True
+
+    await callback.answer("⛔ У вас нет прав судьи для доступа к этой панели.", show_alert=True)
+    return False
 
 
 # ========== 1. ВХОД В МЕНЮ СУДЕЙ (КНОПКА '⚖ Судьи') ==========
 
 @router.message(F.text == "⚖ Судьи")
 async def open_judges_menu(message: Message):
-    if not await ensure_admin_pm(message):
+    if not await ensure_judge_or_admin_pm(message):
         return
 
     await message.answer(
-        "⚖ **Управление судьями**\n\n"
-        "Здесь можно назначать и снимать судей, которые имеют право вести игры.",
+        "⚖ **Панель судей**\n\n"
+        "Здесь вы можете управлять игровыми процессами.",
         reply_markup=keyboards.judges_menu_kb()
     )
 
 
-# ========== 2. СПИСОК СУДЕЙ ==========
+# ========== 2. СПИСОК СУДЕЙ (ТОЛЬКО ДЛЯ АДМИНОВ) ==========
 
 @router.callback_query(F.data == "judge_list")
 async def show_judges_list(callback: CallbackQuery):
@@ -56,7 +101,6 @@ async def show_judges_list(callback: CallbackQuery):
     judge_ids = await database.get_game_judges()
     judges = []
 
-    # Получаем имена судей из БД пользователей
     for uid in judge_ids:
         info = await database.get_user_by_id(uid)
         if info:
@@ -82,7 +126,7 @@ async def show_judges_list(callback: CallbackQuery):
     await callback.answer()
 
 
-# ========== 3. НАЧАТЬ НАЗНАЧЕНИЕ СУДЬИ ==========
+# ========== 3. НАЧАТЬ НАЗНАЧЕНИЕ СУДЬИ (ТОЛЬКО АДМИНЫ) ==========
 
 @router.callback_query(F.data == "judge_add")
 async def judge_add_start(callback: CallbackQuery):
@@ -93,8 +137,7 @@ async def judge_add_start(callback: CallbackQuery):
         "➕ **Назначение судьи**\n\n"
         "Отправьте в этот чат:\n"
         "• либо *числовой* `user_id` пользователя,\n"
-        "• либо его ник / имя из базы (например, `Иван` или игровой ник).\n\n"
-        "Можно просто ответить на сообщение пользователя командой — тогда его ID возьмём автоматически.\n\n"
+        "• либо его ник / имя из базы.\n\n"
         "_После ввода я попрошу подтвердить назначение._",
         reply_markup=keyboards.judge_back_kb(),
         parse_mode="Markdown"
@@ -102,13 +145,10 @@ async def judge_add_start(callback: CallbackQuery):
     await callback.answer()
 
 
-# ========== 4. ОБРАБОТКА СООБЩЕНИЯ С КАНДИДАТОМ В СУДЬИ ==========
+# ========== 4. ОБРАБОТКА СООБЩЕНИЙ ДЛЯ НАЗНАЧЕНИЯ (ТОЛЬКО АДМИНЫ) ==========
 
 @router.message(F.text.regexp(r"^\d+$"))
 async def judge_add_by_id(message: Message):
-    """
-    Если админ написал только цифры — считаем, что это user_id.
-    """
     if not await ensure_admin_pm(message):
         return
 
@@ -135,45 +175,7 @@ async def judge_add_by_id(message: Message):
     )
 
 
-@router.message()
-async def judge_add_by_name(message: Message):
-    """
-    Фолбэк: если текст не число и не совпал с другими хендлерами,
-    пытаемся найти пользователя по нику / имени.
-    Лучше будет, если этот хендлер подключён после остальных админских,
-    чтобы не перехватывать лишнее.
-    """
-    if not await ensure_admin_pm(message):
-        return
-
-    text = (message.text or "").strip()
-    if not text:
-        return
-
-    info = await database.get_user_by_nickname(text)
-    if not info:
-        await message.answer(
-            f"❌ Пользователь с ником/именем `{text}` не найден в базе.\n"
-            f"Попробуйте ввести *числовой* user_id или другой ник.",
-            parse_mode="Markdown",
-            reply_markup=keyboards.judge_back_kb()
-        )
-        return
-
-    user_id, full_name, username, nickname = info
-    display_name = nickname or full_name or (f"@{username}" if username else f"ID {user_id}")
-
-    await message.answer(
-        f"Найден пользователь:\n"
-        f"• {display_name}\n"
-        f"• ID: `{user_id}`\n\n"
-        f"Назначить его судьёй?",
-        parse_mode="Markdown",
-        reply_markup=keyboards.judge_candidate_kb(user_id, display_name)
-    )
-
-
-# ========== 5. ПОДТВЕРЖДЕНИЕ НАЗНАЧЕНИЯ / ОТМЕНА ==========
+# ========== 5. ПОДТВЕРЖДЕНИЕ НАЗНАЧЕНИЯ / ОТМЕНА (ТОЛЬКО АДМИНЫ) ==========
 
 @router.callback_query(F.data.startswith("judge_confirm_add_"))
 async def judge_confirm_add(callback: CallbackQuery):
@@ -216,7 +218,7 @@ async def judge_cancel_add(callback: CallbackQuery):
     await callback.answer()
 
 
-# ========== 6. УДАЛЕНИЕ СУДЬИ ИЗ СПИСКА ==========
+# ========== 6. УДАЛЕНИЕ СУДЬИ (ТОЛЬКО АДМИНЫ) ==========
 
 @router.callback_query(F.data.startswith("judge_remove_"))
 async def judge_remove(callback: CallbackQuery):
@@ -231,7 +233,6 @@ async def judge_remove(callback: CallbackQuery):
 
     await database.remove_game_judge(user_id)
 
-    # Обновляем список
     judge_ids = await database.get_game_judges()
     judges = []
     for uid in judge_ids:
@@ -259,15 +260,13 @@ async def judge_remove(callback: CallbackQuery):
     await callback.answer("Судья удалён.")
 
 
-# ========== 7. НАЗАД / ВЫХОД ИЗ МЕНЮ СУДЕЙ ==========
+# ========== 7. НАЗАД / ВЫХОД ==========
 
 @router.callback_query(F.data == "judge_back")
 async def judge_back(callback: CallbackQuery):
     if not await ensure_admin_cb(callback):
         return
 
-    # ВАЖНО: вместо edit_text просто отправляем НОВОЕ сообщение,
-    # чтобы никогда не ловить "message is not modified"
     await callback.message.answer(
         "⚖ Управление судьями.\n\nВыберите действие:",
         reply_markup=keyboards.judges_menu_kb()
