@@ -16,6 +16,7 @@ from handlers.booking import build_stats_text, get_next_friday  # использ
 router = Router()
 bot: Bot | None = None
 
+
 # =========================================================
 # ADMIN / JUDGE — ПАНЕЛЬ АДМИНА И УПРАВЛЕНИЕ ВЕЧЕРОМ
 #
@@ -259,16 +260,23 @@ async def admin_send_bills_btn(message: types.Message):
 
     assert bot is not None
 
-    players = await database.get_all_players()
+    date_str = get_next_friday()
+
+    # Получаем ТОЛЬКО пришедших игроков
+    players = await database.get_booked_players_for_game()
+
     if not players:
-        await message.answer("Список игроков пуст!")
+        await message.answer("Нет игроков, которые пришли на игру.")
         return
 
     kb = keyboards.user_pay_now_kb()
     count = 0
+    failed_users = []
 
-    for (p_id,) in players:
+    # Рассылаем счета
+    for player in players:
         try:
+            p_id = player[0]
             if await database.has_unpaid_session(p_id):
                 continue
 
@@ -281,15 +289,32 @@ async def admin_send_bills_btn(message: types.Message):
                 reply_markup=kb,
             )
             count += 1
-        except Exception:
+        except Exception as e:
+            print(f"[BILLS] Error for user {player}: {e}")
+            failed_users.append(player[0])
             continue
 
-    await database.archive_current_evening()
+    # ========== АРХИВАЦИЯ ВЕЧЕРА И УСТАНОВКА ФЛАГА ==========
+    try:
+        await database.archive_current_evening()
+        # Устанавливаем флаг, что счета разосланы
+        await database.mark_evening_bills_sent(date_str)
+
+        await message.answer(
+            f"✅ Счета разосланы {count} игрокам.\n"
+            f"🗄 Вечер сохранён в истории.\n"
+            f"🗑 Текущий список записей очищен."
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при архивации вечера: {e}")
+        return
+    # ========================================================
+
+    if failed_users:
+        await message.answer(f"⚠️ Не удалось отправить счёт пользователям: {failed_users}")
 
     await message.answer(
-        f"✅ Счета разосланы {count} игрокам.\n"
-        f"🗄 Вечер сохранён в истории.\n"
-        f"🗑 Текущий список записей очищен.",
+        "🛠 Панель администратора.",
         reply_markup=keyboards.admin_menu(),
     )
 
@@ -311,7 +336,7 @@ async def admin_cancel_evening(message: types.Message):
         return
 
     text = (
-        "❌ Вечер мафии отменён.\n"
+        "❌ Вечер мафии отменен.\n"
         "Приносим извинения за неудобства.\n"
         "Следите за анонсами — пригласим вас на следующий вечер!"
     )
@@ -336,7 +361,7 @@ async def admin_cancel_evening(message: types.Message):
     await database.clear_bookings()
 
     await message.answer(
-        f"Вечер отменён.\n"
+        f"Вечер отменен.\n"
         f"Уведомление отправлено {sent} игрокам.\n"
         f"Записи на вечер очищены.",
         reply_markup=keyboards.admin_menu(),

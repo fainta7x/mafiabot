@@ -36,15 +36,15 @@ def _role_color(role: str) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
     r = (role or "").lower()
 
     if "дон" in r:
-        main = (142, 68, 173)   # фиолетовый
+        main = (142, 68, 173)  # фиолетовый
     elif "маф" in r:
-        main = (26, 26, 26)     # глубокий графитовый для мафии
+        main = (26, 26, 26)  # глубокий графитовый для мафии
     elif "шер" in r or "шериф" in r:
-        main = (46, 204, 113)   # мягкий зелёный
+        main = (46, 204, 113)  # мягкий зелёный
     elif "кр" in r or "мирн" in r or "город" in r:
-        main = (192, 57, 43)    # винный красный
+        main = (192, 57, 43)  # винный красный
     else:
-        main = (52, 152, 219)   # синий
+        main = (52, 152, 219)  # синий
 
     bg = (
         int(main[0] * 0.20),
@@ -55,15 +55,15 @@ def _role_color(role: str) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
 
 
 def _draw_rounded_rect(
-    draw: ImageDraw.ImageDraw,
-    x1,
-    y1,
-    x2,
-    y2,
-    radius,
-    outline=None,
-    fill=None,
-    width: int = 1,
+        draw: ImageDraw.ImageDraw,
+        x1,
+        y1,
+        x2,
+        y2,
+        radius,
+        outline=None,
+        fill=None,
+        width: int = 1,
 ):
     draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, outline=outline, width=width, fill=fill)
 
@@ -80,16 +80,16 @@ def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) 
 
 
 def _draw_badge(
-    draw: ImageDraw.ImageDraw,
-    x: int,
-    y: int,
-    text: str,
-    font: ImageFont.ImageFont,
-    bg_color: Tuple[int, int, int],
-    fg_color: Tuple[int, int, int] = (0, 0, 0),
-    padding_x: int = 8,
-    padding_y: int = 4,
-    radius: int = 8,
+        draw: ImageDraw.ImageDraw,
+        x: int,
+        y: int,
+        text: str,
+        font: ImageFont.ImageFont,
+        bg_color: Tuple[int, int, int],
+        fg_color: Tuple[int, int, int] = (0, 0, 0),
+        padding_x: int = 8,
+        padding_y: int = 4,
+        radius: int = 8,
 ) -> int:
     """
     Маленький скруглённый бейдж с текстом.
@@ -145,12 +145,38 @@ def create_endgame_pic_summary(
     night_kills_order = []
 
     for key, value in slots.items():
+        # Сохраняем все числовые слоты от 1 до 10
         if isinstance(key, int) and 1 <= key <= 10:
             clean_slots[key] = value
         elif key == "_night_kills_order" and isinstance(value, list):
             night_kills_order = value
+        # Также проверяем строковые ключи, которые могут быть числами
+        elif isinstance(key, str) and key.isdigit():
+            num = int(key)
+            if 1 <= num <= 10:
+                clean_slots[num] = value
 
     slots = clean_slots
+
+    # ========== ФОЛБЭК: если night_kills_order пустой, собираем убитых сами ==========
+    if not night_kills_order:
+        for slot_num, info in slots.items():
+            if isinstance(slot_num, int):
+                alive = info.get("alive", True)
+                kicked = info.get("kicked", False)
+                status_reason = info.get("status_reason", "")
+                # Игрок мёртв, если не alive, или kicked, или статус указывает на смерть
+                if not alive or kicked or "убит" in status_reason.lower() or "заголосован" in status_reason.lower():
+                    night_kills_order.append(slot_num)
+        night_kills_order.sort()
+        print(f"[PIC_DEBUG] Fallback night kills order (from dead players): {night_kills_order}")
+    # ========================================================================
+
+    # Если слотов меньше 10, добавляем недостающие для отладки
+    print(f"[PIC_DEBUG] Всего слотов получено: {len(slots)}")
+    for i in range(1, 11):
+        if i not in slots:
+            print(f"[PIC_DEBUG] Слот {i} отсутствует в данных!")
     # ========== КОНЕЦ ФИЛЬТРАЦИИ ==========
 
     # --- Подготовка данных по командам ---
@@ -185,9 +211,9 @@ def create_endgame_pic_summary(
         return len(group)
 
     total_items = (
-        count_group_items(red_slots)
-        + count_group_items(black_slots)
-        + count_group_items(other_slots)
+            count_group_items(red_slots)
+            + count_group_items(black_slots)
+            + count_group_items(other_slots)
     )
     row_height = 80
     kills_block_height = 0
@@ -755,9 +781,13 @@ def create_endgame_pic_summary(
 
         for killed_slot in night_kills_order:
             info = slots.get(killed_slot) or {}
-            proto_text = (info.get("will_protocol_raw") or "нет").strip()
+            proto_text = (info.get("will_protocol_raw") or "").strip()
+            if not proto_text:
+                proto_text = "нет"
             proto_pts = float(info.get("will_protocol_points", 0.0) or 0.0)
-            op_text = (info.get("will_opinion") or "нет").strip()
+            op_text = (info.get("will_opinion") or "").strip()
+            if not op_text:
+                op_text = "нет"
             op_pts = float(info.get("will_opinion_points", 0.0) or 0.0)
 
             block_top = y

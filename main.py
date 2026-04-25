@@ -10,7 +10,6 @@ from database import init_db
 from handlers import start_profile, payment, booking, profile, admin_judges
 import admin
 from game import router as game_router  # игровой роутер
-from history import router as history_router  # роутер истории игр
 from commands import setup_bot_commands
 
 
@@ -61,7 +60,6 @@ async def main():
 
     # 3. Игровые роутеры
     dp.include_router(game_router)  # игровая логика
-    dp.include_router(history_router)  # история игр
 
     # 4. Дебаг-роутер (обычно без фильтров, в самом конце)
     # dp.include_router(debug.router)            # раскомментируйте, если файл существует

@@ -69,12 +69,14 @@ async def to_admin(call: CallbackQuery):
             f"ID: `{u_id}`"
         )
 
-        await bot.send_message(
-            config.ADMIN_ID,
-            text,
-            reply_markup=keyboards.admin_pay_kb(u_id),
-            parse_mode="Markdown"
-        )
+        # Отправляем ПЕРВОМУ админу из списка (или всем?)
+        if config.ADMIN_IDS:
+            await bot.send_message(
+                config.ADMIN_IDS[0],  # берём первого админа
+                text,
+                reply_markup=keyboards.admin_pay_kb(u_id),
+                parse_mode="Markdown"
+            )
         await call.answer("Запрос отправлен администратору!", show_alert=True)
         await call.message.edit_reply_markup(reply_markup=None)
     except ValueError:
@@ -93,3 +95,85 @@ async def pay_from_callback(call: CallbackQuery):
         parse_mode="Markdown"
     )
     await call.answer()
+
+
+# ========== ОБРАБОТЧИКИ ДЛЯ АДМИНА (ПОДТВЕРЖДЕНИЕ/ОТКЛОНЕНИЕ ОПЛАТЫ) ==========
+
+@router.callback_query(F.data.startswith("conf_"))
+async def confirm_payment(callback: CallbackQuery):
+    """Админ подтвердил оплату."""
+    assert bot is not None
+
+    # Проверяем, что админ
+    if callback.from_user.id not in config.ADMIN_IDS:
+        await callback.answer("⛔ Недостаточно прав.", show_alert=True)
+        return
+
+    try:
+        user_id = int(callback.data.replace("conf_", ""))
+
+        # Обнуляем долг
+        await database.set_user_debt(user_id, 0)
+        await database.set_unpaid_session(user_id, 0)
+
+        await callback.answer("✅ Оплата подтверждена!", show_alert=True)
+
+        # Редактируем сообщение админа
+        try:
+            await callback.message.edit_text(
+                callback.message.text + "\n\n✅ **Оплата подтверждена**",
+                parse_mode="Markdown"
+            )
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        # Уведомляем игрока
+        try:
+            await bot.send_message(
+                user_id,
+                "✅ Ваша оплата подтверждена администратором! Спасибо!"
+            )
+        except Exception as e:
+            print(f"[PAYMENT] Failed to notify user {user_id}: {e}")
+
+    except ValueError:
+        await callback.answer("Ошибка обработки.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("decl_"))
+async def decline_payment(callback: CallbackQuery):
+    """Админ отклонил оплату."""
+    assert bot is not None
+
+    # Проверяем, что админ
+    if callback.from_user.id not in config.ADMIN_IDS:
+        await callback.answer("⛔ Недостаточно прав.", show_alert=True)
+        return
+
+    try:
+        user_id = int(callback.data.replace("decl_", ""))
+
+        await callback.answer("❌ Оплата отклонена", show_alert=True)
+
+        # Редактируем сообщение админа
+        try:
+            await callback.message.edit_text(
+                callback.message.text + "\n\n❌ **Оплата отклонена**",
+                parse_mode="Markdown"
+            )
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        # Уведомляем игрока
+        try:
+            await bot.send_message(
+                user_id,
+                "❌ Ваша оплата отклонена. Свяжитесь с администратором."
+            )
+        except Exception as e:
+            print(f"[PAYMENT] Failed to notify user {user_id}: {e}")
+
+    except ValueError:
+        await callback.answer("Ошибка обработки.", show_alert=True)

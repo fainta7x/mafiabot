@@ -57,10 +57,10 @@ def _parse_slots_list(text: str) -> list[int]:
     Парсит строку с номерами слотов в список int без повторов.
 
     Примеры:
-      "1 2 3"      -> [1, 2, 3]
-      "1,2, 3"     -> [1, 2, 3]
-      "1 1 2"      -> [1, 2]
-      "a 3 b 4"    -> [3, 4]
+      "1 2 3"     -> [1, 2, 3]
+      "1,2, 3"    -> [1, 2, 3]
+      "1 1 2"     -> [1, 2]
+      "a 3 b 4"   -> [3, 4]
     """
     cleaned = text.replace(",", " ")
     parts = cleaned.split()
@@ -78,13 +78,56 @@ def _parse_slots_list(text: str) -> list[int]:
     return result
 
 
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ БЕЗОПАСНОЙ РАБОТЫ ==========
+def _safe_get_tech_fouls_count(info: dict) -> int:
+    """
+    Безопасно получает количество техфолов.
+    technical_fouls может быть:
+      - списком (старый формат) -> возвращаем len()
+      - числом (новый формат) -> возвращаем число
+      - None -> возвращаем 0
+    """
+    tf = info.get("technical_fouls")
+    if tf is None:
+        return 0
+    if isinstance(tf, list):
+        return len(tf)
+    if isinstance(tf, int):
+        return tf
+    return 0
+
+
+def _safe_get_tech_fouls_display(info: dict) -> str:
+    """
+    Возвращает строковое представление техфолов для отображения.
+    """
+    tf = info.get("technical_fouls")
+    if tf is None:
+        return ""
+    if isinstance(tf, list):
+        small_count = sum(1 for t in tf if t == "small")
+        big_count = sum(1 for t in tf if t == "big")
+        parts = []
+        if small_count:
+            parts.append(f"{small_count}S")
+        if big_count:
+            parts.append(f"{big_count}B")
+        return " / ".join(parts) if parts else ""
+    if isinstance(tf, int):
+        return str(tf) if tf > 0 else ""
+    return ""
+
+
+# =========================================================
+
+
 # =========================================================
 # 2. ТЕКСТОВЫЕ ПРЕДСТАВЛЕНИЯ
 # =========================================================
 
 def build_slots_text(
-    slots: Dict[int, dict],
-    judge_name: str | None = None,
+        slots: Dict[int, dict],
+        judge_name: str | None = None,
 ) -> str:
     """
     Черновик новой игры:
@@ -134,9 +177,9 @@ def build_roles_summary(slots: Dict[int, dict]) -> str:
 
 
 def build_game_state(
-    slots: Dict[int, dict],
-    alive_only: bool = False,
-    judge_name: str | None = None,
+        slots: Dict[int, dict],
+        alive_only: bool = False,
+        judge_name: str | None = None,
 ) -> str:
     """
     Отображение текущего состояния игры:
@@ -175,7 +218,7 @@ def build_game_state(
         nom_text = " | ВЫСТАВЛЕН" if nominated else ""
         votes_text = f" | Голоса: {votes}" if votes > 0 else ""
 
-        tech_fouls_count = len(info.get("technical_fouls", []))
+        tech_fouls_count = _safe_get_tech_fouls_count(info)
         tech_text = f" | Техфолы: {tech_fouls_count}" if tech_fouls_count > 0 else ""
 
         lines.append(
@@ -216,9 +259,9 @@ def build_votes_summary(slots: Dict[int, dict]) -> str:
 
 
 async def build_protocol_text(
-    slots: Dict[int, dict],
-    updated: bool = False,
-    winner_label: str | None = None,
+        slots: Dict[int, dict],
+        updated: bool = False,
+        winner_label: str | None = None,
 ) -> str:
     """
     Собирает ТОЛЬКО ТЕЛО протокола игры из slots (HTML).
@@ -242,6 +285,16 @@ async def build_protocol_text(
         if isinstance(nk, list):
             night_kills_order = [int(x) for x in nk if isinstance(x, int)]
 
+    # ========== НОВАЯ ФУНКЦИЯ: определение команды по роли ==========
+    def get_team_from_role(role: str) -> str | None:
+        """Определяет команду по роли, если team не задана"""
+        role_lower = role.lower() if role else ""
+        if "мирный" in role_lower or "шериф" in role_lower:
+            return "Красные"
+        elif "мафия" in role_lower or "дон" in role_lower:
+            return "Чёрные"
+        return None
+
     # Разделяем слоты по командам (игнорируя служебные ключи)
     red_slots: list[Tuple[int, dict]] = []
     black_slots: list[Tuple[int, dict]] = []
@@ -254,6 +307,11 @@ async def build_protocol_text(
             continue
 
         team = info.get("team")
+
+        # Если team не задана - определяем по роли
+        if not team:
+            team = get_team_from_role(info.get("role", ""))
+
         if team == "Красные":
             red_slots.append((slot_num, info))
         elif team == "Чёрные":
@@ -265,6 +323,7 @@ async def build_protocol_text(
     black_slots.sort(key=lambda x: x[0])
     other_slots.sort(key=lambda x: x[0])
 
+    # ========== ИСПРАВЛЕННАЯ ФУНКЦИЯ ДЛЯ ГРУППЫ ==========
     def _append_group(title: str, items: list[Tuple[int, dict]]):
         if not items:
             return
@@ -277,6 +336,10 @@ async def build_protocol_text(
             status_reason = info.get("status_reason", "Жив")
             kicked = info.get("kicked", False)
             ppk = info.get("ppk", False)
+            fouls = info.get("fouls", 0)
+
+            # ИСПРАВЛЕНО: безопасное получение количества техфолов
+            tech_fouls_count = _safe_get_tech_fouls_count(info)
 
             # Формируем статус
             if not alive:
@@ -301,7 +364,23 @@ async def build_protocol_text(
                     status_text = f"{status_icon} Жив"
 
             is_pu = bool(info.get("pu_mark"))
-            pu_mark = "👑 ПУ" if is_pu else ""
+
+            # Формируем префикс с ПУ, фолами, техфолами
+            prefix_parts = []
+            if is_pu:
+                prefix_parts.append("👑 ПУ")
+            if fouls > 0:
+                prefix_parts.append(f"⚠️ Фолы: {fouls}")
+            if tech_fouls_count > 0:
+                tech_display = _safe_get_tech_fouls_display(info)
+                if tech_display:
+                    prefix_parts.append(f"⚠️ Тех: {tech_display}")
+                else:
+                    prefix_parts.append(f"⚠️ Тех: {tech_fouls_count}")
+
+            prefix = " | ".join(prefix_parts)
+            if prefix:
+                prefix = f"{prefix} | "
 
             base_pts = float(info.get("base_points", 0.0) or 0.0)
             bonus_pts = float(info.get("bonus_points", 0.0) or 0.0)
@@ -317,10 +396,16 @@ async def build_protocol_text(
             will_protocol = (info.get("will_protocol_raw") or "").strip()
             will_opinion = (info.get("will_opinion") or "").strip()
 
+            # Фильтруем мусор из текста (кнопки и т.д.)
+            trash_words = ["⏹️ Остановить", "⏹️", "❌ Отмена", "✅ Подтвердить"]
+            if will_protocol in trash_words:
+                will_protocol = ""
+            if will_opinion in trash_words:
+                will_opinion = ""
+
             lines.append(f"{slot_num}. <b>{name}</b> — <i>{role}</i> {status_text}")
             lines.append(
-                "   "
-                f"{pu_mark} | "
+                f"   {prefix}"
                 f"Игра: {base_pts} | "
                 f"Доп: {bonus_pts} | "
                 f"ЛХ: {lh_pts} | "
@@ -331,14 +416,14 @@ async def build_protocol_text(
             )
 
             if will_protocol:
-                lines.append(f"   Протокол: {will_protocol}")
+                lines.append(f"   Протокол: {will_protocol[:100]}")
             if will_opinion:
-                lines.append(f"   Мнение: {will_opinion}")
+                lines.append(f"   Мнение: {will_opinion[:100]}")
         lines.append("")
 
-    _append_group("Красные:", red_slots)
-    _append_group("Чёрные:", black_slots)
-    _append_group("Без команды:", other_slots)
+    _append_group("🔴 ГОРОД (КРАСНЫЕ):", red_slots)
+    _append_group("⚫ МАФИЯ (ЧЁРНЫЕ):", black_slots)
+    _append_group("❓ БЕЗ КОМАНДЫ:", other_slots)
 
     # Блок "Убийства" с расшифровкой завещаний
     if night_kills_order:
@@ -346,21 +431,37 @@ async def build_protocol_text(
             lines.pop()
 
         lines.append("___________________________________________")
-        lines.append("<b>Убийства (ночные завещания):</b>")
+        lines.append("<b>💀 Убийства (ночные завещания):</b>")
 
         for killed_slot in night_kills_order:
             info = slots.get(killed_slot) or {}
-            proto_text = (info.get("will_protocol_raw") or "нет").strip()
+            proto_text = (info.get("will_protocol_raw") or "").strip()
             proto_pts = float(info.get("will_protocol_points", 0.0) or 0.0)
-            op_text = (info.get("will_opinion") or "нет").strip()
+            op_text = (info.get("will_opinion") or "").strip()
             op_pts = float(info.get("will_opinion_points", 0.0) or 0.0)
 
-            lines.append(f"Убийство №{killed_slot}:")
-            lines.append(f"Протокол — {proto_text} ({proto_pts})")
-            lines.append(f"Мнение — {op_text} ({op_pts})")
+            # Фильтруем мусор
+            if proto_text in ["⏹️ Остановить", "⏹️"]:
+                proto_text = "нет"
+            if op_text in ["⏹️ Остановить", "⏹️"]:
+                op_text = "нет"
+
+            lines.append(f"💀 Убийство №{killed_slot}:")
+            lines.append(f"   📋 Протокол — {proto_text if proto_text else 'нет'} ({proto_pts:+.1f})")
+            lines.append(f"   💬 Мнение — {op_text if op_text else 'нет'} ({op_pts:+.1f})")
             lines.append("")
 
     while lines and lines[-1] == "":
         lines.pop()
 
     return "\n".join(lines)
+
+
+# Экспортируем всё что нужно
+__all__ = [
+    'build_slots_text',
+    'build_roles_summary',
+    'build_game_state',
+    'build_votes_summary',
+    'build_protocol_text',
+]

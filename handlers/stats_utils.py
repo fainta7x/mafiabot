@@ -46,7 +46,6 @@ async def build_user_stats_data(user_id: int) -> dict:
             "mn_plus_sum": 0.0,
             "discipline_minus_sum": 0.0,
             "roles": {},
-            # новые поля, чтобы не ломать картинку даже при нуле игр
             "pu_count": 0,
             "avg_lh": 0.0,
             "removed_count": 0,
@@ -108,7 +107,7 @@ async def build_user_stats_data(user_id: int) -> dict:
         "win_points_sum": points,
         "avg_points": avg_points,
         "pr_avg": pr_avg_all,
-        "pr_minus_count": pr_neg_count_allа,
+        "pr_minus_count": pr_neg_count_all,
         "pr_minus_sum": pr_neg_sum_all,
         "pr_plus_count": pr_pos_count_all,
         "pr_plus_sum": pr_pos_sum_all,
@@ -119,7 +118,6 @@ async def build_user_stats_data(user_id: int) -> dict:
         "mn_plus_sum": mn_pos_sum_all,
         "discipline_minus_sum": total_negative_all,
         "roles": roles_for_pic,
-        # НОВЫЕ ПОЛЯ ДЛЯ КАРТИНКИ ПРОФИЛЯ
         "pu_count": pu_count,
         "avg_lh": avg_lh,
         "removed_count": removed_count,
@@ -134,6 +132,7 @@ async def build_user_stats_text(user_id: int) -> str:
     """
     counters: Optional[Dict[str, int]] = await database.get_user_game_counters(user_id)
     roles_stats = await database.get_user_roles_stats(user_id)
+    extra_stats = await database.get_user_extra_stats(user_id)  # ДОБАВИТЬ ЭТУ СТРОКУ
 
     lines: List[str] = []
 
@@ -155,6 +154,22 @@ async def build_user_stats_text(user_id: int) -> str:
     lines.append("")
     lines.append(f"• Баллов за победы (суммарно): {points}")
     lines.append(f"• Средний балл за игру: {avg_points}")
+
+    # ========== ДОБАВЛЯЕМ СТАТИСТИКУ ПО ФОЛАМ ==========
+    fouls_total = extra_stats.get("fouls_total", 0)
+    techfouls_total = extra_stats.get("techfouls_total", 0)
+    kicks_total = extra_stats.get("kicks_total", 0)
+
+    if fouls_total > 0 or techfouls_total > 0 or kicks_total > 0:
+        lines.append("")
+        lines.append("⚠️ **Нарушения:**")
+        if fouls_total > 0:
+            lines.append(f"• Фолов: {fouls_total}")
+        if techfouls_total > 0:
+            lines.append(f"• Технических фолов: {techfouls_total}")
+        if kicks_total > 0:
+            lines.append(f"• Удалений из игры: {kicks_total}")
+    # ===================================================
 
     if roles_stats:
         (

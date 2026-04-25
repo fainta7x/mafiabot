@@ -5,14 +5,15 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import keyboards
 import database
-from .state import GameCreateState
-from .text import build_game_state, build_protocol_text
-from .control import ensure_admin_pm, get_slots, save_slots
+from game.state import GameCreateState
+from game.text import build_game_state, build_protocol_text
+from game.admin_actions.common import get_slots, save_slots, ensure_judge_pm
 
 router = Router()
 
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+
 def _parse_bonus_value(raw: str) -> float | None:
     s = raw.strip().replace(",", ".")
     if not s:
@@ -67,7 +68,7 @@ async def _update_protocol(message: types.Message, state: FSMContext, slots: dic
 # ========== 1. ВЫСТАВЛЕНИЕ (ИНТЕРАКТИВНОЕ) ==========
 @router.message(GameCreateState.editing_slots, F.text == "Выставить")
 async def nominate_start(message: types.Message, state: FSMContext):
-    if not await ensure_admin_pm(message):
+    if not await ensure_judge_pm(message):
         return
 
     slots = await get_slots(message, state)
@@ -182,13 +183,17 @@ async def nominate_cancel(callback: types.CallbackQuery, state: FSMContext):
 # ========== 2. ГОЛОСОВАНИЕ (ИНТЕРАКТИВНОЕ) ==========
 @router.message(GameCreateState.editing_slots, F.text == "Голоса")
 async def votes_start(message: types.Message, state: FSMContext):
-    if not await ensure_admin_pm(message):
+    if not await ensure_judge_pm(message):
         return
 
     data = await state.get_data()
     slots = data.get("slots") or {}
 
-    nominated = [s for s, info in slots.items() if info.get("nominated") and info.get("alive", True)]
+    # Берём порядок из nominated_list (сохраняет порядок выставления)
+    nominated = []
+    for slot_num in data.get("nominated_list", []):
+        if slot_num in slots and slots[slot_num].get("alive", True):
+            nominated.append(slot_num)
 
     if not nominated:
         await message.answer("❌ Сначала нужно выставить игроков (кнопка «Выставить»).",
@@ -212,7 +217,7 @@ async def votes_start(message: types.Message, state: FSMContext):
     await state.set_state(GameCreateState.vote_collect)
 
     first_slot, first_name = nominated_names[0]
-    remaining_candidates = len(nominated)  # сколько всего кандидатов на голосовании
+    remaining_candidates = len(nominated)
 
     await message.answer(
         f"🗳️ **Голосование**\n\n"
@@ -225,61 +230,68 @@ async def votes_start(message: types.Message, state: FSMContext):
 
 @router.callback_query(GameCreateState.vote_collect, F.data.startswith("vote_set_"))
 async def vote_set(callback: types.CallbackQuery, state: FSMContext):
-    parts = callback.data.split("_")
-    slot_num = int(parts[2])
-    votes = int(parts[3])
+    try:
+        parts = callback.data.split("_")
+        slot_num = int(parts[2])
+        votes = int(parts[3])
 
-    data = await state.get_data()
-    nominated = data.get("nominated_list", [])
-    nominated_names = data.get("nominated_names", [])
-    idx = data.get("vote_index", 0)
-    votes_received = data.get("votes_received", {})
-    remaining_voters = data.get("remaining_voters", 0)
+        data = await state.get_data()
+        nominated = data.get("nominated_list", [])
+        nominated_names = data.get("nominated_names", [])
+        idx = data.get("vote_index", 0)
+        votes_received = data.get("votes_received", {})
+        remaining_voters = data.get("remaining_voters", 0)
 
-    if votes > remaining_voters:
-        await callback.answer(f"❌ Не может быть больше {remaining_voters} голосов!", show_alert=True)
-        return
+        if votes > remaining_voters:
+            await callback.answer(f"❌ Не может быть больше {remaining_voters} голосов!", show_alert=True)
+            return
 
-    votes_received[slot_num] = votes
-    remaining_voters -= votes
-    idx += 1
+        votes_received[slot_num] = votes
+        remaining_voters -= votes
+        idx += 1
 
-    # Обновляем состояние ДО того, как проверять условия
-    await state.update_data(votes_received=votes_received, vote_index=idx, remaining_voters=remaining_voters)
+        await state.update_data(votes_received=votes_received, vote_index=idx, remaining_voters=remaining_voters)
 
-    # Если это последний кандидат — автоматически засчитываем оставшиеся голоса
-    if idx == len(nominated):
-        # Все кандидаты проголосованы, подводим итоги
-        await process_vote_results(callback.message, state, votes_received, nominated)
+        # Отвечаем на callback сразу, чтобы не было timeout
+        try:
+            await callback.answer()
+        except Exception:
+            pass
 
-    elif idx == len(nominated) - 1:
-        # Предпоследний кандидат — после его голосов останутся голоса для последнего
-        last_slot, last_name = nominated_names[idx]
-        remaining_votes = remaining_voters
-        votes_received[last_slot] = remaining_votes
+        if idx == len(nominated):
+            await process_vote_results(callback.message, state, votes_received, nominated)
 
-        await callback.message.edit_text(
-            f"🗳️ **Голосование**\n\n"
-            f"Осталось голосующих: {remaining_voters}\n\n"
-            f"Автоматический подсчёт:\n"
-            f"За игрока {last_slot} ({last_name}) отдано {remaining_votes} голосов (все оставшиеся)."
-        )
+        elif idx == len(nominated) - 1:
+            last_slot, last_name = nominated_names[idx]
+            remaining_votes = remaining_voters
+            votes_received[last_slot] = remaining_votes
 
-        await process_vote_results(callback.message, state, votes_received, nominated)
+            await callback.message.edit_text(
+                f"🗳️ **Голосование**\n\n"
+                f"Осталось голосующих: {remaining_voters}\n\n"
+                f"Автоматический подсчёт:\n"
+                f"За игрока {last_slot} ({last_name}) отдано {remaining_votes} голосов (все оставшиеся)."
+            )
 
-    else:
-        # Есть ещё кандидаты
-        next_slot, next_name = nominated_names[idx]
-        remaining_candidates = len(nominated) - idx  # сколько кандидатов осталось (включая текущего)
-        await callback.message.edit_text(
-            f"🗳️ **Голосование**\n\n"
-            f"Осталось голосующих: {remaining_voters}\n\n"
-            f"Сколько голосов за игрока {next_slot} ({next_name})?\n\n"
-            f"🔴 — вариант может привести к попилу",
-            reply_markup=keyboards.vote_value_kb(next_slot, remaining_voters, remaining_voters, remaining_candidates)
-        )
+            await process_vote_results(callback.message, state, votes_received, nominated)
 
-    await callback.answer()
+        else:
+            next_slot, next_name = nominated_names[idx]
+            remaining_candidates = len(nominated) - idx
+            await callback.message.edit_text(
+                f"🗳️ **Голосование**\n\n"
+                f"Осталось голосующих: {remaining_voters}\n\n"
+                f"Сколько голосов за игрока {next_slot} ({next_name})?\n\n"
+                f"🔴 — вариант может привести к попилу",
+                reply_markup=keyboards.vote_value_kb(next_slot, remaining_voters, remaining_voters, remaining_candidates)
+            )
+
+    except Exception as e:
+        print(f"[VOTE_SET] Error: {e}")
+        try:
+            await callback.answer("Произошла ошибка", show_alert=True)
+        except Exception:
+            pass
 
 
 async def process_vote_results(message: types.Message, state: FSMContext, votes_received: dict, nominated: list):
@@ -350,7 +362,7 @@ async def process_vote_results(message: types.Message, state: FSMContext, votes_
 
             first_leader = leaders[0]
             first_name = get_name(first_leader)
-            remaining_candidates = len(leaders)  # сколько кандидатов осталось
+            remaining_candidates = len(leaders)
 
             await message.edit_text(
                 f"🗳️ **ПОПИЛ!**\n\n"
@@ -398,13 +410,11 @@ async def handle_split_decision(callback: types.CallbackQuery, state: FSMContext
                 slots[n]["votes"] = 0
         await callback.message.edit_text(f"⚡ **Решение: Поднять всех**\n\nИгроки {', '.join(map(str, candidates))} заголосованы.")
     else:
-        # Оставляем всех — снимаем номинации СО ВСЕХ игроков
         for slot_num, info in slots.items():
             info["nominated"] = False
             info["votes"] = 0
         await callback.message.edit_text(f"🔄 **Решение: Оставить всех**\n\nНикто не заголосован.")
 
-    # Очищаем глобальные списки номинаций
     await state.update_data(
         slots=slots,
         nominated_list=[],

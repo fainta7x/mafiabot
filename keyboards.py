@@ -26,6 +26,7 @@ def main_menu():
         "📊 Статистика",
         "📜 Мои игры",
         "📜 Все игры",
+        "📋 РЕГЛАМЕНТ",
     ]
     for btn in buttons:
         builder.button(text=btn)
@@ -49,6 +50,7 @@ def main_menu_judge():
         "📜 Мои игры",
         "📜 Все игры",
         "⚖ Панель судьи",
+        "📋 РЕГЛАМЕНТ",
     ]
     for btn in buttons:
         builder.button(text=btn)
@@ -73,6 +75,7 @@ def main_menu_admin():
         "📜 Мои игры",
         "📜 Все игры",
         "🛠 Админ-панель",
+        "📋 РЕГЛАМЕНТ",
     ]
     for btn in buttons:
         builder.button(text=btn)

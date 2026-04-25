@@ -1,5 +1,6 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
 
 import database
 import keyboards
@@ -77,6 +78,30 @@ async def ensure_judge_or_admin_cb(callback: CallbackQuery) -> bool:
     return False
 
 
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПРОВЕРКИ СОСТОЯНИЯ ==========
+
+async def _is_in_game_edit_state(state: FSMContext) -> bool:
+    """
+    Проверяет, находится ли бот в состоянии редактирования игры.
+    """
+    current_state = await state.get_state()
+    if not current_state:
+        return False
+
+    # Проверяем все возможные состояния из profile.py и create_game.py
+    game_states = [
+        "EditGameState",        # Основное состояние ожидания ввода
+        "GameCreateState",      # Состояния из game/state.py
+        "waiting_for_value",    # FSM состояние ввода
+    ]
+
+    for game_state in game_states:
+        if game_state in str(current_state):
+            return True
+
+    return False
+
+
 # ========== 1. ВХОД В МЕНЮ СУДЕЙ (КНОПКА '⚖ Судьи') ==========
 
 @router.message(F.text == "⚖ Судьи")
@@ -148,7 +173,13 @@ async def judge_add_start(callback: CallbackQuery):
 # ========== 4. ОБРАБОТКА СООБЩЕНИЙ ДЛЯ НАЗНАЧЕНИЯ (ТОЛЬКО АДМИНЫ) ==========
 
 @router.message(F.text.regexp(r"^\d+$"))
-async def judge_add_by_id(message: Message):
+async def judge_add_by_id(message: Message, state: FSMContext):
+    # ========== ВАЖНО: проверяем, не в режиме ли редактирования игры ==========
+    if await _is_in_game_edit_state(state):
+        # Если мы в игровом состоянии - игнорируем, не отвечаем
+        return
+    # ========================================================================
+
     if not await ensure_admin_pm(message):
         return
 

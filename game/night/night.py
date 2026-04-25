@@ -2,14 +2,15 @@ from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 
 import keyboards
-from .state import GameCreateState
-from .text import _parse_slots_list, build_game_state
-from .control import ensure_admin_pm, get_slots, save_slots
+from game.state import GameCreateState
+from game.text import _parse_slots_list, build_game_state
+from game.admin_actions.common import get_slots, save_slots, ensure_judge_pm
 
 router = Router()
 
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+
 async def _save_will_text(message: types.Message, state: FSMContext, field: str, next_state, prompt: str):
     """Общая функция для сохранения текста завещания (протокол или мнение)."""
     data = await state.get_data()
@@ -34,7 +35,7 @@ async def _save_will_text(message: types.Message, state: FSMContext, field: str,
 @router.message(GameCreateState.editing_slots, F.text == "Убить")
 async def kill_start(message: types.Message, state: FSMContext):
     """Начало убийства — выбор игрока."""
-    if not await ensure_admin_pm(message):
+    if not await ensure_judge_pm(message):
         return
 
     slots = await get_slots(message, state)
@@ -58,18 +59,29 @@ async def kill_start(message: types.Message, state: FSMContext):
 @router.callback_query(GameCreateState.kill_select, F.data.startswith("kill_select_"))
 async def kill_select_player(callback: types.CallbackQuery, state: FSMContext):
     """Выбор игрока для убийства."""
-    slot_num = int(callback.data.split("_")[2])
+    try:
+        slot_num = int(callback.data.split("_")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректный номер игрока!", show_alert=True)
+        return
 
     data = await state.get_data()
     slots = data.get("slots") or {}
-    first_night = data.get("first_night_kill_recorded", False)  # ← ДОБАВИТЬ ЭТУ СТРОКУ
+    first_night = data.get("first_night_kill_recorded", False)
 
-    if slot_num not in slots or not slots[slot_num].get("alive", True):
-        await callback.answer("Этого игрока уже нельзя убить!", show_alert=True)
+    # Проверяем существование слота
+    if slot_num not in slots:
+        await callback.answer("Игрок не найден!", show_alert=True)
+        return
+
+    # Проверяем, жив ли игрок
+    if not slots[slot_num].get("alive", True):
+        await callback.answer("Этот игрок уже мёртв!", show_alert=True)
         return
 
     name = slots[slot_num].get("nickname") or slots[slot_num].get("full_name") or f"Слот {slot_num}"
 
+    # Сохраняем выбранный слот
     await state.update_data(kill_slot=slot_num)
 
     # Если это первое убийство — запрашиваем ЛХ
@@ -132,7 +144,7 @@ async def kill_back_to_select(callback: types.CallbackQuery, state: FSMContext):
 @router.message(GameCreateState.kill_lh)
 async def kill_set_lh(message: types.Message, state: FSMContext):
     """Установка ЛХ для первого убитого (ПУ)."""
-    if not await ensure_admin_pm(message):
+    if not await ensure_judge_pm(message):
         return
 
     text = message.text.strip()
@@ -141,16 +153,24 @@ async def kill_set_lh(message: types.Message, state: FSMContext):
     slots = data.get("slots") or {}
     slot_num = data.get("kill_slot")
 
+    if slot_num is None or slot_num not in slots:
+        await message.answer("Ошибка: не выбран игрок для убийства. Начните заново.",
+                             reply_markup=keyboards.game_admin_menu())
+        await state.set_state(GameCreateState.editing_slots)
+        return
+
     if text == "0":
         suspects = []
     else:
         suspects = [int(x) for x in text.split() if x.isdigit() and 1 <= int(x) <= 10]
+        if len(suspects) > 3:
+            await message.answer("❌ Можно указать не более 3 подозреваемых!", reply_markup=keyboards.kill_lh_kb())
+            return
 
     # Сохраняем ЛХ
-    if slot_num and slot_num in slots:
-        slots[slot_num]["night_suspects"] = list(dict.fromkeys(suspects))
-        await state.update_data(slots=slots)
-        await save_slots(state, slots)
+    slots[slot_num]["night_suspects"] = list(dict.fromkeys(suspects))
+    await state.update_data(slots=slots)
+    await save_slots(state, slots)
 
     await state.set_state(GameCreateState.kill_protocol)
 
@@ -170,9 +190,12 @@ async def kill_back_to_lh(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     slot_num = data.get("kill_slot")
     slots = data.get("slots") or {}
-    first_night = data.get("first_night_kill_recorded", False)  # ← ДОБАВИТЬ
+    first_night = data.get("first_night_kill_recorded", False)
 
-    # Возврат к ЛХ возможен только если это первое убийство
+    if slot_num is None or slot_num not in slots:
+        await callback.answer("Ошибка: слот не найден!", show_alert=True)
+        return
+
     if first_night:
         await callback.answer("Это уже не первое убийство, ЛХ не нужны!", show_alert=True)
         return
@@ -209,7 +232,7 @@ async def kill_protocol_back_to_select(callback: types.CallbackQuery, state: FSM
 @router.message(GameCreateState.kill_protocol)
 async def kill_set_protocol(message: types.Message, state: FSMContext):
     """Установка протокола для убитого."""
-    if not await ensure_admin_pm(message):
+    if not await ensure_judge_pm(message):
         return
 
     text = message.text.strip()
@@ -220,10 +243,14 @@ async def kill_set_protocol(message: types.Message, state: FSMContext):
     slots = data.get("slots") or {}
     slot_num = data.get("kill_slot")
 
-    if slot_num and slot_num in slots:
-        slots[slot_num]["will_protocol_raw"] = text
-        await state.update_data(slots=slots)
-        await save_slots(state, slots)
+    if slot_num is None or slot_num not in slots:
+        await message.answer("Ошибка: не выбран игрок для убийства.", reply_markup=keyboards.game_admin_menu())
+        await state.set_state(GameCreateState.editing_slots)
+        return
+
+    slots[slot_num]["will_protocol_raw"] = text
+    await state.update_data(slots=slots)
+    await save_slots(state, slots)
 
     await state.set_state(GameCreateState.kill_opinion)
 
@@ -242,6 +269,11 @@ async def kill_back_to_protocol(callback: types.CallbackQuery, state: FSMContext
     data = await state.get_data()
     slot_num = data.get("kill_slot")
     slots = data.get("slots") or {}
+
+    if slot_num is None or slot_num not in slots:
+        await callback.answer("Ошибка: слот не найден!", show_alert=True)
+        return
+
     name = slots[slot_num].get("nickname") or slots[slot_num].get("full_name") or f"Слот {slot_num}"
 
     await state.set_state(GameCreateState.kill_protocol)
@@ -273,7 +305,7 @@ async def kill_opinion_back_to_select(callback: types.CallbackQuery, state: FSMC
 @router.message(GameCreateState.kill_opinion)
 async def kill_set_opinion(message: types.Message, state: FSMContext):
     """Установка мнения и завершение убийства."""
-    if not await ensure_admin_pm(message):
+    if not await ensure_judge_pm(message):
         return
 
     text = message.text.strip()
@@ -286,30 +318,34 @@ async def kill_set_opinion(message: types.Message, state: FSMContext):
     night_kills = data.get("night_kills_order", [])
     first_night = data.get("first_night_kill_recorded", False)
 
-    if slot_num and slot_num in slots:
-        # Сохраняем мнение
-        slots[slot_num]["will_opinion"] = text
+    if slot_num is None or slot_num not in slots:
+        await message.answer("Ошибка: не выбран игрок для убийства.", reply_markup=keyboards.game_admin_menu())
+        await state.set_state(GameCreateState.editing_slots)
+        return
 
-        # Помечаем игрока как убитого
-        slots[slot_num]["alive"] = False
-        slots[slot_num]["status_reason"] = "Убит ночью"
+    # Сохраняем мнение
+    slots[slot_num]["will_opinion"] = text
 
-        # Если это первое убийство — назначаем ПУ
-        if not first_night:
-            for info in slots.values():
-                info["pu_mark"] = False
-            slots[slot_num]["pu_mark"] = True
-            await state.update_data(first_night_kill_recorded=True, night_killed_slot=slot_num)
-        else:
-            # Убеждаемся, что у непервого убитого нет ЛХ
-            slots[slot_num]["night_suspects"] = []
+    # Помечаем игрока как убитого
+    slots[slot_num]["alive"] = False
+    slots[slot_num]["status_reason"] = "Убит ночью"
 
-        # Добавляем в порядок убийств
-        if slot_num not in night_kills:
-            night_kills.append(slot_num)
+    # Если это первое убийство — назначаем ПУ
+    if not first_night:
+        for info in slots.values():
+            info["pu_mark"] = False
+        slots[slot_num]["pu_mark"] = True
+        await state.update_data(first_night_kill_recorded=True, night_killed_slot=slot_num)
+    else:
+        # Убеждаемся, что у непервого убитого нет ЛХ
+        slots[slot_num]["night_suspects"] = []
 
-        await state.update_data(slots=slots, night_kills_order=night_kills)
-        await save_slots(state, slots)
+    # Добавляем в порядок убийств
+    if slot_num not in night_kills:
+        night_kills.append(slot_num)
+
+    await state.update_data(slots=slots, night_kills_order=night_kills)
+    await save_slots(state, slots)
 
     # Очищаем временные данные
     await state.update_data(kill_slot=None)
@@ -317,25 +353,23 @@ async def kill_set_opinion(message: types.Message, state: FSMContext):
 
     name = slots[slot_num].get("nickname") or slots[slot_num].get("full_name") or f"Слот {slot_num}"
 
-    # Формируем сообщение в зависимости от того, было ли это первое убийство
+    # Формируем сообщение
     if not first_night:
-        # Это было первое убийство — показываем ЛХ
         suspects = slots[slot_num].get("night_suspects", [])
         suspects_str = ", ".join(map(str, suspects)) if suspects else "нет"
         await message.answer(
             f"✅ **Игрок {slot_num} ({name}) убит!** (ПУ)\n\n"
             f"• ЛХ: {suspects_str}\n"
             f"• ПР: {slots[slot_num].get('will_protocol_raw', '—')[:100]}\n"
-            f"• МН: {slots[slot_num].get('will_opinion', '—')[:100]}\n\n"
+            f"• МН: {text if text else '—'}\n\n"
             f"{build_game_state(slots, alive_only=False)}",
             reply_markup=keyboards.game_admin_menu()
         )
     else:
-        # Не первое убийство — ЛХ не показываем
         await message.answer(
             f"✅ **Игрок {slot_num} ({name}) убит!**\n\n"
             f"• ПР: {slots[slot_num].get('will_protocol_raw', '—')[:100]}\n"
-            f"• МН: {slots[slot_num].get('will_opinion', '—')[:100]}\n\n"
+            f"• МН: {text if text else '—'}\n\n"
             f"{build_game_state(slots, alive_only=False)}",
             reply_markup=keyboards.game_admin_menu()
         )
@@ -395,11 +429,18 @@ async def kill_numeric_done(callback: types.CallbackQuery, state: FSMContext):
     # Очищаем временные данные
     await state.update_data(kill_temp_selected_numbers=[])
 
-    if slot_num and slot_num in slots:
-        suspects = [int(x) for x in selected]
-        slots[slot_num]["night_suspects"] = list(dict.fromkeys(suspects))
-        await state.update_data(slots=slots)
-        await save_slots(state, slots)
+    if slot_num is None or slot_num not in slots:
+        await callback.answer("Ошибка: слот не найден!", show_alert=True)
+        return
+
+    suspects = [int(x) for x in selected] if selected else []
+    if len(suspects) > 3:
+        await callback.answer("Можно выбрать не более 3 подозреваемых!", show_alert=True)
+        return
+
+    slots[slot_num]["night_suspects"] = list(dict.fromkeys(suspects))
+    await state.update_data(slots=slots)
+    await save_slots(state, slots)
 
     await state.set_state(GameCreateState.kill_protocol)
 
@@ -433,6 +474,11 @@ async def kill_numeric_back(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     slot_num = data.get("kill_slot")
     slots = data.get("slots") or {}
+
+    if slot_num is None or slot_num not in slots:
+        await callback.answer("Ошибка: слот не найден!", show_alert=True)
+        return
+
     name = slots[slot_num].get("nickname") or slots[slot_num].get("full_name") or f"Слот {slot_num}"
 
     await callback.message.edit_text(
@@ -453,10 +499,13 @@ async def kill_protocol_skip(callback: types.CallbackQuery, state: FSMContext):
     slots = data.get("slots") or {}
     slot_num = data.get("kill_slot")
 
-    if slot_num and slot_num in slots:
-        slots[slot_num]["will_protocol_raw"] = ""
-        await state.update_data(slots=slots)
-        await save_slots(state, slots)
+    if slot_num is None or slot_num not in slots:
+        await callback.answer("Ошибка: слот не найден!", show_alert=True)
+        return
+
+    slots[slot_num]["will_protocol_raw"] = ""
+    await state.update_data(slots=slots)
+    await save_slots(state, slots)
 
     await state.set_state(GameCreateState.kill_opinion)
 
@@ -487,29 +536,32 @@ async def kill_opinion_skip(callback: types.CallbackQuery, state: FSMContext):
     night_kills = data.get("night_kills_order", [])
     first_night = data.get("first_night_kill_recorded", False)
 
-    if slot_num and slot_num in slots:
-        slots[slot_num]["will_opinion"] = ""
+    if slot_num is None or slot_num not in slots:
+        await callback.answer("Ошибка: слот не найден!", show_alert=True)
+        return
 
-        # Помечаем игрока как убитого
-        slots[slot_num]["alive"] = False
-        slots[slot_num]["status_reason"] = "Убит ночью"
+    slots[slot_num]["will_opinion"] = ""
 
-        # Если это первое убийство — назначаем ПУ
-        if not first_night:
-            for info in slots.values():
-                info["pu_mark"] = False
-            slots[slot_num]["pu_mark"] = True
-            await state.update_data(first_night_kill_recorded=True, night_killed_slot=slot_num)
-        else:
-            # Убеждаемся, что у непервого убитого нет ЛХ
-            slots[slot_num]["night_suspects"] = []
+    # Помечаем игрока как убитого
+    slots[slot_num]["alive"] = False
+    slots[slot_num]["status_reason"] = "Убит ночью"
 
-        # Добавляем в порядок убийств
-        if slot_num not in night_kills:
-            night_kills.append(slot_num)
+    # Если это первое убийство — назначаем ПУ
+    if not first_night:
+        for info in slots.values():
+            info["pu_mark"] = False
+        slots[slot_num]["pu_mark"] = True
+        await state.update_data(first_night_kill_recorded=True, night_killed_slot=slot_num)
+    else:
+        # Убеждаемся, что у непервого убитого нет ЛХ
+        slots[slot_num]["night_suspects"] = []
 
-        await state.update_data(slots=slots, night_kills_order=night_kills)
-        await save_slots(state, slots)
+    # Добавляем в порядок убийств
+    if slot_num not in night_kills:
+        night_kills.append(slot_num)
+
+    await state.update_data(slots=slots, night_kills_order=night_kills)
+    await save_slots(state, slots)
 
     # Очищаем временные данные
     await state.update_data(kill_slot=None)

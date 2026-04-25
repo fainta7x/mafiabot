@@ -24,6 +24,10 @@ async def _ensure_columns():
         ("game_slots_history", ["kick", "ppk", "technical_fouls"], "INTEGER DEFAULT 0"),
         ("game_slots_history", ["dc_points"], "REAL DEFAULT 0"),
         ("game_slots_history", ["pu"], "INTEGER DEFAULT 0"),
+        ("game_slots_history", ["will_protocol_raw", "will_opinion"], "TEXT DEFAULT ''"),
+        ("game_slots_history", ["game_number"], "INTEGER DEFAULT 0"),
+        ("game_slots_history", ["alive"], "INTEGER DEFAULT 1"),
+        ("game_slots_history", ["status_reason"], "TEXT DEFAULT 'Жив'"),
     ]
     async with get_db() as conn:
         for table, cols, col_type in alters:
@@ -40,79 +44,93 @@ async def init_db():
     """Инициализация всех таблиц."""
     async with get_db() as conn:
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS game_slots_history
-            (
-                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_date            TEXT,
-                user_id              INTEGER,
-                slot_num             INTEGER,
-                role                 TEXT,
-                team                 TEXT,
-                base_points          REAL    DEFAULT 0,
-                bonus_points         REAL    DEFAULT 0,
-                lh_points            REAL    DEFAULT 0,
-                will_protocol_points REAL    DEFAULT 0,
-                will_opinion_points  REAL    DEFAULT 0,
-                dc_points            REAL    DEFAULT 0,
-                kick                 INTEGER DEFAULT 0,
-                ppk                  INTEGER DEFAULT 0,
-                technical_fouls      INTEGER DEFAULT 0,
-                pu                   INTEGER DEFAULT 0
-            )
-        """)
+                           CREATE TABLE IF NOT EXISTS game_slots_history
+                           (
+                               id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                               game_date            TEXT,
+                               game_number          INTEGER DEFAULT 0,
+                               user_id              INTEGER,
+                               slot_num             INTEGER,
+                               role                 TEXT,
+                               team                 TEXT,
+                               base_points          REAL    DEFAULT 0,
+                               bonus_points         REAL    DEFAULT 0,
+                               lh_points            REAL    DEFAULT 0,
+                               will_protocol_points REAL    DEFAULT 0,
+                               will_opinion_points  REAL    DEFAULT 0,
+                               dc_points            REAL    DEFAULT 0,
+                               kick                 INTEGER DEFAULT 0,
+                               ppk                  INTEGER DEFAULT 0,
+                               technical_fouls      INTEGER DEFAULT 0,
+                               pu                   INTEGER DEFAULT 0,
+                               will_protocol_raw    TEXT    DEFAULT '',
+                               will_opinion         TEXT    DEFAULT '',
+                               alive                INTEGER DEFAULT 1,
+                               status_reason        TEXT    DEFAULT 'Жив'
+                           )
+                           """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS evening_booking
-            (
-                user_id INTEGER PRIMARY KEY,
-                status  TEXT,
-                date    TEXT
-            )
-        """)
+                           CREATE TABLE IF NOT EXISTS evening_booking
+                           (
+                               user_id INTEGER PRIMARY KEY,
+                               status  TEXT,
+                               date    TEXT
+                           )
+                           """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS evening_history
-            (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                date      TEXT,
-                user_id   INTEGER,
-                status    TEXT,
-                full_name TEXT,
-                nickname  TEXT,
-                amount    INTEGER DEFAULT 0
-            )
-        """)
+                           CREATE TABLE IF NOT EXISTS evening_history
+                           (
+                               id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                               date      TEXT,
+                               user_id   INTEGER,
+                               status    TEXT,
+                               full_name TEXT,
+                               nickname  TEXT,
+                               amount    INTEGER DEFAULT 0
+                           )
+                           """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS evening_stats_messages
-            (
-                date       TEXT PRIMARY KEY,
-                chat_id    INTEGER,
-                message_id INTEGER
-            )
-        """)
+                           CREATE TABLE IF NOT EXISTS evening_stats_messages
+                           (
+                               date       TEXT PRIMARY KEY,
+                               chat_id    INTEGER,
+                               message_id INTEGER
+                           )
+                           """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS evening_status
-            (
-                date       TEXT PRIMARY KEY,
-                bills_sent INTEGER DEFAULT 0
-            )
-        """)
+                           CREATE TABLE IF NOT EXISTS evening_status
+                           (
+                               date       TEXT PRIMARY KEY,
+                               bills_sent INTEGER DEFAULT 0
+                           )
+                           """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS settings
-            (
-                key   TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
+                           CREATE TABLE IF NOT EXISTS settings
+                           (
+                               key   TEXT PRIMARY KEY,
+                               value TEXT
+                           )
+                           """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS game_history
-            (
-                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_date          TEXT,
-                winner_label       TEXT,
-                protocol_text      TEXT,
-                game_number        INTEGER,
-                global_game_number INTEGER
-            )
-        """)
+                           CREATE TABLE IF NOT EXISTS game_history
+                           (
+                               id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                               game_date          TEXT,
+                               winner_label       TEXT,
+                               protocol_text      TEXT,
+                               game_number        INTEGER,
+                               global_game_number INTEGER
+                           )
+                           """)
+        await conn.execute("""
+                           CREATE TABLE IF NOT EXISTS night_kills_order
+                           (
+                               game_date   TEXT,
+                               game_number INTEGER,
+                               kill_order  TEXT,
+                               PRIMARY KEY (game_date, game_number)
+                           )
+                           """)
         await conn.commit()
     await _ensure_columns()
 
@@ -140,6 +158,7 @@ async def set_setting(key: str, value: Optional[str]):
 
 def _make_setting_funcs(key_prefix: str):
     """Фабрика функций для get/set числовых настроек."""
+
     async def getter() -> Optional[int]:
         val = await get_setting(key_prefix)
         return int(val) if val and val.isdigit() else None
@@ -258,8 +277,8 @@ async def add_or_update_user(user_id: int, username: Optional[str], full_name: s
 async def get_user_profile(user_id: int) -> Optional[Tuple]:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT full_name, nickname, debt, last_visit FROM users WHERE user_id = ?",
-            (user_id,)
+                "SELECT full_name, nickname, debt, last_visit FROM users WHERE user_id = ?",
+                (user_id,)
         ) as cur:
             return await cur.fetchone()
 
@@ -273,7 +292,7 @@ async def update_nickname(user_id: int, nickname: str):
 async def get_all_users_stat() -> list:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT full_name, nickname, last_visit, debt, total_paid, kicks, ppk_causes FROM users"
+                "SELECT full_name, nickname, last_visit, debt, total_paid, kicks, ppk_causes FROM users"
         ) as cur:
             return await cur.fetchall()
 
@@ -281,8 +300,8 @@ async def get_all_users_stat() -> list:
 async def get_user_brief(user_id: int) -> Optional[Tuple[str, str, str]]:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT full_name, nickname, username FROM users WHERE user_id = ?",
-            (user_id,)
+                "SELECT full_name, nickname, username FROM users WHERE user_id = ?",
+                (user_id,)
         ) as cur:
             return await cur.fetchone()
 
@@ -311,7 +330,7 @@ async def get_user_kicks(user_id: int) -> int:
     """Возвращает количество удалений игрока."""
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT kicks FROM users WHERE user_id = ?", (user_id,)
+                "SELECT kicks FROM users WHERE user_id = ?", (user_id,)
         ) as cur:
             row = await cur.fetchone()
             return row[0] if row else 0
@@ -321,7 +340,7 @@ async def get_user_ppk_causes(user_id: int) -> int:
     """Возвращает количество ППК игрока."""
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT ppk_causes FROM users WHERE user_id = ?", (user_id,)
+                "SELECT ppk_causes FROM users WHERE user_id = ?", (user_id,)
         ) as cur:
             row = await cur.fetchone()
             return row[0] if row else 0
@@ -335,8 +354,8 @@ async def get_user_by_id(user_id: int) -> Optional[Tuple[int, str, str, str]]:
     """
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT user_id, full_name, username, nickname FROM users WHERE user_id = ?",
-            (user_id,)
+                "SELECT user_id, full_name, username, nickname FROM users WHERE user_id = ?",
+                (user_id,)
         ) as cur:
             row = await cur.fetchone()
             return row if row else None
@@ -350,24 +369,24 @@ async def get_user_by_nickname(nickname: str) -> Optional[Tuple[int, str, str, s
     """
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT user_id, full_name, username, nickname FROM users WHERE nickname = ?",
-            (nickname,)
+                "SELECT user_id, full_name, username, nickname FROM users WHERE nickname = ?",
+                (nickname,)
         ) as cur:
             row = await cur.fetchone()
             if row:
                 return row
 
         async with conn.execute(
-            "SELECT user_id, full_name, username, nickname FROM users WHERE full_name = ?",
-            (nickname,)
+                "SELECT user_id, full_name, username, nickname FROM users WHERE full_name = ?",
+                (nickname,)
         ) as cur:
             row = await cur.fetchone()
             if row:
                 return row
 
         async with conn.execute(
-            "SELECT user_id, full_name, username, nickname FROM users WHERE nickname LIKE ?",
-            (f"%{nickname}%",)
+                "SELECT user_id, full_name, username, nickname FROM users WHERE nickname LIKE ?",
+                (f"%{nickname}%",)
         ) as cur:
             row = await cur.fetchone()
             if row:
@@ -401,13 +420,13 @@ async def clear_bookings():
 async def get_booked_players_detailed() -> list:
     async with get_db() as conn:
         async with conn.execute("""
-            SELECT COALESCE(users.full_name, 'ID: ' || evening_booking.user_id) AS full_name,
-                   users.username,
-                   users.nickname,
-                   evening_booking.status
-            FROM evening_booking
-            LEFT JOIN users ON evening_booking.user_id = users.user_id
-        """) as cur:
+                                SELECT COALESCE(users.full_name, 'ID: ' || evening_booking.user_id) AS full_name,
+                                       users.username,
+                                       users.nickname,
+                                       evening_booking.status
+                                FROM evening_booking
+                                         LEFT JOIN users ON evening_booking.user_id = users.user_id
+                                """) as cur:
             return await cur.fetchall()
 
 
@@ -421,7 +440,7 @@ async def get_booked_players_for_game() -> list:
                    e.status
             FROM evening_booking e
             LEFT JOIN users u ON e.user_id = u.user_id
-            WHERE e.status IN ('Вовремя', 'Позже')
+            WHERE e.status IN ('Вовремя', 'Позже')  # <-- ЭТО ВАЖНО
         """) as cur:
             return await cur.fetchall()
 
@@ -435,8 +454,8 @@ async def remove_booking(user_id: int):
 async def has_booking(user_id: int) -> bool:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT 1 FROM evening_booking WHERE user_id = ? LIMIT 1",
-            (user_id,)
+                "SELECT 1 FROM evening_booking WHERE user_id = ? LIMIT 1",
+                (user_id,)
         ) as cur:
             return await cur.fetchone() is not None
 
@@ -444,8 +463,8 @@ async def has_booking(user_id: int) -> bool:
 async def count_ontime_players_for_date(date_str: str) -> int:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT COUNT(*) FROM evening_booking WHERE date = ? AND status = 'Вовремя'",
-            (date_str,)
+                "SELECT COUNT(*) FROM evening_booking WHERE date = ? AND status = 'Вовремя'",
+                (date_str,)
         ) as cur:
             row = await cur.fetchone()
             return row[0] if row else 0
@@ -454,8 +473,8 @@ async def count_ontime_players_for_date(date_str: str) -> int:
 async def count_all_attending_for_date(date_str: str) -> int:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT COUNT(*) FROM evening_booking WHERE date = ? AND status IN ('Вовремя', 'Позже')",
-            (date_str,)
+                "SELECT COUNT(*) FROM evening_booking WHERE date = ? AND status IN ('Вовремя', 'Позже')",
+                (date_str,)
         ) as cur:
             row = await cur.fetchone()
             return row[0] if row else 0
@@ -464,29 +483,29 @@ async def count_all_attending_for_date(date_str: str) -> int:
 async def get_players_by_status_for_date(date_str: str, status: str) -> list:
     async with get_db() as conn:
         async with conn.execute("""
-            SELECT COALESCE(u.nickname, u.full_name, 'Без имени') AS name
-            FROM evening_booking e
-            LEFT JOIN users u ON e.user_id = u.user_id
-            WHERE e.date = ?
-              AND e.status = ?
-            ORDER BY name
-        """, (date_str, status)) as cur:
+                                SELECT COALESCE(u.nickname, u.full_name, 'Без имени') AS name
+                                FROM evening_booking e
+                                         LEFT JOIN users u ON e.user_id = u.user_id
+                                WHERE e.date = ?
+                                  AND e.status = ?
+                                ORDER BY name
+                                """, (date_str, status)) as cur:
             return [row[0] for row in await cur.fetchall()]
 
 
 async def get_all_bookings_for_date_ordered(date_str: str) -> List[Tuple[str, str]]:
     async with get_db() as conn:
         async with conn.execute("""
-            SELECT COALESCE(u.nickname, u.full_name, 'Без имени'), e.status
-            FROM evening_booking e
-            LEFT JOIN users u ON e.user_id = u.user_id
-            WHERE e.date = ?
-            ORDER BY CASE e.status
-                         WHEN 'Вовремя' THEN 1
-                         WHEN 'Позже' THEN 2
-                         WHEN 'Не идёт' THEN 3
-                         ELSE 4 END, name
-        """, (date_str,)) as cur:
+                                SELECT COALESCE(u.nickname, u.full_name, 'Без имени'), e.status
+                                FROM evening_booking e
+                                         LEFT JOIN users u ON e.user_id = u.user_id
+                                WHERE e.date = ?
+                                ORDER BY CASE e.status
+                                             WHEN 'Вовремя' THEN 1
+                                             WHEN 'Позже' THEN 2
+                                             WHEN 'Не идёт' THEN 3
+                                             ELSE 4 END, name
+                                """, (date_str,)) as cur:
             return await cur.fetchall()
 
 
@@ -502,8 +521,8 @@ async def set_stats_message(date_str: str, chat_id: int, message_id: int):
 async def get_stats_message(date_str: str) -> Optional[Tuple[int, int]]:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT chat_id, message_id FROM evening_stats_messages WHERE date = ?",
-            (date_str,)
+                "SELECT chat_id, message_id FROM evening_stats_messages WHERE date = ?",
+                (date_str,)
         ) as cur:
             return await cur.fetchone()
 
@@ -546,7 +565,7 @@ async def add_user_payment(user_id: int, amount: int):
 async def get_debtors() -> list:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT full_name, nickname, username, debt, user_id FROM users WHERE has_unpaid_session = 1 ORDER BY full_name"
+                "SELECT full_name, nickname, username, debt, user_id FROM users WHERE has_unpaid_session = 1 ORDER BY full_name"
         ) as cur:
             return await cur.fetchall()
 
@@ -560,8 +579,8 @@ async def set_unpaid_session(user_id: int, value: int):
 async def has_unpaid_session(user_id: int) -> bool:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT has_unpaid_session FROM users WHERE user_id = ?",
-            (user_id,)
+                "SELECT has_unpaid_session FROM users WHERE user_id = ?",
+                (user_id,)
         ) as cur:
             row = await cur.fetchone()
             return bool(row and row[0])
@@ -570,55 +589,84 @@ async def has_unpaid_session(user_id: int) -> bool:
 async def set_last_evening_amount_for_user(user_id: int, amount: int):
     async with get_db() as conn:
         await conn.execute("""
-            UPDATE evening_history
-            SET amount = ?
-            WHERE id = (SELECT id FROM evening_history WHERE user_id = ? ORDER BY id DESC LIMIT 1)
-        """, (amount, user_id))
+                           UPDATE evening_history
+                           SET amount = ?
+                           WHERE id = (SELECT id FROM evening_history WHERE user_id = ? ORDER BY id DESC LIMIT 1)
+                           """, (amount, user_id))
         await conn.commit()
 
 
 # ========== 6. ИСТОРИЯ ВЕЧЕРОВ ==========
 async def archive_current_evening():
+    """Архивирует текущий вечер и обновляет last_visit у игроков"""
     async with get_db() as conn:
+        # Получаем всех, у кого есть запись на вечер
         async with conn.execute(
-            "SELECT e.date, e.user_id, e.status, u.full_name, u.nickname "
-            "FROM evening_booking e LEFT JOIN users u ON e.user_id = u.user_id"
+                "SELECT e.user_id, e.date, e.status, u.full_name, u.nickname "
+                "FROM evening_booking e "
+                "LEFT JOIN users u ON e.user_id = u.user_id"
         ) as cur:
             rows = await cur.fetchall()
+
+        print(f"[ARCHIVE] Found {len(rows)} records to archive")  # Отладка
+
         if rows:
+            # Сохраняем в историю
             await conn.executemany(
                 "INSERT INTO evening_history (date, user_id, status, full_name, nickname, amount) "
                 "VALUES (?, ?, ?, ?, ?, 0)",
                 rows
             )
+            print(f"[ARCHIVE] Inserted {len(rows)} records into evening_history")
+
+            # Обновляем last_visit только для пришедших
+            for row in rows:
+                user_id, date_str, status, _, _ = row
+                if status in ("Вовремя", "Позже"):
+                    await conn.execute(
+                        "UPDATE users SET last_visit = ? WHERE user_id = ?",
+                        (f"{date_str} 20:00", user_id)
+                    )
+                    print(f"[ARCHIVE] Updated last_visit for user {user_id}")
+
+        # Очищаем текущие записи
         await conn.execute("DELETE FROM evening_booking")
+        print(f"[ARCHIVE] Cleared evening_booking table")
         await conn.commit()
 
 
 async def get_evenings_list(limit: int = 10) -> list:
+    """Возвращает список дат и количество ПРИШЕДШИХ игроков"""
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT date, COUNT(*) FROM evening_history GROUP BY date ORDER BY date DESC LIMIT ?",
+            "SELECT date, COUNT(*) FROM evening_history "
+            "WHERE status IN ('Вовремя', 'Позже') "
+            "GROUP BY date ORDER BY date DESC LIMIT ?",
             (limit,)
         ) as cur:
             return await cur.fetchall()
 
 
 async def get_evening_players(date_str: str) -> list:
+    """Возвращает ТОЛЬКО пришедших игроков (Вовремя или Позже) за указанную дату"""
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT full_name, nickname, status, amount FROM evening_history WHERE date = ? ORDER BY full_name",
+            "SELECT full_name, nickname, status, amount FROM evening_history "
+            "WHERE date = ? AND status IN ('Вовремя', 'Позже') "
+            "ORDER BY full_name",
             (date_str,)
         ) as cur:
             return await cur.fetchall()
 
 
 async def get_top_players_by_visits(limit: int = 10) -> list:
+    """Возвращает топ игроков по посещениям (только пришедшие)"""
     async with get_db() as conn:
         async with conn.execute("""
             SELECT u.full_name, u.nickname, COUNT(h.id)
             FROM evening_history h
             LEFT JOIN users u ON h.user_id = u.user_id
+            WHERE h.status IN ('Вовремя', 'Позже')
             GROUP BY h.user_id
             ORDER BY COUNT(h.id) DESC
             LIMIT ?
@@ -629,7 +677,7 @@ async def get_top_players_by_visits(limit: int = 10) -> list:
 async def get_inactive_players(days: int = 30) -> list:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT full_name, nickname, last_visit FROM users ORDER BY last_visit"
+                "SELECT full_name, nickname, last_visit FROM users ORDER BY last_visit"
         ) as cur:
             return await cur.fetchall()
 
@@ -647,8 +695,8 @@ async def mark_evening_bills_sent(date_str: str):
 async def is_evening_bills_sent(date_str: str) -> bool:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT bills_sent FROM evening_status WHERE date = ?",
-            (date_str,)
+                "SELECT bills_sent FROM evening_status WHERE date = ?",
+                (date_str,)
         ) as cur:
             row = await cur.fetchone()
             return bool(row and row[0])
@@ -677,8 +725,8 @@ async def apply_game_result_to_users(slots: Dict[int, dict], winning_team: str):
 async def get_user_game_counters(user_id: int) -> Optional[Dict[str, int]]:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT games_played, games_won, points FROM users WHERE user_id = ?",
-            (user_id,)
+                "SELECT games_played, games_won, points FROM users WHERE user_id = ?",
+                (user_id,)
         ) as cur:
             row = await cur.fetchone()
             if not row:
@@ -690,7 +738,7 @@ async def get_user_game_counters(user_id: int) -> Optional[Dict[str, int]]:
             }
 
 
-async def save_game_slots_history(game_date: str, slots: Union[Dict[int, dict], List[dict]]):
+async def save_game_slots_history(game_date: str, slots: Union[Dict[int, dict], List[dict]], game_number: int = 0):
     """Сохраняет историю слотов игры."""
     if isinstance(slots, dict):
         items = list(slots.items())
@@ -705,6 +753,7 @@ async def save_game_slots_history(game_date: str, slots: Union[Dict[int, dict], 
             continue
         rows.append((
             game_date,
+            game_number,
             slot.get("user_id"),
             slot_num,
             slot.get("role"),
@@ -719,18 +768,23 @@ async def save_game_slots_history(game_date: str, slots: Union[Dict[int, dict], 
             1 if slot.get("ppk", False) else 0,
             len([t for t in slot.get("technical_fouls", []) if t]),
             1 if slot.get("pu_mark") else 0,
+            slot.get("will_protocol_raw", ""),
+            slot.get("will_opinion", ""),
+            1 if slot.get("alive", True) else 0,
+            slot.get("status_reason", "Жив"),
         ))
     if rows:
         async with get_db() as conn:
             await conn.executemany("""
-                INSERT INTO game_slots_history (
-                    game_date, user_id, slot_num, role, team,
-                    base_points, bonus_points, lh_points,
-                    will_protocol_points, will_opinion_points,
-                    dc_points, kick, ppk, technical_fouls, pu
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, rows)
+                                   INSERT INTO game_slots_history (game_date, game_number, user_id, slot_num, role,
+                                                                   team,
+                                                                   base_points, bonus_points, lh_points,
+                                                                   will_protocol_points, will_opinion_points,
+                                                                   dc_points, kick, ppk, technical_fouls, pu,
+                                                                   will_protocol_raw, will_opinion,
+                                                                   alive, status_reason)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   """, rows)
             await conn.commit()
 
 
@@ -738,29 +792,34 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
     """Статистика по ролям пользователя."""
     async with get_db() as conn:
         async with conn.execute("""
-            SELECT role,
-                   COUNT(*) AS games,
-                   SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END) AS wins,
-                   SUM(base_points + bonus_points + lh_points + will_protocol_points + will_opinion_points + dc_points) AS total_points,
-                   SUM(bonus_points) AS total_bonus,
-                   SUM(lh_points) AS total_lh,
-                   SUM(CASE WHEN (bonus_points + lh_points + dc_points) < 0 THEN bonus_points + lh_points + dc_points ELSE 0 END) AS total_negative,
-                   AVG(will_protocol_points) AS protocol_avg,
-                   SUM(CASE WHEN will_protocol_points > 0 THEN 1 ELSE 0 END) AS protocol_pos_count,
-                   SUM(CASE WHEN will_protocol_points > 0 THEN will_protocol_points ELSE 0 END) AS protocol_pos_sum,
-                   SUM(CASE WHEN will_protocol_points < 0 THEN 1 ELSE 0 END) AS protocol_neg_count,
-                   SUM(CASE WHEN will_protocol_points < 0 THEN will_protocol_points ELSE 0 END) AS protocol_neg_sum,
-                   AVG(will_opinion_points) AS opinion_avg,
-                   SUM(CASE WHEN will_opinion_points > 0 THEN 1 ELSE 0 END) AS opinion_pos_count,
-                   SUM(CASE WHEN will_opinion_points > 0 THEN will_opinion_points ELSE 0 END) AS opinion_pos_sum,
-                   SUM(CASE WHEN will_opinion_points < 0 THEN 1 ELSE 0 END) AS opinion_neg_count,
-                   SUM(CASE WHEN will_opinion_points < 0 THEN will_opinion_points ELSE 0 END) AS opinion_neg_sum,
-                   SUM(kick) AS total_kicks,
-                   SUM(ppk) AS total_ppk
-            FROM game_slots_history
-            WHERE user_id = ?
-            GROUP BY role
-        """, (user_id,)) as cur:
+                                SELECT role,
+                                       COUNT(*)                                                                     AS games,
+                                       SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END)                             AS wins,
+                                       SUM(base_points + bonus_points + lh_points + will_protocol_points +
+                                           will_opinion_points +
+                                           dc_points)                                                               AS total_points,
+                                       SUM(bonus_points)                                                            AS total_bonus,
+                                       SUM(lh_points)                                                               AS total_lh,
+                                       SUM(CASE
+                                               WHEN (bonus_points + lh_points + dc_points) < 0
+                                                   THEN bonus_points + lh_points + dc_points
+                                               ELSE 0 END)                                                          AS total_negative,
+                                       AVG(will_protocol_points)                                                    AS protocol_avg,
+                                       SUM(CASE WHEN will_protocol_points > 0 THEN 1 ELSE 0 END)                    AS protocol_pos_count,
+                                       SUM(CASE WHEN will_protocol_points > 0 THEN will_protocol_points ELSE 0 END) AS protocol_pos_sum,
+                                       SUM(CASE WHEN will_protocol_points < 0 THEN 1 ELSE 0 END)                    AS protocol_neg_count,
+                                       SUM(CASE WHEN will_protocol_points < 0 THEN will_protocol_points ELSE 0 END) AS protocol_neg_sum,
+                                       AVG(will_opinion_points)                                                     AS opinion_avg,
+                                       SUM(CASE WHEN will_opinion_points > 0 THEN 1 ELSE 0 END)                     AS opinion_pos_count,
+                                       SUM(CASE WHEN will_opinion_points > 0 THEN will_opinion_points ELSE 0 END)   AS opinion_pos_sum,
+                                       SUM(CASE WHEN will_opinion_points < 0 THEN 1 ELSE 0 END)                     AS opinion_neg_count,
+                                       SUM(CASE WHEN will_opinion_points < 0 THEN will_opinion_points ELSE 0 END)   AS opinion_neg_sum,
+                                       SUM(kick)                                                                    AS total_kicks,
+                                       SUM(ppk)                                                                     AS total_ppk
+                                FROM game_slots_history
+                                WHERE user_id = ?
+                                GROUP BY role
+                                """, (user_id,)) as cur:
             rows = await cur.fetchall()
 
     result = []
@@ -805,17 +864,18 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
 
 # ========== 8. ИСТОРИЯ ИГР ==========
 async def save_game_history(
-    game_date: str,
-    winner_label: str,
-    protocol_text: str,
-    game_number: Optional[int] = None,
-    global_game_number: Optional[int] = None
+        game_date: str,
+        winner_label: str,
+        protocol_text: str,
+        game_number: Optional[int] = None,
+        global_game_number: Optional[int] = None
 ) -> int:
     async with get_db() as conn:
         cur = await conn.execute("""
-            INSERT INTO game_history (game_date, winner_label, protocol_text, game_number, global_game_number)
-            VALUES (?, ?, ?, ?, ?)
-        """, (game_date, winner_label, protocol_text, game_number, global_game_number))
+                                 INSERT INTO game_history (game_date, winner_label, protocol_text, game_number,
+                                                           global_game_number)
+                                 VALUES (?, ?, ?, ?, ?)
+                                 """, (game_date, winner_label, protocol_text, game_number, global_game_number))
         await conn.commit()
         return cur.lastrowid
 
@@ -828,6 +888,7 @@ async def get_user_extra_stats(user_id: int) -> Dict[str, float]:
       - techfouls_total: суммарное количество техфолов
       - ppk_guilty_count: сколько раз был виновником ППК
       - pu_count: сколько раз был отмечен как ПУ
+      - fouls_total: общее количество обычных фолов  # ДОБАВИТЬ
     """
     async with get_db() as conn:
         async with conn.execute("""
@@ -836,7 +897,8 @@ async def get_user_extra_stats(user_id: int) -> Dict[str, float]:
                 SUM(kick)                     AS removed_count,
                 SUM(technical_fouls)          AS techfouls_total,
                 SUM(ppk)                      AS ppk_guilty_count,
-                SUM(pu)                       AS pu_count
+                SUM(pu)                       AS pu_count,
+                SUM(fouls)                    AS fouls_total
             FROM game_slots_history
             WHERE user_id = ?
         """, (user_id,)) as cur:
@@ -849,9 +911,10 @@ async def get_user_extra_stats(user_id: int) -> Dict[str, float]:
             "techfouls_total": 0,
             "ppk_guilty_count": 0,
             "pu_count": 0,
+            "fouls_total": 0,
         }
 
-    avg_lh, removed_count, techfouls_total, ppk_guilty_count, pu_count = row
+    avg_lh, removed_count, techfouls_total, ppk_guilty_count, pu_count, fouls_total = row
 
     return {
         "avg_lh": float(avg_lh or 0.0),
@@ -859,6 +922,7 @@ async def get_user_extra_stats(user_id: int) -> Dict[str, float]:
         "techfouls_total": int(techfouls_total or 0),
         "ppk_guilty_count": int(ppk_guilty_count or 0),
         "pu_count": int(pu_count or 0),
+        "fouls_total": int(fouls_total or 0),
     }
 
 
@@ -906,18 +970,34 @@ async def get_last_games(limit: int = 10) -> List[Dict]:
 async def get_user_games(user_id: int, limit: int = 10) -> List[Dict]:
     async with get_db() as conn:
         async with conn.execute(
-            "SELECT DISTINCT game_date FROM game_slots_history WHERE user_id = ? "
-            "ORDER BY game_date DESC LIMIT ?",
-            (user_id, limit)
+                "SELECT DISTINCT game_date, game_number FROM game_slots_history WHERE user_id = ? ORDER BY game_date DESC LIMIT ?",
+                (user_id, limit)
         ) as cur:
-            dates = [row[0] for row in await cur.fetchall() if row[0]]
-        if not dates:
+            dates_and_numbers = await cur.fetchall()
+
+        if not dates_and_numbers:
             return []
-        placeholders = ",".join("?" for _ in dates)
-        return await _fetch_games(f"""
-            SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number
-            FROM game_history WHERE game_date IN ({placeholders}) ORDER BY id DESC
-        """, tuple(dates))
+
+        # Собираем игры по (date, game_number)
+        games = []
+        for game_date, game_number in dates_and_numbers:
+            async with conn.execute(
+                    "SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number "
+                    "FROM game_history WHERE game_date = ? AND game_number = ?",
+                    (game_date, game_number)
+            ) as cur2:
+                row = await cur2.fetchone()
+                if row:
+                    games.append({
+                        "id": row[0],
+                        "game_date": row[1],
+                        "winner_label": row[2],
+                        "protocol_text": row[3],
+                        "game_number": row[4],
+                        "global_game_number": row[5],
+                    })
+
+        return games
 
 
 async def get_game_by_id(game_id: int) -> Optional[Dict]:
@@ -929,14 +1009,12 @@ async def get_game_by_id(game_id: int) -> Optional[Dict]:
     return games[0] if games else None
 
 
-async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
+async def get_game_slots_by_date(game_date: str, game_number: int = None) -> Optional[Dict[int, dict]]:
     """
     Восстанавливает слоты игры из game_slots_history по дате игры.
-    Возвращает словарь слотов в том же формате, что и в игре.
+    Если передан game_number, возвращает слоты для конкретной игры.
     """
-    async with aiosqlite.connect(DB_NAME) as conn:
-        async with conn.execute(
-            """
+    query = """
             SELECT user_id,
                    slot_num,
                    role,
@@ -950,13 +1028,24 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
                    kick,
                    ppk,
                    technical_fouls,
-                   pu
+                   pu,
+                   will_protocol_raw,
+                   will_opinion,
+                   alive,
+                   status_reason
             FROM game_slots_history
-            WHERE game_date = ?
-            ORDER BY slot_num
-            """,
-            (game_date,),
-        ) as cursor:
+            WHERE game_date = ? \
+            """
+    params = [game_date]
+
+    if game_number is not None:
+        query += " AND game_number = ?"
+        params.append(game_number)
+
+    query += " ORDER BY slot_num"
+
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute(query, params) as cursor:
             rows = await cursor.fetchall()
 
     if not rows:
@@ -967,7 +1056,9 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
         (user_id, slot_num, role, team,
          base_points, bonus_points, lh_points,
          protocol_points, opinion_points, dc_points,
-         kick, ppk, tech_fouls, pu) = row
+         kick, ppk, tech_fouls, pu,
+         will_protocol_raw, will_opinion,
+         alive, status_reason) = row
 
         nickname = None
         full_name = None
@@ -976,6 +1067,13 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
             profile = await get_user_profile(user_id)
             if profile:
                 full_name, nickname, _, _ = profile
+
+        if not team:
+            role_lower = (role or "").lower()
+            if "мирный" in role_lower or "шериф" in role_lower:
+                team = "Красные"
+            elif "мафия" in role_lower or "дон" in role_lower:
+                team = "Чёрные"
 
         slots[slot_num] = {
             "user_id": user_id,
@@ -990,15 +1088,15 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
             "will_protocol_points": protocol_points or 0,
             "will_opinion_points": opinion_points or 0,
             "dc_points": dc_points or 0,
-            "alive": True,
-            "status_reason": "Жив",
+            "alive": bool(alive) if alive is not None else True,
+            "status_reason": status_reason or "Жив",
             "fouls": 0,
             "nominated": False,
             "votes": 0,
             "night_suspects": [],
             "pu_mark": bool(pu),
-            "will_protocol_raw": "",
-            "will_opinion": "",
+            "will_protocol_raw": will_protocol_raw or "",
+            "will_opinion": will_opinion or "",
             "kick": kick or 0,
             "ppk": ppk or 0,
             "technical_fouls": tech_fouls or 0,
@@ -1006,14 +1104,10 @@ async def get_game_slots_by_date(game_date: str) -> Optional[Dict[int, dict]]:
 
     return slots
 
+
 # ========== 9. ОБНОВЛЕНИЕ ИСХОДА ИГРЫ ==========
 
 async def update_game_outcome(game_id: int, winner_label: str) -> None:
-    """
-    Обновляет исход игры в таблице game_history:
-    - winner_label: текст вида 'Победа города', 'Победа мафии',
-      'ППК: Красные (Виновник: ...)' и т.п.
-    """
     async with get_db() as conn:
         await conn.execute(
             "UPDATE game_history SET winner_label = ? WHERE id = ?",
@@ -1021,22 +1115,29 @@ async def update_game_outcome(game_id: int, winner_label: str) -> None:
         )
         await conn.commit()
 
+
 async def update_game_slot(
-    game_date: str,
-    slot_num: int,
-    *,
-    role: Optional[str] = None,
-    team: Optional[str] = None,
-    base_points: Optional[float] = None,
-    bonus_points: Optional[float] = None,
-    lh_points: Optional[float] = None,
-    will_protocol_points: Optional[float] = None,
-    will_opinion_points: Optional[float] = None,
-    dc_points: Optional[float] = None,
-    kick: Optional[int] = None,
-    ppk: Optional[int] = None,
-    technical_fouls: Optional[int] = None,
-    pu: Optional[int] = None,
+        game_date: str,
+        slot_num: int,
+        *,
+        role: Optional[str] = None,
+        team: Optional[str] = None,
+        base_points: Optional[float] = None,
+        bonus_points: Optional[float] = None,
+        lh_points: Optional[float] = None,
+        will_protocol_points: Optional[float] = None,
+        will_opinion_points: Optional[float] = None,
+        will_protocol_raw: Optional[str] = None,
+        will_opinion: Optional[str] = None,
+        dc_points: Optional[float] = None,
+        kick: Optional[int] = None,
+        ppk: Optional[int] = None,
+        technical_fouls: Optional[int] = None,
+        pu: Optional[int] = None,
+        game_number: Optional[int] = None,
+        alive: Optional[int] = None,
+        status_reason: Optional[str] = None,
+        fouls: Optional[int] = None,  # <-- ДОБАВИТЬ
 ) -> None:
     """Частичное обновление одного слота игры по дате и номеру слота."""
     fields: List[str] = []
@@ -1054,11 +1155,17 @@ async def update_game_slot(
     add("lh_points", lh_points)
     add("will_protocol_points", will_protocol_points)
     add("will_opinion_points", will_opinion_points)
+    add("will_protocol_raw", will_protocol_raw)
+    add("will_opinion", will_opinion)
     add("dc_points", dc_points)
     add("kick", kick)
     add("ppk", ppk)
     add("technical_fouls", technical_fouls)
     add("pu", pu)
+    add("game_number", game_number)
+    add("alive", alive)
+    add("status_reason", status_reason)
+    add("fouls", fouls)  # <-- ДОБАВИТЬ
 
     if not fields:
         return
@@ -1077,11 +1184,7 @@ async def update_game_slot(
 # ========== 10. АНОНСЫ СТОЛА ==========
 
 async def get_announcement_requested(date: str) -> bool:
-    """
-    Проверяет, отправляли ли уже запрос на подтверждение анонса для этой даты.
-    """
     async with get_db() as conn:
-        # Сначала проверяем, существует ли таблица game_dates
         await conn.execute("""
                            CREATE TABLE IF NOT EXISTS game_dates
                            (
@@ -1096,40 +1199,11 @@ async def get_announcement_requested(date: str) -> bool:
                 (date,)
         ) as cur:
             row = await cur.fetchone()
-            return bool(row and row[0])
-
-
-# ========== 10. АНОНСЫ СТОЛА ==========
-
-async def get_announcement_requested(date: str) -> bool:
-    """
-    Проверяет, отправляли ли уже запрос на подтверждение анонса для этой даты.
-    """
-    async with get_db() as conn:
-        # Сначала проверяем, существует ли таблица game_dates
-        await conn.execute("""
-                           CREATE TABLE IF NOT EXISTS game_dates
-                           (
-                               date                   TEXT PRIMARY KEY,
-                               announcement_requested INTEGER DEFAULT 0
-                           )
-                           """)
-        await conn.commit()
-
-        async with conn.execute(
-                "SELECT announcement_requested FROM game_dates WHERE date = ?",
-                (date,)
-        ) as cur:
-            row = await cur.fetchone()
-            return bool(row and row[0])
+            return bool(row and row[0]) if row else False
 
 
 async def set_announcement_requested(date: str, requested: bool):
-    """
-    Устанавливает флаг отправки запроса на подтверждение анонса.
-    """
     async with get_db() as conn:
-        # Сначала проверяем, существует ли таблица game_dates
         await conn.execute("""
                            CREATE TABLE IF NOT EXISTS game_dates
                            (
@@ -1137,6 +1211,7 @@ async def set_announcement_requested(date: str, requested: bool):
                                announcement_requested INTEGER DEFAULT 0
                            )
                            """)
+        await conn.commit()
 
         await conn.execute("""
                            INSERT INTO game_dates (date, announcement_requested)
@@ -1144,3 +1219,76 @@ async def set_announcement_requested(date: str, requested: bool):
                            ON CONFLICT(date) DO UPDATE SET announcement_requested = excluded.announcement_requested
                            """, (date, 1 if requested else 0))
         await conn.commit()
+
+
+# ========== 11. ПОРЯДОК УБИЙСТВ ==========
+
+async def save_night_kills_order(game_date: str, game_number: int, night_kills_order: List[int]):
+    """Сохраняет порядок убийств в отдельную таблицу"""
+    async with get_db() as conn:
+        await conn.execute(
+            "INSERT OR REPLACE INTO night_kills_order (game_date, game_number, kill_order) VALUES (?, ?, ?)",
+            (game_date, game_number, json.dumps(night_kills_order))
+        )
+        await conn.commit()
+
+
+async def get_night_kills_order(game_date: str, game_number: int) -> List[int]:
+    """Загружает порядок убийств из БД"""
+    async with get_db() as conn:
+        async with conn.execute(
+                "SELECT kill_order FROM night_kills_order WHERE game_date = ? AND game_number = ?",
+                (game_date, game_number)
+        ) as cur:
+            row = await cur.fetchone()
+            if row and row[0]:
+                return json.loads(row[0])
+    return []
+
+
+async def get_user_fouls_stats(user_id: int) -> Dict[str, int]:
+    """
+    Возвращает статистику по фолам игрока:
+      - fouls_total: общее количество обычных фолов
+      - techfouls_total: общее количество техфолов
+      - kicks_total: количество удалений из игры
+    """
+    async with get_db() as conn:
+        async with conn.execute("""
+                                SELECT SUM(fouls)           AS fouls_total,
+                                       SUM(technical_fouls) AS techfouls_total,
+                                       SUM(kick)            AS kicks_total
+                                FROM game_slots_history
+                                WHERE user_id = ?
+                                """, (user_id,)) as cur:
+            row = await cur.fetchone()
+
+    if not row or not any(row):
+        return {"fouls_total": 0, "techfouls_total": 0, "kicks_total": 0}
+
+    return {
+        "fouls_total": row[0] or 0,
+        "techfouls_total": row[1] or 0,
+        "kicks_total": row[2] or 0,
+    }
+
+async def add_fouls_column():
+    """Добавляет колонку fouls в таблицу game_slots_history, если её нет"""
+    async with get_db() as conn:
+        try:
+            await conn.execute("ALTER TABLE game_slots_history ADD COLUMN fouls INTEGER DEFAULT 0")
+            await conn.commit()
+            print("[MIGRATION] Column 'fouls' added to game_slots_history")
+        except Exception as e:
+            # Колонка уже существует или другая ошибка
+            print(f"[MIGRATION] Could not add fouls column: {e}")
+
+
+async def init_db():
+    """Инициализация всех таблиц."""
+    async with get_db() as conn:
+        # ... все существующие CREATE TABLE ...
+        pass
+
+    await _ensure_columns()
+    await add_fouls_column()  # <-- ДОБАВИТЬ ЭТУ СТРОКУ
