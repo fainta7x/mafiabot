@@ -14,7 +14,6 @@ from game.admin_actions.common import save_slots, clear_game_state, ensure_judge
 
 router = Router()
 
-
 # ======================= НОВАЯ ЛОГИКА ЭЛО =======================
 
 STARTING_ELO = 1500
@@ -64,11 +63,11 @@ def calculate_carry_modifier(player_elo: float, team_elos: list, is_win: bool) -
 def calculate_bonus_elo_impact(slot: dict) -> float:
     """Рассчитывает влияние доп. баллов на Эло"""
     total_bonus = (
-        slot.get("bonus_points", 0) +
-        slot.get("lh_points", 0) +
-        slot.get("will_protocol_points", 0) +
-        slot.get("will_opinion_points", 0) +
-        slot.get("dc_points", 0)
+            slot.get("bonus_points", 0) +
+            slot.get("lh_points", 0) +
+            slot.get("will_protocol_points", 0) +
+            slot.get("will_opinion_points", 0) +
+            slot.get("dc_points", 0)
     )
     return total_bonus * BONUS_TO_ELO_RATIO
 
@@ -173,9 +172,115 @@ async def update_elo_after_game(slots: dict, winning_team: str):
 
         # Сохраняем изменение Эло и новое Эло в историю слота
         slots[slot_num]["elo_change"] = change["total_delta"]
-        slots[slot_num]["new_elo"] = change["new_elo"]  # Правильное новое Эло
+        slots[slot_num]["new_elo"] = change["new_elo"]
 
-        print(f"[ELO] {slots[slot_num].get('nickname')}: {change['old_elo']} → {change['new_elo']} ({change['total_delta']:+d})")
+        print(
+            f"[ELO] {slots[slot_num].get('nickname')}: {change['old_elo']} → {change['new_elo']} ({change['total_delta']:+d})")
+
+
+# ======================= НАЧИСЛЕНИЕ ЖЕТОНОВ =======================
+
+def calculate_fouls_bonus(fouls: int) -> int:
+    """
+    Бонус/штраф за фолы:
+    0 фолов -> +15
+    1 фол -> +10
+    2 фола -> +5
+    3+ фолов -> 0
+    """
+    if fouls == 0:
+        return 15
+    elif fouls == 1:
+        return 10
+    elif fouls == 2:
+        return 5
+    else:
+        return 0
+
+
+def calculate_tech_fouls_penalty(tech_fouls) -> int:
+    """
+    Штраф за техфолы:
+    малый техфол (small) -> -30
+    большой техфол (big) -> -60
+    """
+    if isinstance(tech_fouls, list):
+        penalty = 0
+        for t in tech_fouls:
+            if t == "small":
+                penalty -= 30
+            elif t == "big":
+                penalty -= 60
+        return penalty
+    elif isinstance(tech_fouls, int):
+        return -tech_fouls * 30
+    return 0
+
+
+async def calculate_tokens_for_player(slot: dict, is_win: bool) -> int:
+    """
+    Рассчитывает количество жетонов для игрока за игру
+    """
+    tokens = 0
+
+    # 1. За участие в игре
+    tokens += 100
+
+    # 2. За победу
+    if is_win:
+        tokens += 100
+
+    # 3. За доп. баллы (конвертация: 0.1 доп. балла = 10 жетонов)
+    total_bonus = (
+            slot.get("bonus_points", 0) +
+            slot.get("lh_points", 0) +
+            slot.get("will_protocol_points", 0) +
+            slot.get("will_opinion_points", 0) +
+            slot.get("dc_points", 0)
+    )
+    tokens += int(total_bonus * 100)
+
+    # 4. Бонус/штраф за фолы
+    fouls = slot.get("fouls", 0)
+    fouls_value = calculate_fouls_bonus(fouls)
+    tokens += fouls_value
+
+    # 5. Штраф за техфолы
+    tech_fouls = slot.get("technical_fouls", [])
+    tech_penalty = calculate_tech_fouls_penalty(tech_fouls)
+    tokens += tech_penalty
+
+    # 6. Штраф за удаление
+    if slot.get("kicked", False):
+        tokens -= 100
+
+    # 7. Штраф за ППК
+    if slot.get("ppk", False):
+        tokens -= 500
+
+    return max(tokens, -1000)
+
+
+async def update_tokens_after_game(slots: dict, winning_team: str):
+    """
+    Начисляет жетоны всем игрокам после завершения игры
+    """
+    print("[TOKENS] Начинаем расчёт жетонов...")
+
+    for slot_num, slot in slots.items():
+        user_id = slot.get("user_id")
+        if not user_id:
+            continue
+
+        is_win = (slot.get("team") == winning_team)
+        tokens_earned = await calculate_tokens_for_player(slot, is_win)
+
+        await database.add_tokens(user_id, tokens_earned)
+
+        # Сохраняем в слот для истории
+        slot["tokens_earned"] = tokens_earned
+
+        print(f"[TOKENS] {slot.get('nickname')}: {tokens_earned:+d} жетонов")
 
 
 # ========== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ УСТАНОВКИ КОМАНДЫ ПО РОЛИ ==========
@@ -201,7 +306,8 @@ def _fix_all_teams_by_role(slots: dict) -> None:
         old_team = slot.get("team")
         _fix_team_by_role(slot)
         if old_team != slot.get("team"):
-            print(f"[DEBUG] Слот {slot_num}: команда изменена с '{old_team}' на '{slot.get('team')}' (роль: {slot.get('role')})")
+            print(
+                f"[DEBUG] Слот {slot_num}: команда изменена с '{old_team}' на '{slot.get('team')}' (роль: {slot.get('role')})")
 
 
 def _debug_print_slots(slots: dict, title: str = "DEBUG") -> None:
@@ -407,6 +513,133 @@ async def score_back_to_values(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# ======================= РАСЧЁТ ВЫПЛАТ ПО СТАВКАМ =======================
+
+async def settle_bets(game_id: int, winning_team: str, game_number: int):
+    """
+    Рассчитывает выплаты по ставкам после завершения игры
+    """
+    print(f"[BETS] Начинаем расчёт выплат для игры #{game_number}")
+
+    # Получаем активную ставку для этой игры
+    bet = await database.get_active_bet(game_id)
+    if not bet:
+        print(f"[BETS] Ставок на игру #{game_number} не найдено")
+        return
+
+    # Закрываем приём ставок и записываем победителя
+    await database.resolve_bet(bet["id"], winning_team)
+
+    # Получаем все ставки
+    user_bets = await database.get_user_bets_for_game(bet["id"])
+    if not user_bets:
+        print(f"[BETS] Нет ставок на игру #{game_number}")
+        return
+
+    # Рассчитываем коэффициенты на момент игры (из сохранённых данных)
+    red_avg = 1500
+    black_avg = 1500
+
+    saved_red = await database.get_setting(f"bet_game_{game_id}_red")
+    saved_black = await database.get_setting(f"bet_game_{game_id}_black")
+
+    if saved_red:
+        try:
+            import json
+            red_players = json.loads(saved_red)
+            red_elos = []
+            for p in red_players:
+                elo = await database.get_elo(p["user_id"])
+                red_elos.append(elo)
+            red_avg = sum(red_elos) / len(red_elos) if red_elos else 1500
+        except:
+            pass
+
+    if saved_black:
+        try:
+            import json
+            black_players = json.loads(saved_black)
+            black_elos = []
+            for p in black_players:
+                elo = await database.get_elo(p["user_id"])
+                black_elos.append(elo)
+            black_avg = sum(black_elos) / len(black_elos) if black_elos else 1500
+        except:
+            pass
+
+    # Рассчитываем коэффициенты
+    red_prob = 1 / (1 + 10 ** ((black_avg - red_avg) / 400))
+    black_prob = 1 - red_prob
+
+    red_coef = round(1 / red_prob, 2) if red_prob > 0 else 2.0
+    black_coef = round(1 / black_prob, 2) if black_prob > 0 else 2.0
+
+    # Выплачиваем выигрыши
+    total_payout = 0
+    winners_count = 0
+
+    for bet_data in user_bets:
+        user_id = bet_data["user_id"]
+        amount = bet_data["amount"]
+        predicted = bet_data["predicted_winner"]
+
+        if predicted == winning_team:
+            # Выигрыш
+            coef = red_coef if predicted == "Красные" else black_coef
+            winnings = int(amount * coef)
+            await database.add_tokens(user_id, winnings)
+            total_payout += winnings
+            winners_count += 1
+
+            # Уведомляем победителя
+            try:
+                from aiogram import Bot
+                import config
+                bot = Bot(token=config.TOKEN)
+                await bot.send_message(
+                    user_id,
+                    f"🎉 **ВЫ ВЫИГРАЛИ СТАВКУ!** 🎉\n\n"
+                    f"📊 Игра #{game_number}\n"
+                    f"🏆 Победила команда: {winning_team}\n"
+                    f"💰 Ваша ставка: {amount} 🪙\n"
+                    f"📈 Коэффициент: {coef}\n"
+                    f"💎 Выигрыш: {winnings} 🪙\n\n"
+                    f"Поздравляем!",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                print(f"[BETS] Failed to notify winner {user_id}: {e}")
+
+    # Уведомляем проигравших
+    for bet_data in user_bets:
+        user_id = bet_data["user_id"]
+        predicted = bet_data["predicted_winner"]
+
+        if predicted != winning_team:
+            try:
+                from aiogram import Bot
+                import config
+                bot = Bot(token=config.TOKEN)
+                await bot.send_message(
+                    user_id,
+                    f"😔 **Ставка не сыграла**\n\n"
+                    f"📊 Игра #{game_number}\n"
+                    f"🏆 Победила команда: {winning_team}\n"
+                    f"💔 Вы ставили на: {predicted}\n"
+                    f"💸 Сумма ставки: {bet_data['amount']} 🪙\n\n"
+                    f"В следующий раз повезёт!",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                print(f"[BETS] Failed to notify loser {user_id}: {e}")
+
+    print(f"[BETS] Выплачено {winners_count} победителям {total_payout} жетонов")
+
+    # Очищаем временные данные
+    await database.set_setting(f"bet_game_{game_id}_red", None)
+    await database.set_setting(f"bet_game_{game_id}_black", None)
+
+
 @router.callback_query(F.data == "score_finish")
 async def score_finish(callback: CallbackQuery, state: FSMContext):
     if not await ensure_judge_cb(callback):
@@ -446,14 +679,26 @@ async def score_finish(callback: CallbackQuery, state: FSMContext):
     evening_num = await database.get_current_game_number() or 1
     global_num = await database.get_current_global_game_number() or 1
 
-    # ========== РАСЧЁТ ЭЛО (ДО сохранения истории, чтобы new_elo было в слотах) ==========
+    # ========== РАСЧЁТ ЭЛО И ЖЕТОНОВ ==========
     await update_elo_after_game(slots, winning_team)
-    # ====================================================================================
+    await update_tokens_after_game(slots, winning_team)
+    # =========================================
 
     # Сохраняем в историю (уже с elo_change и new_elo)
     protocol_body = await build_protocol_text(slots, updated=False, winner_label=winner_label)
-    await database.save_game_history(game_date, winner_label, protocol_body, evening_num, global_num)
+    judge_id = await database.get_current_game_judge_id() or 0
+    game_id = await database.save_game_history(game_date, winner_label, protocol_body, evening_num, global_num, judge_id)
     await database.save_game_slots_history(game_date, slots, game_number=evening_num)
+
+    # ========== НАЧИСЛЕНИЕ ЖЕТОНОВ СУДЬЕ ==========
+    if judge_id and judge_id > 0:
+        await database.add_tokens(judge_id, 100)
+        print(f"[TOKENS] Судья {judge_id} получил +100 жетонов за игру #{evening_num}")
+    # =============================================
+
+    # ========== РАСЧЁТ ВЫПЛАТ ПО СТАВКАМ ==========
+    await settle_bets(game_id, winning_team, evening_num)
+    # =============================================
 
     night_kills_order = data.get("night_kills_order", [])
     if night_kills_order:

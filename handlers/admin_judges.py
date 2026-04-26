@@ -1,12 +1,18 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 import database
 import keyboards
 from config import ADMIN_IDS  # список админов
 
 router = Router()
+
+
+# ========== FSM ДЛЯ ДОБАВЛЕНИЯ СУДЬИ ==========
+class JudgeForm(StatesGroup):
+    waiting_for_judge_id = State()
 
 
 # ========== ФУНКЦИИ ПРОВЕРКИ ПРАВ ==========
@@ -154,9 +160,12 @@ async def show_judges_list(callback: CallbackQuery):
 # ========== 3. НАЧАТЬ НАЗНАЧЕНИЕ СУДЬИ (ТОЛЬКО АДМИНЫ) ==========
 
 @router.callback_query(F.data == "judge_add")
-async def judge_add_start(callback: CallbackQuery):
+async def judge_add_start(callback: CallbackQuery, state: FSMContext):
     if not await ensure_admin_cb(callback):
         return
+
+    # Устанавливаем состояние ожидания ввода ID
+    await state.set_state(JudgeForm.waiting_for_judge_id)
 
     await callback.message.edit_text(
         "➕ **Назначение судьи**\n\n"
@@ -172,7 +181,7 @@ async def judge_add_start(callback: CallbackQuery):
 
 # ========== 4. ОБРАБОТКА СООБЩЕНИЙ ДЛЯ НАЗНАЧЕНИЯ (ТОЛЬКО АДМИНЫ) ==========
 
-@router.message(F.text.regexp(r"^\d+$"))
+@router.message(F.text.regexp(r"^\d+$"), JudgeForm.waiting_for_judge_id)
 async def judge_add_by_id(message: Message, state: FSMContext):
     # ========== ВАЖНО: проверяем, не в режиме ли редактирования игры ==========
     if await _is_in_game_edit_state(state):
@@ -209,7 +218,7 @@ async def judge_add_by_id(message: Message, state: FSMContext):
 # ========== 5. ПОДТВЕРЖДЕНИЕ НАЗНАЧЕНИЯ / ОТМЕНА (ТОЛЬКО АДМИНЫ) ==========
 
 @router.callback_query(F.data.startswith("judge_confirm_add_"))
-async def judge_confirm_add(callback: CallbackQuery):
+async def judge_confirm_add(callback: CallbackQuery, state: FSMContext):
     if not await ensure_admin_cb(callback):
         return
 
@@ -220,6 +229,7 @@ async def judge_confirm_add(callback: CallbackQuery):
         return
 
     await database.add_game_judge(user_id)
+    await state.clear()  # Очищаем состояние
 
     info = await database.get_user_by_id(user_id)
     if info:
@@ -238,9 +248,11 @@ async def judge_confirm_add(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "judge_cancel_add")
-async def judge_cancel_add(callback: CallbackQuery):
+async def judge_cancel_add(callback: CallbackQuery, state: FSMContext):
     if not await ensure_admin_cb(callback):
         return
+
+    await state.clear()  # Очищаем состояние
 
     await callback.message.edit_text(
         "❌ Назначение судьи отменено.",
@@ -294,9 +306,11 @@ async def judge_remove(callback: CallbackQuery):
 # ========== 7. НАЗАД / ВЫХОД ==========
 
 @router.callback_query(F.data == "judge_back")
-async def judge_back(callback: CallbackQuery):
+async def judge_back(callback: CallbackQuery, state: FSMContext):
     if not await ensure_admin_cb(callback):
         return
+
+    await state.clear()  # Очищаем состояние
 
     await callback.message.answer(
         "⚖ Управление судьями.\n\nВыберите действие:",

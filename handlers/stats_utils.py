@@ -51,6 +51,7 @@ async def build_user_stats_data(user_id: int) -> dict:
             "removed_count": 0,
             "techfouls_total": 0,
             "ppk_guilty_count": 0,
+            "judged_games": 0,
         }
 
     games_played = counters["games_played"]
@@ -85,6 +86,9 @@ async def build_user_stats_data(user_id: int) -> dict:
     removed_count = extra.get("removed_count", 0)
     techfouls_total = extra.get("techfouls_total", 0)
     ppk_guilty_count = extra.get("ppk_guilty_count", 0)
+
+    # ========== ОТСУЖЕННЫЕ ИГРЫ ==========
+    judged_games = await database.get_judged_games_count(user_id)
 
     # Формат для ролей (картинка профиля)
     roles_for_pic = {}
@@ -123,6 +127,7 @@ async def build_user_stats_data(user_id: int) -> dict:
         "removed_count": removed_count,
         "techfouls_total": techfouls_total,
         "ppk_guilty_count": ppk_guilty_count,
+        "judged_games": judged_games,
     }
 
 
@@ -132,7 +137,7 @@ async def build_user_stats_text(user_id: int) -> str:
     """
     counters: Optional[Dict[str, int]] = await database.get_user_game_counters(user_id)
     roles_stats = await database.get_user_roles_stats(user_id)
-    extra_stats = await database.get_user_extra_stats(user_id)  # ДОБАВИТЬ ЭТУ СТРОКУ
+    extra_stats = await database.get_user_extra_stats(user_id)
 
     lines: List[str] = []
 
@@ -155,7 +160,7 @@ async def build_user_stats_text(user_id: int) -> str:
     lines.append(f"• Баллов за победы (суммарно): {points}")
     lines.append(f"• Средний балл за игру: {avg_points}")
 
-    # ========== ДОБАВЛЯЕМ СТАТИСТИКУ ПО ФОЛАМ ==========
+    # ========== СТАТИСТИКА ПО ФОЛАМ ==========
     fouls_total = extra_stats.get("fouls_total", 0)
     techfouls_total = extra_stats.get("techfouls_total", 0)
     kicks_total = extra_stats.get("kicks_total", 0)
@@ -169,7 +174,13 @@ async def build_user_stats_text(user_id: int) -> str:
             lines.append(f"• Технических фолов: {techfouls_total}")
         if kicks_total > 0:
             lines.append(f"• Удалений из игры: {kicks_total}")
-    # ===================================================
+
+    # ========== СТАТИСТИКА ПО СУДЕЙСТВУ ==========
+    judged_games = extra_stats.get("judged_games", 0)
+    if judged_games > 0:
+        lines.append("")
+        lines.append("⚖️ **Судейство:**")
+        lines.append(f"• Отсужено игр: {judged_games}")
 
     if roles_stats:
         (

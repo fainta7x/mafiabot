@@ -1,23 +1,47 @@
 from datetime import datetime, timedelta
+import os
+import time
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.enums import ParseMode
 
 import keyboards
 import database
 import config
+import stats_utils
 from handlers.payment import payment_kb
 from handlers.booking import build_stats_text, get_next_friday
-from stats_utils import build_user_stats_text
+from database import get_elo, get_user_by_nickname, get_user_by_id
+from pic_profile import create_profile_pic
+from keyboards import profile_kb, stats_kb
 
 router = Router()
 
 
 class Form(StatesGroup):
     waiting_for_nickname = State()
+    waiting_for_search = State()
+
+
+def _cleanup_old_files(prefix: str, keep: int = 10):
+    """Очищает старые файлы профиля"""
+    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    try:
+        files = [
+            os.path.join(temp_dir, f)
+            for f in os.listdir(temp_dir)
+            if f.startswith(prefix) and f.endswith(".png")
+        ]
+        files.sort(key=os.path.getmtime)
+        for f in files[:-keep]:
+            os.remove(f)
+    except Exception:
+        pass
 
 
 async def _is_judge(user_id: int) -> bool:
@@ -154,11 +178,105 @@ async def start(m: Message, command: CommandObject):
         )
         return
 
+    # Проверка на команду /profile из deep link
+    if args.startswith("profile_"):
+        target_id = args.replace("profile_", "")
+        await show_other_profile(m, target_id)
+        return
+
     date = get_next_friday()
     await m.answer(
         f"🎭 Привет! Ближайшая игра {date} в 20:00",
         reply_markup=kb
     )
+
+
+# ======================= ПРОСМОТР ПРОФИЛЕЙ ДРУГИХ ИГРОКОВ =======================
+
+@router.message(Command("profile"), F.chat.type == "private")
+async def cmd_profile(message: Message, command: CommandObject):
+    """
+    Команда /profile <ник или ID> — показывает профиль другого игрока
+    Пример: /profile Матроскина или /profile 806709593
+    """
+    args = (command.args or "").strip()
+
+    if not args:
+        await message.answer(
+            "❌ Укажите ник или ID игрока.\n\n"
+            "Примеры:\n"
+            "/profile Матроскина\n"
+            "/profile 806709593"
+        )
+        return
+
+    await show_other_profile(message, args)
+
+
+async def show_other_profile(message: Message, target: str):
+    """Показывает профиль другого игрока по нику или ID"""
+    try:
+        # Пробуем интерпретировать как числовой ID
+        target_id = int(target)
+        user_info = await get_user_by_id(target_id)
+    except ValueError:
+        # Ищем по нику
+        user_info = await get_user_by_nickname(target)
+
+    if not user_info:
+        await message.answer(f"❌ Игрок с ником/ID '{target}' не найден.")
+        return
+
+    target_id, full_name, username, nickname = user_info
+
+    # Получаем статистику
+    try:
+        stats_data = await stats_utils.build_user_stats_data(target_id)
+        display_name = nickname or full_name or f"ID {target_id}"
+        stats_data["nickname"] = display_name
+
+        # Добавляем Эло
+        elo = await get_elo(target_id)
+        stats_data["elo"] = elo
+
+        # Создаём картинку профиля
+        img_path = create_profile_pic(display_name, stats_data)
+        text = await stats_utils.build_user_stats_text(target_id)
+
+        # Добавляем информацию о том, чей это профиль
+        if username:
+            text = f"👤 **Профиль игрока:** {display_name} (@{username})\n\n🏆 **Рейтинг Эло: {elo}**\n\n{text}"
+        else:
+            text = f"👤 **Профиль игрока:** {display_name}\n\n🏆 **Рейтинг Эло: {elo}**\n\n{text}"
+
+        doc = FSInputFile(img_path)
+        timestamp = int(datetime.now().timestamp())
+
+        await message.answer_document(
+            document=doc,
+            caption=f"{text}\n\n🕐 Обновлено: {timestamp}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+        # Очищаем старые файлы
+        try:
+            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
+            for f in os.listdir(temp_dir):
+                if f.startswith("profile_") and f.endswith(".png"):
+                    os.remove(os.path.join(temp_dir, f))
+        except Exception:
+            pass
+
+    except Exception as e:
+        print(f"[PROFILE_OTHER][ERROR] {e}")
+        # Если картинка не создалась, отправляем только текст
+        text = await stats_utils.build_user_stats_text(target_id)
+        elo = await get_elo(target_id)
+        if username:
+            text = f"👤 **Профиль игрока:** {display_name} (@{username})\n\n🏆 **Рейтинг Эло: {elo}**\n\n{text}"
+        else:
+            text = f"👤 **Профиль игрока:** {display_name}\n\n🏆 **Рейтинг Эло: {elo}**\n\n{text}"
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
 
 
 @router.message(F.text == "🏠 В главное меню", F.chat.type == "private")
@@ -192,11 +310,47 @@ async def open_judge_panel(message: Message):
     )
 
 
+@router.message(F.text == "📊 Статистика", F.chat.type == "private")
+async def show_user_stats(message: Message):
+    """Показывает свою статистику с картинкой и кнопками"""
+    user_id = message.from_user.id
+    try:
+        stats_data = await stats_utils.build_user_stats_data(user_id)
+        nickname = stats_data.get("nickname") or message.from_user.full_name
+
+        elo = await get_elo(user_id)
+        stats_data["elo"] = elo
+
+        img_path = create_profile_pic(nickname, stats_data)
+        text = await stats_utils.build_user_stats_text(user_id)
+
+        text = f"🏆 **Рейтинг Эло: {elo}**\n\n{text}"
+
+        doc = FSInputFile(img_path)
+        timestamp = int(time.time())
+
+        await message.answer_document(
+            document=doc,
+            caption=f"{text}\n\n🕐 Обновлено: {timestamp}",
+            reply_markup=stats_kb(),  # <-- изменено
+            parse_mode=ParseMode.MARKDOWN
+        )
+        _cleanup_old_files("profile_", keep=10)
+    except Exception as e:
+        print(f"[STATS][ERROR] {e}")
+        text = await stats_utils.build_user_stats_text(user_id)
+        elo = await get_elo(user_id)
+        text = f"🏆 **Рейтинг Эло: {elo}**\n\n{text}"
+        await message.answer(text, reply_markup=stats_kb(), parse_mode=ParseMode.MARKDOWN)
+
+
 @router.message(F.text == "👤 Мой профиль", F.chat.type == "private")
 async def show_profile(message: Message):
-    data = await database.get_user_profile(message.from_user.id)
-    if data:
-        name, nick, debt, visit = data
+    """Показывает финансовую информацию (ник, долг)"""
+    user_id = message.from_user.id
+    profile_data = await database.get_user_profile(user_id)
+    if profile_data:
+        name, nick, debt, visit = profile_data
 
         if not visit or visit == "-":
             visit_text = "Ещё не был на вечерах"
@@ -279,3 +433,136 @@ async def profile_pay(call: CallbackQuery):
         parse_mode="Markdown"
     )
     await call.answer()
+
+
+# ======================= ИНЛАЙН-ПОИСК ПРОФИЛЕЙ ДРУГИХ ИГРОКОВ =======================
+
+@router.callback_query(F.data == "search_player")
+async def search_player_start(callback: CallbackQuery, state: FSMContext):
+    """Начинает поиск игрока по нику или ID"""
+    await callback.message.answer(
+        "🔍 **Поиск игрока**\n\n"
+        "Введите ник или ID игрока, чей профиль хотите посмотреть.\n\n"
+        "Пример: `Матроскина` или `806709593`",
+        parse_mode="Markdown"
+    )
+    await state.set_state(Form.waiting_for_search)
+    await callback.answer()
+
+
+@router.message(Form.waiting_for_search)
+async def search_player_result(message: Message, state: FSMContext):
+    """Обрабатывает поиск игрока"""
+    search_query = message.text.strip()
+
+    if not search_query:
+        await message.answer("❌ Введите ник или ID для поиска.")
+        return
+
+    # Ищем игрока
+    try:
+        user_id = int(search_query)
+        user_info = await get_user_by_id(user_id)
+    except ValueError:
+        user_info = await get_user_by_nickname(search_query)
+
+    if not user_info:
+        await message.answer(f"❌ Игрок с ником/ID '{search_query}' не найден.\nПопробуйте снова.")
+        return
+
+    target_id, full_name, username, nickname = user_info
+    display_name = nickname or full_name or f"ID {target_id}"
+
+    await message.answer(
+        f"🔍 **Найден игрок:**\n\n"
+        f"👤 {display_name}\n"
+        f"🆔 ID: `{target_id}`\n"
+        f"📝 Ник: {nickname or 'не указан'}\n\n"
+        f"Нажмите на кнопку ниже, чтобы посмотреть профиль.",
+        reply_markup=keyboards.player_profile_kb(target_id, display_name),
+        parse_mode="Markdown"
+    )
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("view_profile:"))
+async def view_other_profile_callback(callback: CallbackQuery):
+    """Показывает профиль найденного игрока"""
+    user_id = int(callback.data.split(":")[1])
+    await callback.answer("Загружаю профиль...")
+
+    user_info = await get_user_by_id(user_id)
+    if not user_info:
+        await callback.message.answer("❌ Игрок не найден.")
+        return
+
+    target_id, full_name, username, nickname = user_info
+    display_name = nickname or full_name or f"ID {target_id}"
+
+    try:
+        stats_data = await stats_utils.build_user_stats_data(target_id)
+        stats_data["nickname"] = display_name
+
+        elo = await get_elo(target_id)
+        stats_data["elo"] = elo
+
+        img_path = create_profile_pic(display_name, stats_data)
+        text = await stats_utils.build_user_stats_text(target_id)
+
+        if username:
+            # Экранируем специальные символы в имени
+            safe_name = display_name.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
+            safe_username = username.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`') if username else ""
+
+            if safe_username:
+                text = f"👤 **Профиль игрока:** {safe_name} (@{safe_username})\n\n🏆 **Рейтинг Эло:** {elo}\n\n{text}"
+            else:
+                text = f"👤 **Профиль игрока:** {safe_name}\n\n🏆 **Рейтинг Эло:** {elo}\n\n{text}"
+        else:
+            text = f"👤 **Профиль игрока:** {display_name}\n\n🏆 **Рейтинг Эло: {elo}**\n\n{text}"
+
+        doc = FSInputFile(img_path)
+        timestamp = int(datetime.now().timestamp())
+
+        await callback.message.answer_document(
+            document=doc,
+            caption=f"{text}\n\n🕐 Обновлено: {timestamp}",
+            reply_markup=keyboards.player_actions_kb(target_id),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        print(f"[VIEW_PROFILE][ERROR] {e}")
+        text = await stats_utils.build_user_stats_text(target_id)
+        elo = await get_elo(target_id)
+        if username:
+            text = f"👤 **Профиль игрока:** {display_name} (@{username})\n\n🏆 **Рейтинг Эло: {elo}**\n\n{text}"
+        else:
+            text = f"👤 **Профиль игрока:** {display_name}\n\n🏆 **Рейтинг Эло: {elo}**\n\n{text}"
+
+        await callback.message.answer(text, reply_markup=keyboards.player_actions_kb(target_id), parse_mode=ParseMode.MARKDOWN)
+
+
+@router.callback_query(F.data == "close_search")
+async def close_search(callback: CallbackQuery, state: FSMContext):
+    """Закрывает поиск и возвращает в главное меню"""
+    await state.clear()
+    await callback.message.delete()
+
+    user_id = callback.from_user.id
+    is_admin = user_id in config.ADMIN_IDS
+    is_judge = await _is_judge(user_id)
+    kb = _get_main_menu_for_user(is_admin, is_judge)
+
+    date = get_next_friday()
+    await callback.message.answer(
+        f"🎭 Привет! Ближайшая игра {date} в 20:00",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "close_profile")
+async def close_profile(callback: CallbackQuery):
+    """Закрывает просмотр профиля"""
+    await callback.message.delete()
+    await callback.answer()

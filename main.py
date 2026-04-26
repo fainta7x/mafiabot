@@ -8,6 +8,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import config
 from database import init_db
 from handlers import start_profile, payment, booking, profile, admin_judges
+from handlers import achievements
+from handlers import shop
 import admin
 from game import router as game_router  # игровой роутер
 from commands import setup_bot_commands
@@ -61,8 +63,11 @@ async def main():
     # 3. Игровые роутеры
     dp.include_router(game_router)  # игровая логика
 
-    # 4. Дебаг-роутер (обычно без фильтров, в самом конце)
-    # dp.include_router(debug.router)            # раскомментируйте, если файл существует
+    #5. Ачивки
+    dp.include_router(achievements.router)
+
+    #6. Магазин
+    dp.include_router(shop.router)
 
     # Команды меню
     await setup_bot_commands(bot)

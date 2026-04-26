@@ -131,7 +131,49 @@ async def init_db():
                                PRIMARY KEY (game_date, game_number)
                            )
                            """)
+        # ========== ДОБАВИТЬ ЭТУ ТАБЛИЦУ ==========
+        await conn.execute("""
+                           CREATE TABLE IF NOT EXISTS user_achievements
+                           (
+                               user_id        INTEGER,
+                               achievement_id TEXT,
+                               earned_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+                               PRIMARY KEY (user_id, achievement_id),
+                               FOREIGN KEY (user_id) REFERENCES users (user_id)
+                           )
+                           """)
+        # ========== ТАБЛИЦЫ ДЛЯ СТАВОК ==========
+        await conn.execute("""
+                           CREATE TABLE IF NOT EXISTS bets_active
+                           (
+                               id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                               game_id     INTEGER NOT NULL,
+                               game_number INTEGER NOT NULL,
+                               game_date   TEXT    NOT NULL,
+                               created_by  INTEGER NOT NULL,
+                               created_at  TEXT    DEFAULT CURRENT_TIMESTAMP,
+                               closed      BOOLEAN DEFAULT 0,
+                               resolved    BOOLEAN DEFAULT 0,
+                               winner_team TEXT,
+                               FOREIGN KEY (game_id) REFERENCES game_history (id)
+                           )
+                           """)
+
+        await conn.execute("""
+                           CREATE TABLE IF NOT EXISTS user_bets
+                           (
+                               id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                               user_id          INTEGER NOT NULL,
+                               bet_id           INTEGER NOT NULL,
+                               amount           INTEGER NOT NULL,
+                               predicted_winner TEXT    NOT NULL,
+                               created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+                               FOREIGN KEY (user_id) REFERENCES users (user_id),
+                               FOREIGN KEY (bet_id) REFERENCES bets_active (id)
+                           )
+                           """)
         await conn.commit()
+
     await _ensure_columns()
 
 
@@ -563,10 +605,14 @@ async def add_user_payment(user_id: int, amount: int):
 
 
 async def get_debtors() -> list:
+    """Возвращает ТОЛЬКО должников (у кого debt < 0)"""
     async with get_db() as conn:
-        async with conn.execute(
-                "SELECT full_name, nickname, username, debt, user_id FROM users WHERE has_unpaid_session = 1 ORDER BY full_name"
-        ) as cur:
+        async with conn.execute("""
+            SELECT full_name, nickname, username, debt, user_id 
+            FROM users 
+            WHERE debt < 0
+            ORDER BY debt ASC
+        """) as cur:
             return await cur.fetchall()
 
 
@@ -796,34 +842,30 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
     """Статистика по ролям пользователя."""
     async with get_db() as conn:
         async with conn.execute("""
-                                SELECT role,
-                                       COUNT(*)                                                                     AS games,
-                                       SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END)                             AS wins,
-                                       SUM(base_points + bonus_points + lh_points + will_protocol_points +
-                                           will_opinion_points +
-                                           dc_points)                                                               AS total_points,
-                                       SUM(bonus_points)                                                            AS total_bonus,
-                                       SUM(lh_points)                                                               AS total_lh,
-                                       SUM(CASE
-                                               WHEN (bonus_points + lh_points + dc_points) < 0
-                                                   THEN bonus_points + lh_points + dc_points
-                                               ELSE 0 END)                                                          AS total_negative,
-                                       AVG(will_protocol_points)                                                    AS protocol_avg,
-                                       SUM(CASE WHEN will_protocol_points > 0 THEN 1 ELSE 0 END)                    AS protocol_pos_count,
-                                       SUM(CASE WHEN will_protocol_points > 0 THEN will_protocol_points ELSE 0 END) AS protocol_pos_sum,
-                                       SUM(CASE WHEN will_protocol_points < 0 THEN 1 ELSE 0 END)                    AS protocol_neg_count,
-                                       SUM(CASE WHEN will_protocol_points < 0 THEN will_protocol_points ELSE 0 END) AS protocol_neg_sum,
-                                       AVG(will_opinion_points)                                                     AS opinion_avg,
-                                       SUM(CASE WHEN will_opinion_points > 0 THEN 1 ELSE 0 END)                     AS opinion_pos_count,
-                                       SUM(CASE WHEN will_opinion_points > 0 THEN will_opinion_points ELSE 0 END)   AS opinion_pos_sum,
-                                       SUM(CASE WHEN will_opinion_points < 0 THEN 1 ELSE 0 END)                     AS opinion_neg_count,
-                                       SUM(CASE WHEN will_opinion_points < 0 THEN will_opinion_points ELSE 0 END)   AS opinion_neg_sum,
-                                       SUM(kick)                                                                    AS total_kicks,
-                                       SUM(ppk)                                                                     AS total_ppk
-                                FROM game_slots_history
-                                WHERE user_id = ?
-                                GROUP BY role
-                                """, (user_id,)) as cur:
+            SELECT role,
+                   COUNT(*)                                                                     AS games,
+                   SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END)                             AS wins,
+                   SUM(base_points + bonus_points + lh_points + will_protocol_points +
+                       will_opinion_points + dc_points)                                         AS total_points,
+                   SUM(bonus_points)                                                            AS total_bonus,
+                   SUM(lh_points)                                                               AS total_lh,
+                   SUM(dc_points)                                                               AS total_negative,
+                   AVG(will_protocol_points)                                                    AS protocol_avg,
+                   SUM(CASE WHEN will_protocol_points > 0 THEN 1 ELSE 0 END)                    AS protocol_pos_count,
+                   SUM(CASE WHEN will_protocol_points > 0 THEN will_protocol_points ELSE 0 END) AS protocol_pos_sum,
+                   SUM(CASE WHEN will_protocol_points < 0 THEN 1 ELSE 0 END)                    AS protocol_neg_count,
+                   SUM(CASE WHEN will_protocol_points < 0 THEN will_protocol_points ELSE 0 END) AS protocol_neg_sum,
+                   AVG(will_opinion_points)                                                     AS opinion_avg,
+                   SUM(CASE WHEN will_opinion_points > 0 THEN 1 ELSE 0 END)                     AS opinion_pos_count,
+                   SUM(CASE WHEN will_opinion_points > 0 THEN will_opinion_points ELSE 0 END)   AS opinion_pos_sum,
+                   SUM(CASE WHEN will_opinion_points < 0 THEN 1 ELSE 0 END)                     AS opinion_neg_count,
+                   SUM(CASE WHEN will_opinion_points < 0 THEN will_opinion_points ELSE 0 END)   AS opinion_neg_sum,
+                   SUM(kick)                                                                    AS total_kicks,
+                   SUM(ppk)                                                                     AS total_ppk
+            FROM game_slots_history
+            WHERE user_id = ?
+            GROUP BY role
+        """, (user_id,)) as cur:
             rows = await cur.fetchall()
 
     result = []
@@ -849,7 +891,7 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
             "total_points": total_points or 0.0,
             "total_bonus": total_bonus or 0.0,
             "total_lh": total_lh or 0.0,
-            "total_negative": total_negative or 0.0,
+            "total_negative": total_negative or 0.0,  # теперь только dc_points
             "protocol_avg": round(protocol_avg or 0, 2),
             "protocol_pos_count": protocol_pos_count or 0,
             "protocol_pos_sum": round(protocol_pos_sum or 0, 2),
@@ -872,14 +914,14 @@ async def save_game_history(
         winner_label: str,
         protocol_text: str,
         game_number: Optional[int] = None,
-        global_game_number: Optional[int] = None
+        global_game_number: Optional[int] = None,
+        judge_id: Optional[int] = None,  # <-- добавить
 ) -> int:
     async with get_db() as conn:
         cur = await conn.execute("""
-                                 INSERT INTO game_history (game_date, winner_label, protocol_text, game_number,
-                                                           global_game_number)
-                                 VALUES (?, ?, ?, ?, ?)
-                                 """, (game_date, winner_label, protocol_text, game_number, global_game_number))
+            INSERT INTO game_history (game_date, winner_label, protocol_text, game_number, global_game_number, judge_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (game_date, winner_label, protocol_text, game_number, global_game_number, judge_id or 0))
         await conn.commit()
         return cur.lastrowid
 
@@ -950,6 +992,7 @@ async def _fetch_games(query: str, params: tuple = ()) -> List[Dict]:
             "protocol_text": r[3],
             "game_number": r[4],
             "global_game_number": r[5],
+            "judge_id": r[6] if len(r) > 6 else None,  # <-- добавить эту строку
         }
         for r in rows
     ]
@@ -1006,7 +1049,7 @@ async def get_user_games(user_id: int, limit: int = 10) -> List[Dict]:
 
 async def get_game_by_id(game_id: int) -> Optional[Dict]:
     games = await _fetch_games(
-        "SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number "
+        "SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number, judge_id "
         "FROM game_history WHERE id = ?",
         (game_id,)
     )
@@ -1578,3 +1621,202 @@ async def get_player_full_stats(user_id: int) -> Optional[Dict]:
             "games_black": row[13] or 0,
             "wins_black": row[14] or 0,
         }
+
+async def get_user_achievements(user_id: int) -> List[str]:
+    """Возвращает список ID ачивок, которые есть у игрока"""
+    async with get_db() as conn:
+        async with conn.execute(
+            "SELECT achievement_id FROM user_achievements WHERE user_id = ?",
+            (user_id,)
+        ) as cur:
+            rows = await cur.fetchall()
+            return [row[0] for row in rows]
+
+
+async def add_user_achievement(user_id: int, achievement_id: str):
+    """Добавляет ачивку игроку"""
+    async with get_db() as conn:
+        await conn.execute(
+            "INSERT OR IGNORE INTO user_achievements (user_id, achievement_id) VALUES (?, ?)",
+            (user_id, achievement_id)
+        )
+        await conn.commit()
+
+
+async def get_all_achievements() -> List[Tuple[str, str]]:
+    """Возвращает все ачивки (id, name)"""
+    result = []
+    for ach_id, ach in ACHIEVEMENTS.items():
+        result.append((ach_id, ach["name"]))
+    return result
+
+async def get_user_tokens(user_id: int) -> int:
+    """Возвращает количество жетонов у игрока"""
+    async with get_db() as conn:
+        async with conn.execute("SELECT tokens FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
+async def add_tokens(user_id: int, amount: int):
+    """Добавляет жетоны игроку (amount может быть отрицательным)"""
+    async with get_db() as conn:
+        await conn.execute(
+            "UPDATE users SET tokens = tokens + ? WHERE user_id = ?",
+            (amount, user_id)
+        )
+        await conn.commit()
+
+
+async def set_tokens(user_id: int, amount: int):
+    """Устанавливает точное количество жетонов"""
+    async with get_db() as conn:
+        await conn.execute(
+            "UPDATE users SET tokens = ? WHERE user_id = ?",
+            (amount, user_id)
+        )
+        await conn.commit()
+
+
+# ========== СТАВКИ ==========
+
+async def create_bet(game_id: int, game_number: int, game_date: str, created_by: int) -> int:
+    """Создаёт новую запись об открытых ставках на игру"""
+    async with get_db() as conn:
+        cur = await conn.execute("""
+                                 INSERT INTO bets_active (game_id, game_number, game_date, created_by)
+                                 VALUES (?, ?, ?, ?)
+                                 """, (game_id, game_number, game_date, created_by))
+        await conn.commit()
+        return cur.lastrowid
+
+
+async def get_active_bet(game_id: int) -> Optional[Dict]:
+    """Возвращает активные ставки для игры (если не закрыты и не разрешены)"""
+    async with get_db() as conn:
+        async with conn.execute("""
+                                SELECT id,
+                                       game_id,
+                                       game_number,
+                                       game_date,
+                                       created_by,
+                                       created_at,
+                                       closed,
+                                       resolved,
+                                       winner_team
+                                FROM bets_active
+                                WHERE game_id = ?
+                                  AND closed = 0
+                                  AND resolved = 0
+                                """, (game_id,)) as cur:
+            row = await cur.fetchone()
+            if row:
+                return {
+                    "id": row[0],
+                    "game_id": row[1],
+                    "game_number": row[2],
+                    "game_date": row[3],
+                    "created_by": row[4],
+                    "created_at": row[5],
+                    "closed": row[6],
+                    "resolved": row[7],
+                    "winner_team": row[8]
+                }
+    return None
+
+
+async def close_bet(bet_id: int):
+    """Закрывает приём ставок на игру (перед началом)"""
+    async with get_db() as conn:
+        await conn.execute(
+            "UPDATE bets_active SET closed = 1 WHERE id = ?",
+            (bet_id,)
+        )
+        await conn.commit()
+
+
+async def resolve_bet(bet_id: int, winner_team: str):
+    """Записывает победителя игры для расчёта выплат"""
+    async with get_db() as conn:
+        await conn.execute(
+            "UPDATE bets_active SET winner_team = ?, resolved = 1 WHERE id = ?",
+            (winner_team, bet_id)
+        )
+        await conn.commit()
+
+
+async def place_bet(user_id: int, bet_id: int, amount: int, predicted_winner: str) -> bool:
+    """Сохраняет ставку пользователя"""
+    try:
+        async with get_db() as conn:
+            await conn.execute("""
+                               INSERT INTO user_bets (user_id, bet_id, amount, predicted_winner)
+                               VALUES (?, ?, ?, ?)
+                               """, (user_id, bet_id, amount, predicted_winner))
+            await conn.commit()
+            return True
+    except Exception:
+        return False
+
+
+async def get_user_bets_for_game(bet_id: int) -> List[Dict]:
+    """Возвращает все ставки на игру"""
+    async with get_db() as conn:
+        async with conn.execute("""
+                                SELECT ub.user_id, ub.amount, ub.predicted_winner, u.nickname, u.full_name
+                                FROM user_bets ub
+                                         JOIN users u ON ub.user_id = u.user_id
+                                WHERE ub.bet_id = ?
+                                """, (bet_id,)) as cur:
+            rows = await cur.fetchall()
+            return [
+                {
+                    "user_id": row[0],
+                    "amount": row[1],
+                    "predicted_winner": row[2],
+                    "nickname": row[3] or row[4] or str(row[0])
+                }
+                for row in rows
+            ]
+
+
+async def get_bet_participants(bet_id: int) -> List[int]:
+    """Возвращает список user_id, сделавших ставки на игру"""
+    async with get_db() as conn:
+        async with conn.execute("SELECT DISTINCT user_id FROM user_bets WHERE bet_id = ?", (bet_id,)) as cur:
+            rows = await cur.fetchall()
+            return [row[0] for row in rows]
+
+
+async def delete_bet(bet_id: int):
+    """Удаляет запись о ставках (при отмене игры)"""
+    async with get_db() as conn:
+        await conn.execute("DELETE FROM user_bets WHERE bet_id = ?", (bet_id,))
+        await conn.execute("DELETE FROM bets_active WHERE id = ?", (bet_id,))
+        await conn.commit()
+
+
+async def get_team_avg_elo(game_id: int, team: str) -> float:
+    """Возвращает среднее Эло команды для расчёта коэффициента"""
+    async with get_db() as conn:
+        # Получаем дату и номер игры
+        async with conn.execute("SELECT game_date, game_number FROM game_history WHERE id = ?", (game_id,)) as cur:
+            game = await cur.fetchone()
+            if not game:
+                return 1500
+            game_date, game_number = game
+
+        # Получаем Эло игроков команды
+        async with conn.execute("""
+                                SELECT COALESCE(e.elo, 1500)
+                                FROM game_slots_history s
+                                         LEFT JOIN elo_ratings e ON s.user_id = e.user_id
+                                WHERE s.game_date = ?
+                                  AND s.game_number = ?
+                                  AND s.team = ?
+                                """, (game_date, game_number, team)) as cur:
+            rows = await cur.fetchall()
+            elos = [row[0] for row in rows if row[0]]
+            if not elos:
+                return 1500
+            return sum(elos) / len(elos)

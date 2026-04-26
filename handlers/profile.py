@@ -22,6 +22,7 @@ from database import (
     save_night_kills_order,
     get_elo,
     get_players_elo_rating,
+    get_user_by_id,
 )
 from keyboards import games_list_kb
 from pic_profile import create_profile_pic
@@ -274,23 +275,19 @@ async def show_my_games(message: types.Message):
 # ======================= НОВЫЕ ФУНКЦИИ ДЛЯ НОМИНАЦИЙ =======================
 
 async def get_mvp() -> tuple:
-    """
-    Возвращает (имя_игрока, сумма_доп_баллов) для MVP
-    MVP — игрок с максимальной суммой доп. баллов за все игры
-    """
     async with database.get_db() as conn:
         async with conn.execute("""
-                                SELECT u.nickname,
-                                       u.full_name,
-                                       COALESCE(SUM(s.bonus_points + s.lh_points + s.will_protocol_points +
-                                                    s.will_opinion_points + s.dc_points), 0) as total_bonus
-                                FROM game_slots_history s
-                                         JOIN users u ON s.user_id = u.user_id
-                                GROUP BY s.user_id
-                                HAVING total_bonus != 0
-                                ORDER BY total_bonus DESC
-                                LIMIT 1
-                                """) as cur:
+            SELECT u.nickname,
+                   u.full_name,
+                   COALESCE(SUM(s.bonus_points + s.lh_points + s.will_protocol_points +
+                                s.will_opinion_points + s.dc_points), 0) as total_bonus
+            FROM game_slots_history s
+            JOIN users u ON s.user_id = u.user_id
+            GROUP BY s.user_id
+            HAVING total_bonus > 0
+            ORDER BY total_bonus DESC
+            LIMIT 1
+        """) as cur:
             row = await cur.fetchone()
             if row:
                 name = row[0] or row[1] or "Неизвестный"
@@ -299,23 +296,19 @@ async def get_mvp() -> tuple:
 
 
 async def get_best_by_role(role_name: str) -> tuple:
-    """
-    Возвращает (имя_игрока, сумма_доп_баллов) для лучшего игрока по роли
-    Используется bonus_points (Доп)
-    """
     async with database.get_db() as conn:
         async with conn.execute("""
-                                SELECT u.nickname,
-                                       u.full_name,
-                                       COALESCE(SUM(s.bonus_points), 0) as total_bonus
-                                FROM game_slots_history s
-                                         JOIN users u ON s.user_id = u.user_id
-                                WHERE s.role = ?
-                                GROUP BY s.user_id
-                                HAVING total_bonus != 0
-                                ORDER BY total_bonus DESC
-                                LIMIT 1
-                                """, (role_name,)) as cur:
+            SELECT u.nickname,
+                   u.full_name,
+                   COALESCE(SUM(s.bonus_points), 0) as total_bonus
+            FROM game_slots_history s
+            JOIN users u ON s.user_id = u.user_id
+            WHERE s.role = ?
+            GROUP BY s.user_id
+            HAVING total_bonus > 0
+            ORDER BY total_bonus DESC
+            LIMIT 1
+        """, (role_name,)) as cur:
             row = await cur.fetchone()
             if row:
                 name = row[0] or row[1] or "Неизвестный"
@@ -368,7 +361,7 @@ async def show_rating(message: types.Message):
     text += "🏅 **MVP (лучший по доп. баллам)**\n\n"
 
     mvp_name, mvp_bonus = await get_mvp()
-    if mvp_name:
+    if mvp_name and mvp_bonus > 0:
         text += f"🏆 **{mvp_name}** — **{mvp_bonus:.1f}** доп. баллов\n\n"
     else:
         text += "📊 Нет данных для MVP\n\n"
@@ -387,7 +380,7 @@ async def show_rating(message: types.Message):
 
     for role_name, icon in roles:
         best_name, best_bonus = await get_best_by_role(role_name)
-        if best_name:
+        if best_name and best_bonus > 0:
             text += f"{icon} **{role_name}**: {best_name} — **{best_bonus:.1f}** доп.\n"
         else:
             text += f"{icon} **{role_name}**: нет данных\n"
@@ -480,57 +473,69 @@ async def show_game_protocol(callback: types.CallbackQuery, state: FSMContext):
 
     date_str = game.get("game_date") or "-"
     winner_label = game.get("winner_label") or "Результат не указан"
-    protocol = (game.get("protocol_text") or "").strip()
     game_number = game.get("game_number")
     global_game_number = game.get("global_game_number") or 0
+    judge_id = game.get("judge_id")
 
-    lines = protocol.splitlines()
-    if lines and lines[0].startswith("📑 Протокол"):
-        lines = lines[1:]
-    protocol_body = "\n".join(lines).lstrip()
+    # Получаем имя судьи
+    judge_name = None
+    if judge_id:
+        user_info = await get_user_by_id(judge_id)
+        if user_info:
+            _, full_name, username, nickname = user_info
+            judge_name = nickname or full_name or username
 
+    # Получаем слоты и строим тело протокола (без шапки)
+    slots = await get_game_slots_by_date(date_str, game_number=game_number)
+    if not slots:
+        await callback.answer("Нет слотов игры.", show_alert=True)
+        return
+
+    night_kills_order = await get_night_kills_order(date_str, game_number or 0)
+    filtered_order = []
+    for slot_num in night_kills_order:
+        if slot_num in slots:
+            status_reason = slots[slot_num].get("status_reason", "")
+            if "убит" in status_reason.lower() and "заголосован" not in status_reason.lower():
+                filtered_order.append(slot_num)
+    slots["_night_kills_order"] = filtered_order
+
+    from game.text import build_protocol_text
+    protocol_body = await build_protocol_text(slots, winner_label=winner_label)
+
+    # Строим шапку сами
     header = f"📑 Протокол игры №{game_number} ({date_str}): {winner_label}"
     if global_game_number:
         header += f" — №{global_game_number} по общей истории"
 
-    text = header
-    if protocol_body:
-        text += f"\n\n{protocol_body}"
+    # Добавляем судью в шапку (только один раз)
+    if judge_name:
+        full_text = f"{header}\n\n<b>Судья:</b> {judge_name}\n\n{protocol_body}"
+    else:
+        full_text = f"{header}\n\n{protocol_body}"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Редактировать игру", callback_data=f"editgame_menu:{game_id}")]
     ])
 
     try:
-        slots = await get_game_slots_by_date(date_str, game_number=game_number)
-        if slots:
-            night_kills_order = await get_night_kills_order(date_str, game_number or 0)
-            filtered_order = []
-            for slot_num in night_kills_order:
-                if slot_num in slots:
-                    status_reason = slots[slot_num].get("status_reason", "")
-                    if "убит" in status_reason.lower() and "заголосован" not in status_reason.lower():
-                        filtered_order.append(slot_num)
-            slots["_night_kills_order"] = filtered_order
+        img_path = create_endgame_pic_summary(
+            slots=slots, game_date=date_str,
+            evening_game_number=game_number or 0,
+            global_game_number=global_game_number or 0,
+            winner_label=winner_label,
+            judge_name=judge_name,
+        )
+        doc = FSInputFile(img_path)
+        timestamp = int(time.time())
 
-            img_path = create_endgame_pic_summary(
-                slots=slots, game_date=date_str,
-                evening_game_number=game_number or 0,
-                global_game_number=global_game_number or 0,
-                winner_label=winner_label,
-            )
-            doc = FSInputFile(img_path)
-            timestamp = int(time.time())
-
-            await callback.message.answer_document(document=doc, caption=None)
-            await callback.message.answer(f"{text}\n\n🕐 Обновлено: {timestamp}", parse_mode=ParseMode.HTML,
-                                          reply_markup=kb)
-            _cleanup_old_files("endgame_summary_", keep=10)
-        else:
-            await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await callback.message.answer_document(document=doc, caption=None)
+        await callback.message.answer(f"{full_text}\n\n🕐 Обновлено: {timestamp}", parse_mode=ParseMode.HTML,
+                                      reply_markup=kb)
+        _cleanup_old_files("endgame_summary_", keep=10)
     except Exception as e:
         print(f"[GAME_PROTOCOL][ERROR] {e}")
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await callback.message.answer(f"{full_text}\n\n🕐 Обновлено: {timestamp}", parse_mode=ParseMode.HTML, reply_markup=kb)
 
     await callback.answer()
 
@@ -626,12 +631,21 @@ async def editgame_show_protocol(callback: types.CallbackQuery, state: FSMContex
     header = f"📑 **АКТУАЛЬНЫЙ ПРОТОКОЛ** (ещё не сохранён)\n\n📑 Протокол игры №{game_number} ({date_str}): {winner_label}"
     text = f"{header}\n\n{protocol_body}"
 
+    judge_id = game.get("judge_id")
+    judge_name = None
+    if judge_id:
+        user_info = await get_user_by_id(judge_id)
+        if user_info:
+            _, full_name, username, nickname = user_info
+            judge_name = nickname or full_name or username
+
     try:
         img_path = create_endgame_pic_summary(
             slots=slots, game_date=date_str,
             evening_game_number=game_number or 0,
             global_game_number=game.get("global_game_number") or 0,
             winner_label=winner_label,
+            judge_name=judge_name,
         )
         doc = FSInputFile(img_path)
         timestamp = int(time.time())
@@ -800,9 +814,12 @@ async def editgame_outcome(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("editgame_set_outcome:"))
 async def editgame_set_outcome(callback: types.CallbackQuery, state: FSMContext):
     try:
-        _, _, game_id_str, outcome = callback.data.split(":", 3)
-        game_id = int(game_id_str)
-    except Exception:
+        # Формат: editgame_set_outcome:game_id:outcome
+        parts = callback.data.split(":")
+        game_id = int(parts[1])
+        outcome = parts[2]
+    except Exception as e:
+        print(f"[EDITGAME] Parse error: {e}")
         await callback.answer("Некорректные данные.", show_alert=True)
         return
 

@@ -27,12 +27,13 @@ def main_menu():
         "📜 Мои игры",
         "📜 Все игры",
         "🏆 Рейтинг",
+        "🛒 Магазин",           # <-- ДОБАВЛЕНО
         "📋 РЕГЛАМЕНТ",
     ]
     for btn in buttons:
         builder.button(text=btn)
 
-    builder.adjust(3, 2, 2, 2)
+    builder.adjust(3, 2, 2, 2, 1)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
@@ -51,13 +52,14 @@ def main_menu_judge():
         "📜 Мои игры",
         "📜 Все игры",
         "🏆 Рейтинг",
+        "🛒 Магазин",           # <-- ДОБАВЛЕНО
         "⚖ Панель судьи",
         "📋 РЕГЛАМЕНТ",
     ]
     for btn in buttons:
         builder.button(text=btn)
 
-    builder.adjust(3, 3, 2, 2)
+    builder.adjust(3, 3, 2, 2, 1)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
@@ -77,13 +79,14 @@ def main_menu_admin():
         "📜 Мои игры",
         "📜 Все игры",
         "🏆 Рейтинг",
+        "🛒 Магазин",           # <-- ДОБАВЛЕНО
         "🛠 Админ-панель",
         "📋 РЕГЛАМЕНТ",
     ]
     for btn in buttons:
         builder.button(text=btn)
 
-    builder.adjust(3, 3, 2, 2)
+    builder.adjust(3, 3, 2, 2, 1)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
@@ -172,6 +175,7 @@ def user_paid_kb(user_id: int):
 def profile_kb(debt: int):
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Изменить ник", callback_data="edit_nickname")
+    builder.button(text="🔍 Найти игрока", callback_data="search_player")
     if debt < 0:
         builder.button(text="💳 Оплатить долг", callback_data="profile_pay")
     builder.adjust(1)
@@ -210,7 +214,6 @@ def games_list_kb(games: list, prefix: str):
     for game_id, title, number in games:
         if len(title) > 35:
             title = title[:32] + "..."
-        # Убираем number из callback, оставляем только game_id
         builder.button(text=title, callback_data=f"{prefix}:{game_id}")
     builder.adjust(1)
     return builder.as_markup()
@@ -629,9 +632,7 @@ def ppk_confirmation_kb(slot_num: int, name: str) -> InlineKeyboardMarkup:
 
 # ========== НОВЫЕ КЛАВИАТУРЫ ДЛЯ УПРАВЛЕНИЯ СУДЬЯМИ ==========
 def judges_menu_kb() -> InlineKeyboardMarkup:
-    """
-    Главное меню управления судьями (для админа).
-    """
+    """Главное меню управления судьями (для админа)."""
     builder = InlineKeyboardBuilder()
     builder.button(text="📋 Список судей", callback_data="judge_list")
     builder.button(text="➕ Назначить судью", callback_data="judge_add")
@@ -641,10 +642,7 @@ def judges_menu_kb() -> InlineKeyboardMarkup:
 
 
 def judges_list_kb(judges: list) -> InlineKeyboardMarkup:
-    """
-    Список судей.
-    judges: list[tuple[user_id, name]]
-    """
+    """Список судей."""
     builder = InlineKeyboardBuilder()
     if not judges:
         builder.button(text="Пока нет назначенных судей", callback_data="judge_empty")
@@ -667,9 +665,7 @@ def judges_list_kb(judges: list) -> InlineKeyboardMarkup:
 
 
 def judge_candidate_kb(user_id: int, name: str) -> InlineKeyboardMarkup:
-    """
-    Подтверждение назначения конкретного пользователя судьёй.
-    """
+    """Подтверждение назначения конкретного пользователя судьёй."""
     builder = InlineKeyboardBuilder()
     if len(name) > 20:
         name = name[:17] + "..."
@@ -683,23 +679,69 @@ def judge_candidate_kb(user_id: int, name: str) -> InlineKeyboardMarkup:
 
 
 def judge_back_kb() -> InlineKeyboardMarkup:
-    """
-    Простой «Назад» / закрыть меню судей.
-    """
+    """Простой «Назад» / закрыть меню судей."""
     builder = InlineKeyboardBuilder()
     builder.button(text="◀️ Назад", callback_data="judge_back")
     builder.adjust(1)
     return builder.as_markup()
 
-# ========== КЛАВИАТУРА ДЛЯ ПОДТВЕРЖДЕНИЯ АНОНСА ==========
 
+# ========== КЛАВИАТУРА ДЛЯ ПОДТВЕРЖДЕНИЯ АНОНСА ==========
 def announce_confirm_kb(date: str) -> InlineKeyboardMarkup:
-    """
-    Клавиатура для подтверждения публикации анонса о сборе стола.
-    """
+    """Клавиатура для подтверждения публикации анонса о сборе стола."""
     buttons = [
         [InlineKeyboardButton(text="🕐 Указать точное время", callback_data=f"announce_confirm_time_{date}")],
         [InlineKeyboardButton(text="⏰ Напишем позже", callback_data=f"announce_confirm_later_time_{date}")],
         [InlineKeyboardButton(text="❌ Отложить", callback_data=f"announce_confirm_later_{date}")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ========== КЛАВИАТУРЫ ДЛЯ ПРОСМОТРА ПРОФИЛЕЙ ==========
+def profile_search_kb() -> InlineKeyboardMarkup:
+    """Клавиатура для поиска профиля игрока."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔍 Найти игрока", callback_data="search_player")
+    builder.button(text="❌ Закрыть", callback_data="close_search")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def player_profile_kb(user_id: int, nickname: str) -> InlineKeyboardMarkup:
+    """Клавиатура для просмотра профиля найденного игрока."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"👤 Посмотреть профиль {nickname}",
+        callback_data=f"view_profile:{user_id}"
+    )
+    builder.button(text="❌ Отмена", callback_data="close_search")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def back_to_profile_menu_kb() -> InlineKeyboardMarkup:
+    """Клавиатура возврата к поиску профиля."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔍 Найти другого игрока", callback_data="search_player")
+    builder.button(text="❌ Закрыть", callback_data="close_search")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def player_actions_kb(viewed_user_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура действий после просмотра профиля."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔍 Найти другого", callback_data="search_player")
+    builder.button(text="❌ Закрыть", callback_data="close_profile")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+# ========== КЛАВИАТУРА ДЛЯ СТАТИСТИКИ ==========
+def stats_kb() -> InlineKeyboardMarkup:
+    """Клавиатура для раздела статистики"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔍 Найти игрока", callback_data="search_player")
+    builder.button(text="📖 Книга ачивок", callback_data="achievements_menu")
+    builder.adjust(1)
+    return builder.as_markup()

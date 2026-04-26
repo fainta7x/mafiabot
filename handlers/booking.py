@@ -152,6 +152,20 @@ async def check_and_request_announcement(bot: Bot, date: str, total_attending: i
 # 2. ХЕНДЛЕРЫ ЗАПИСИ
 # =========================================================
 
+def get_tokens_for_booking(status: str) -> int:
+    """
+    Возвращает количество жетонов за запись:
+    - Вовремя: 500
+    - Позже: 400
+    - Не идёт: 0 (и не начисляем)
+    """
+    if status == "Вовремя":
+        return 500
+    elif status == "Позже":
+        return 400
+    return 0
+
+
 @router.message(F.text == "🕵️ Записаться на игру", F.chat.type == "private")
 async def book(message: Message):
     await message.answer(
@@ -178,14 +192,22 @@ async def handle_book(call: CallbackQuery, bot: Bot):
 
         await database.add_booking(call.from_user.id, status, date)
 
+        # ========== НАЧИСЛЕНИЕ ЖЕТОНОВ ЗА ЗАПИСЬ ==========
+        tokens = get_tokens_for_booking(status)
+        if tokens > 0:
+            await database.add_tokens(call.from_user.id, tokens)
+            print(f"[TOKENS] +{tokens} жетонов {call.from_user.id} за запись ({status})")
+        # =================================================
+
         # Ответ пользователю
         if call.message.chat.type == "private":
             await call.message.edit_text(
-                f"✅ Вы записаны на {date}! Статус: {status}"
+                f"✅ Вы записаны на {date}! Статус: {status}\n"
+                f"💰 Получено жетонов: +{tokens}"
             )
         else:
             await call.answer(
-                f"✅ Записал вас на {date}! Статус: {status}",
+                f"✅ Записал вас на {date}! Статус: {status} (+{tokens} жетонов)",
                 show_alert=False,
             )
 

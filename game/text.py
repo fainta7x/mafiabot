@@ -281,20 +281,12 @@ async def build_protocol_text(
         winner_label: str | None = None,
 ) -> str:
     """
-    Собирает ТОЛЬКО ТЕЛО протокола игры из slots (HTML).
-    ДОБАВЛЕНО: в шапке выводится Судья (берётся из БД), если сохранён.
-    ДОБАВЛЕНО: отображение изменения Эло для каждого игрока (+13) или (-17).
+    Собирает ТОЛЬКО ТЕЛО протокола игры из slots (без шапки и судьи).
     """
     lines: list[str] = []
 
-    # --- ШАПКА С СУДЬЁЙ И ИТОГО РЕЗУЛЬТАТОМ ---
-    judge_name = await database.get_current_game_judge_name()
-    if judge_name:
-        lines.append(f"<b>Судья:</b> {judge_name}")
-    if winner_label:
-        lines.append(f"<b>Результат:</b> {winner_label}")
-    if lines:
-        lines.append("")  # пустая строка после шапки
+    # Убираем добавление судьи и результата — теперь это в show_game_protocol
+    # (удали строки с judge_name и winner_label)
 
     # Вытаскиваем служебный ключ порядка убийств, если он есть
     night_kills_order: list[int] = []
@@ -313,7 +305,7 @@ async def build_protocol_text(
             return "Чёрные"
         return None
 
-    # Разделяем слоты по командам (игнорируя служебные ключи)
+    # Разделяем слоты по командам
     red_slots: list[Tuple[int, dict]] = []
     black_slots: list[Tuple[int, dict]] = []
     other_slots: list[Tuple[int, dict]] = []
@@ -325,8 +317,6 @@ async def build_protocol_text(
             continue
 
         team = info.get("team")
-
-        # Если team не задана - определяем по роли
         if not team:
             team = get_team_from_role(info.get("role", ""))
 
@@ -341,7 +331,6 @@ async def build_protocol_text(
     black_slots.sort(key=lambda x: x[0])
     other_slots.sort(key=lambda x: x[0])
 
-    # ========== ИСПРАВЛЕННАЯ ФУНКЦИЯ ДЛЯ ГРУППЫ ==========
     def _append_group(title: str, items: list[Tuple[int, dict]]):
         if not items:
             return
@@ -350,7 +339,6 @@ async def build_protocol_text(
             raw_name = info.get("nickname") or info.get("full_name") or "Без имени"
             name = _trim_name(raw_name)
 
-            # Получаем отображение изменения Эло
             elo_display = _get_elo_display(info)
 
             role = info.get("role", "Не задана")
@@ -360,10 +348,8 @@ async def build_protocol_text(
             ppk = info.get("ppk", False)
             fouls = info.get("fouls", 0)
 
-            # ИСПРАВЛЕНО: безопасное получение количества техфолов
             tech_fouls_count = _safe_get_tech_fouls_count(info)
 
-            # Формируем статус
             if not alive:
                 if kicked:
                     status_icon = "🚫"
@@ -387,7 +373,6 @@ async def build_protocol_text(
 
             is_pu = bool(info.get("pu_mark"))
 
-            # Формируем префикс с ПУ, фолами, техфолами
             prefix_parts = []
             if is_pu:
                 prefix_parts.append("👑 ПУ")
@@ -411,21 +396,17 @@ async def build_protocol_text(
             mn_pts = float(info.get("will_opinion_points", 0.0) or 0.0)
             dc_pts = float(info.get("dc_points", 0.0) or 0.0)
 
-            total_pts = round(
-                base_pts + bonus_pts + lh_pts + pr_pts + mn_pts + dc_pts, 1
-            )
+            total_pts = round(base_pts + bonus_pts + lh_pts + pr_pts + mn_pts + dc_pts, 1)
 
             will_protocol = (info.get("will_protocol_raw") or "").strip()
             will_opinion = (info.get("will_opinion") or "").strip()
 
-            # Фильтруем мусор из текста (кнопки и т.д.)
             trash_words = ["⏹️ Остановить", "⏹️", "❌ Отмена", "✅ Подтвердить"]
             if will_protocol in trash_words:
                 will_protocol = ""
             if will_opinion in trash_words:
                 will_opinion = ""
 
-            # Строка с именем и изменением Эло
             name_line = f"{slot_num}. <b>{name}</b>{elo_display} — <i>{role}</i> {status_text}"
             lines.append(name_line)
             lines.append(
@@ -449,7 +430,6 @@ async def build_protocol_text(
     _append_group("⚫ МАФИЯ (ЧЁРНЫЕ):", black_slots)
     _append_group("❓ БЕЗ КОМАНДЫ:", other_slots)
 
-    # Блок "Убийства" с расшифровкой завещаний
     if night_kills_order:
         while lines and lines[-1] == "":
             lines.pop()
@@ -464,7 +444,6 @@ async def build_protocol_text(
             op_text = (info.get("will_opinion") or "").strip()
             op_pts = float(info.get("will_opinion_points", 0.0) or 0.0)
 
-            # Фильтруем мусор
             if proto_text in ["⏹️ Остановить", "⏹️"]:
                 proto_text = "нет"
             if op_text in ["⏹️ Остановить", "⏹️"]:

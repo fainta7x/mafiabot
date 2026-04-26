@@ -137,23 +137,20 @@ def _get_elo_display(info: dict) -> Tuple[str, Tuple[int, int, int], str]:
     elo_change = info.get("elo_change")
     new_elo = info.get("new_elo")
 
-    # Если нет изменения и нет итогового — ничего не показываем
     if (elo_change is None or elo_change == 0) and not new_elo:
         return "", None, ""
 
-    # Текст изменения
     if elo_change and elo_change != 0:
         if elo_change > 0:
             change_text = f"+{elo_change}"
-            change_color = (46, 204, 113)  # зелёный
+            change_color = (46, 204, 113)
         else:
             change_text = f"{elo_change}"
-            change_color = (231, 76, 60)  # красный
+            change_color = (231, 76, 60)
     else:
         change_text = ""
         change_color = None
 
-    # Итоговое Эло
     if new_elo:
         total_elo = f"{new_elo}"
     else:
@@ -168,21 +165,20 @@ def create_endgame_pic_summary(
         evening_game_number: int,
         global_game_number: int,
         winner_label: str | None,
+        judge_name: str | None = None,  # <-- НОВЫЙ ПАРАМЕТР
 ) -> str:
     """
     Современный общий протокол игры.
     """
-    # ========== ФИЛЬТРУЕМ СЛОТЫ - оставляем только числовые ключи 1-10 ==========
+    # ========== ФИЛЬТРУЕМ СЛОТЫ ==========
     clean_slots = {}
     night_kills_order = []
 
     for key, value in slots.items():
-        # Сохраняем все числовые слоты от 1 до 10
         if isinstance(key, int) and 1 <= key <= 10:
             clean_slots[key] = value
         elif key == "_night_kills_order" and isinstance(value, list):
             night_kills_order = value
-        # Также проверяем строковые ключи, которые могут быть числами
         elif isinstance(key, str) and key.isdigit():
             num = int(key)
             if 1 <= num <= 10:
@@ -190,7 +186,6 @@ def create_endgame_pic_summary(
 
     slots = clean_slots
 
-    # ========== ФОЛБЭК: если night_kills_order пустой, собираем убитых сами ==========
     if not night_kills_order:
         for slot_num, info in slots.items():
             if isinstance(slot_num, int):
@@ -200,13 +195,8 @@ def create_endgame_pic_summary(
                 if not alive or kicked or "убит" in status_reason.lower() or "заголосован" in status_reason.lower():
                     night_kills_order.append(slot_num)
         night_kills_order.sort()
-        print(f"[PIC_DEBUG] Fallback night kills order (from dead players): {night_kills_order}")
-    # ========================================================================
 
     print(f"[PIC_DEBUG] Всего слотов получено: {len(slots)}")
-    for i in range(1, 11):
-        if i not in slots:
-            print(f"[PIC_DEBUG] Слот {i} отсутствует в данных!")
 
     # --- Подготовка данных по командам ---
     red_slots: List[Tuple[int, dict]] = []
@@ -231,11 +221,10 @@ def create_endgame_pic_summary(
     black_slots.sort(key=lambda x: x[0])
     other_slots.sort(key=lambda x: x[0])
 
-    # Базовый логический размер (до масштабирования)
+    # Базовый логический размер
     base_width = 1200
     base_height = 800
 
-    # Оценка высоты
     def count_group_items(group: List[Tuple[int, dict]]) -> int:
         return len(group)
 
@@ -249,10 +238,10 @@ def create_endgame_pic_summary(
     if night_kills_order:
         kills_block_height = 40 + len(night_kills_order) * 80
 
-    est_height = 260 + total_items * row_height + kills_block_height + 80
+    est_height = 300 + total_items * row_height + kills_block_height + 80
     base_height = max(base_height, est_height)
 
-    # --- Рисуем в 2x для антиалиасинга ---
+    # --- Рисуем в 2x ---
     scale = 2
     width = base_width * scale
     height = base_height * scale
@@ -263,7 +252,7 @@ def create_endgame_pic_summary(
     padding_x = int(70 * scale / 2) * 2
     y = int(40 * scale)
 
-    # Шрифты под масштаб (уменьшены для лучшего выравнивания)
+    # Шрифты
     font_title = _load_font(int(40 * scale / 2))
     font_subtitle = _load_font(int(24 * scale / 2))
     font_group = _load_font(int(26 * scale / 2))
@@ -342,6 +331,19 @@ def create_endgame_pic_summary(
     )
 
     y = res_y2 + int(10 * scale)
+
+    # ========== БЛОК СУДЬИ ==========
+    if judge_name:
+        judge_text = f"Судья: {judge_name}"
+        judge_w, judge_h = _text_size(draw, judge_text, font_subtitle)
+        draw.text(
+            (padding_x, y),
+            judge_text,
+            fill=(255, 255, 255),
+            font=font_subtitle,
+        )
+        y += judge_h + int(8 * scale)
+    # ================================
 
     # Подзаголовок с датой и номерами
     header_line_1 = f"Игра №{evening_game_number} • {game_date}"
@@ -544,10 +546,8 @@ def create_endgame_pic_summary(
             name_color_dead = (130, 130, 130)
             name_color = name_color_alive if alive else name_color_dead
 
-            # Базовый Y для всех элементов строки
             base_y = inner_top + int(4 * scale)
 
-            # Имя игрока
             draw.text(
                 (x_name_start, base_y),
                 name,
@@ -556,10 +556,8 @@ def create_endgame_pic_summary(
             )
             name_w, _ = _text_size(draw, name, font_name)
 
-            # Текущая позиция X
             current_x = x_name_start + name_w + int(6 * scale)
 
-            # Изменение Эло (+17) или (-15)
             if elo_change_text:
                 draw.text(
                     (current_x, base_y),
@@ -569,7 +567,6 @@ def create_endgame_pic_summary(
                 )
                 current_x += _text_size(draw, f"({elo_change_text})", font_elo)[0] + int(4 * scale)
 
-            # Итоговое Эло (→1517)
             if elo_total:
                 draw.text(
                     (current_x, base_y),
@@ -579,7 +576,6 @@ def create_endgame_pic_summary(
                 )
                 current_x += _text_size(draw, f"→{elo_total}", font_elo)[0] + int(8 * scale)
 
-            # Точка-разделитель
             dot_x = current_x + int(4 * scale)
             dot_y = base_y + int(4 * scale)
             dot_r = int(4 * scale)
@@ -597,7 +593,6 @@ def create_endgame_pic_summary(
                 outline=None,
             )
 
-            # Роль (капсом)
             role_x = dot_x + int(10 * scale)
             role_y = base_y
             role_color = (189, 195, 199) if alive else (120, 120, 120)
@@ -608,7 +603,6 @@ def create_endgame_pic_summary(
                 font=font_role,
             )
 
-            # Статус
             status_label, status_color = get_status_label(info)
             status_label_short = _shorten(status_label, max_len=26)
 
@@ -625,7 +619,7 @@ def create_endgame_pic_summary(
                 font=font_status,
             )
 
-            # Очки (правый блок)
+            # Очки
             base_pts = float(info.get("base_points", 0.0) or 0.0)
             bonus_pts = float(info.get("bonus_points", 0.0) or 0.0)
             lh_pts = float(info.get("lh_points", 0.0) or 0.0)
