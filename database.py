@@ -772,18 +772,22 @@ async def save_game_slots_history(game_date: str, slots: Union[Dict[int, dict], 
             slot.get("will_opinion", ""),
             1 if slot.get("alive", True) else 0,
             slot.get("status_reason", "Жив"),
+            slot.get("elo_change", 0),
+            slot.get("new_elo", 1500),
         ))
+
     if rows:
         async with get_db() as conn:
             await conn.executemany("""
                                    INSERT INTO game_slots_history (game_date, game_number, user_id, slot_num, role,
                                                                    team,
                                                                    base_points, bonus_points, lh_points,
-                                                                   will_protocol_points, will_opinion_points,
-                                                                   dc_points, kick, ppk, technical_fouls, pu,
-                                                                   will_protocol_raw, will_opinion,
-                                                                   alive, status_reason)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                                                   will_protocol_points, will_opinion_points, dc_points,
+                                                                   kick, ppk, technical_fouls, pu,
+                                                                   will_protocol_raw, will_opinion, alive,
+                                                                   status_reason,
+                                                                   elo_change, new_elo)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                    """, rows)
             await conn.commit()
 
@@ -1010,32 +1014,30 @@ async def get_game_by_id(game_id: int) -> Optional[Dict]:
 
 
 async def get_game_slots_by_date(game_date: str, game_number: int = None) -> Optional[Dict[int, dict]]:
-    """
-    Восстанавливает слоты игры из game_slots_history по дате игры.
-    Если передан game_number, возвращает слоты для конкретной игры.
-    """
     query = """
-            SELECT user_id,
-                   slot_num,
-                   role,
-                   team,
-                   base_points,
-                   bonus_points,
-                   lh_points,
-                   will_protocol_points,
-                   will_opinion_points,
-                   dc_points,
-                   kick,
-                   ppk,
-                   technical_fouls,
-                   pu,
-                   will_protocol_raw,
-                   will_opinion,
-                   alive,
-                   status_reason
-            FROM game_slots_history
-            WHERE game_date = ? \
-            """
+        SELECT user_id,
+               slot_num,
+               role,
+               team,
+               base_points,
+               bonus_points,
+               lh_points,
+               will_protocol_points,
+               will_opinion_points,
+               dc_points,
+               kick,
+               ppk,
+               technical_fouls,
+               pu,
+               will_protocol_raw,
+               will_opinion,
+               alive,
+               status_reason,
+               elo_change,
+               new_elo
+        FROM game_slots_history
+        WHERE game_date = ? 
+    """
     params = [game_date]
 
     if game_number is not None:
@@ -1058,7 +1060,7 @@ async def get_game_slots_by_date(game_date: str, game_number: int = None) -> Opt
          protocol_points, opinion_points, dc_points,
          kick, ppk, tech_fouls, pu,
          will_protocol_raw, will_opinion,
-         alive, status_reason) = row
+         alive, status_reason, elo_change, new_elo) = row
 
         nickname = None
         full_name = None
@@ -1100,6 +1102,8 @@ async def get_game_slots_by_date(game_date: str, game_number: int = None) -> Opt
             "kick": kick or 0,
             "ppk": ppk or 0,
             "technical_fouls": tech_fouls or 0,
+            "elo_change": elo_change,
+            "new_elo": new_elo,
         }
 
     return slots
@@ -1292,3 +1296,285 @@ async def init_db():
 
     await _ensure_columns()
     await add_fouls_column()  # <-- ДОБАВИТЬ ЭТУ СТРОКУ
+    await create_elo_table()
+
+
+async def get_players_rating(limit: int = 50) -> List[Dict]:
+    async with get_db() as conn:
+        async with conn.execute("""
+                                SELECT u.user_id,
+                                       u.full_name,
+                                       u.nickname,
+                                       COALESCE(SUM(s.base_points + s.bonus_points + s.lh_points +
+                                                    s.will_protocol_points + s.will_opinion_points + s.dc_points),
+                                                0)                                                                 AS total_points,
+                                       COUNT(DISTINCT s.game_number)                                               AS games_played,
+                                       COUNT(DISTINCT CASE WHEN s.base_points = 1 THEN s.game_number END)          AS games_won,
+                                       ROUND(AVG(s.base_points + s.bonus_points + s.lh_points +
+                                                 s.will_protocol_points + s.will_opinion_points + s.dc_points),
+                                             2)                                                                    AS avg_points,
+                                       SUM(CASE WHEN s.pu = 1 THEN 1 ELSE 0 END)                                   AS pu_count,
+                                       SUM(s.kick)                                                                 AS kicks,
+                                       SUM(s.ppk)                                                                  AS ppk,
+                                       SUM(s.technical_fouls)                                                      AS techfouls
+                                FROM game_slots_history s
+                                         LEFT JOIN users u ON s.user_id = u.user_id
+                                WHERE u.user_id IS NOT NULL
+                                GROUP BY u.user_id, u.full_name, u.nickname
+                                HAVING games_played > 0
+                                ORDER BY total_points DESC, games_won DESC
+                                LIMIT ?
+                                """, (limit,)) as cur:
+            rows = await cur.fetchall()
+
+    result = []
+    for i, row in enumerate(rows, 1):
+        result.append({
+            "place": i,
+            "user_id": row[0],
+            "full_name": row[1],
+            "nickname": row[2] or "ник не указан",
+            "total_points": round(row[3] or 0, 1),
+            "games_played": row[4] or 0,
+            "games_won": row[5] or 0,
+            "avg_points": row[6] or 0,
+            "pu_count": row[7] or 0,
+            "kicks": row[8] or 0,
+            "ppk": row[9] or 0,
+            "techfouls": row[10] or 0,
+        })
+    return result
+
+async def create_elo_table():
+    """Создаёт таблицу для хранения рейтинга Эло игроков"""
+    async with get_db() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS elo_ratings (
+                user_id INTEGER PRIMARY KEY,
+                elo INTEGER DEFAULT 1000,
+                games_played INTEGER DEFAULT 0,
+                games_won INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+        """)
+        await conn.commit()
+        print("[ELO] Table 'elo_ratings' created")
+
+
+async def get_elo(user_id: int) -> int:
+    async with get_db() as conn:
+        async with conn.execute("SELECT elo FROM elo_ratings WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 1500
+
+
+async def get_players_elo_rating(limit: int = 50) -> List[Dict]:
+    async with get_db() as conn:
+        async with conn.execute("""
+                                SELECT u.user_id,
+                                       u.nickname,
+                                       u.full_name,
+                                       e.elo,
+                                       e.games_played,
+                                       e.games_won
+                                FROM elo_ratings e
+                                         JOIN users u ON e.user_id = u.user_id
+                                WHERE e.games_played > 0
+                                ORDER BY e.elo DESC
+                                LIMIT ?
+                                """, (limit,)) as cur:
+            rows = await cur.fetchall()
+
+    result = []
+    for i, (user_id, nickname, full_name, elo, games_played, games_won) in enumerate(rows, 1):
+        result.append({
+            "place": i,
+            "user_id": user_id,
+            "nickname": nickname or full_name or "Неизвестный",
+            "elo": elo,
+            "games_played": games_played,
+            "games_won": games_won,
+        })
+    return result
+
+
+async def update_elo(user_id: int, delta: int):
+    """Обновляет Эло игрока"""
+    async with get_db() as conn:
+        async with conn.execute("SELECT 1 FROM elo_ratings WHERE user_id = ?", (user_id,)) as cur:
+            exists = await cur.fetchone()
+
+        if exists:
+            await conn.execute(
+                "UPDATE elo_ratings SET elo = elo + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                (delta, user_id)
+            )
+        else:
+            await conn.execute(
+                "INSERT INTO elo_ratings (user_id, elo) VALUES (?, ?)",
+                (user_id, STARTING_ELO + delta)
+            )
+        await conn.commit()
+
+
+async def get_players_elo_rating(limit: int = 50) -> List[Dict]:
+    async with get_db() as conn:
+        async with conn.execute("""
+                                SELECT u.user_id,
+                                       u.nickname,
+                                       u.full_name,
+                                       e.elo,
+                                       e.games_played,
+                                       e.games_won
+                                FROM elo_ratings e
+                                         JOIN users u ON e.user_id = u.user_id
+                                WHERE e.games_played > 0
+                                ORDER BY e.elo DESC
+                                LIMIT ?
+                                """, (limit,)) as cur:
+            rows = await cur.fetchall()
+
+    result = []
+    for i, (user_id, nickname, full_name, elo, games_played, games_won) in enumerate(rows, 1):
+        result.append({
+            "place": i,
+            "user_id": user_id,
+            "nickname": nickname or full_name or "Неизвестный",
+            "elo": elo,
+            "games_played": games_played,
+            "games_won": games_won,
+        })
+    return result
+
+
+async def update_player_stats(user_id: int, team: str, won: bool):
+    """Обновляет статистику игрока по ролям"""
+    async with get_db() as conn:
+        if team == "Красные":
+            await conn.execute(
+                "UPDATE users SET games_red = COALESCE(games_red, 0) + 1, "
+                "wins_red = COALESCE(wins_red, 0) + ? WHERE user_id = ?",
+                (1 if won else 0, user_id)
+            )
+        else:
+            await conn.execute(
+                "UPDATE users SET games_black = COALESCE(games_black, 0) + 1, "
+                "wins_black = COALESCE(wins_black, 0) + ? WHERE user_id = ?",
+                (1 if won else 0, user_id)
+            )
+        await conn.commit()
+
+
+async def update_player_statuses(user_id: int):
+    """Обновляет статусы опыта и скилла игрока на основе статистики"""
+
+    async with get_db() as conn:
+        async with conn.execute("""
+                                SELECT games_played,
+                                       games_won,
+                                       games_red,
+                                       wins_red,
+                                       games_black,
+                                       wins_black
+                                FROM users
+                                WHERE user_id = ?
+                                """, (user_id,)) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return
+
+            games_played = row[0] or 0
+            games_won = row[1] or 0
+            games_red = row[2] or 0
+            wins_red = row[3] or 0
+            games_black = row[4] or 0
+            wins_black = row[5] or 0
+
+        # 1. Уровень опыта
+        if games_played < 50:
+            exp_level = "🟢 Новичок"
+        elif games_played < 200:
+            exp_level = "🔵 Умеет играть"
+        elif games_played < 500:
+            exp_level = "🟠 Опытный"
+        else:
+            exp_level = "🔴 Ветеран"
+
+        # 2. Уровень скилла (ПРАВИЛЬНАЯ ФОРМУЛА)
+        if games_played > 0:
+            winrate = games_won / games_played * 100
+        else:
+            winrate = 0
+
+        if winrate >= 48:
+            skill_level = "🔥 Элитный"
+        elif winrate >= 45:
+            skill_level = "⭐ Высокий"
+        elif winrate >= 40:
+            skill_level = "📈 Средний"
+        else:
+            skill_level = "📉 Низкий"
+
+        # Винрейты по ролям
+        winrate_red = (wins_red / games_red * 100) if games_red > 0 else 0
+        winrate_black = (wins_black / games_black * 100) if games_black > 0 else 0
+
+        # Обновляем статусы
+        await conn.execute("""
+                           UPDATE users
+                           SET exp_level     = ?,
+                               skill_level   = ?,
+                               winrate_red   = ?,
+                               winrate_black = ?
+                           WHERE user_id = ?
+                           """, (exp_level, skill_level, round(winrate_red, 1), round(winrate_black, 1), user_id))
+        await conn.commit()
+
+
+async def get_player_full_stats(user_id: int) -> Optional[Dict]:
+    """Возвращает полную статистику игрока со статусами"""
+    async with get_db() as conn:
+        async with conn.execute("""
+                                SELECT full_name,
+                                       nickname,
+                                       debt,
+                                       last_visit,
+                                       COALESCE(elo, 1000) as elo,
+                                       exp_level,
+                                       skill_level,
+                                       games_played,
+                                       games_won,
+                                       winrate_red,
+                                       winrate_black,
+                                       games_red,
+                                       wins_red,
+                                       games_black,
+                                       wins_black
+                                FROM users
+                                WHERE user_id = ?
+                                """, (user_id,)) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+
+        # Получаем Эло из отдельной таблицы
+        elo = await get_elo(user_id)
+
+        return {
+            "full_name": row[0],
+            "nickname": row[1],
+            "debt": row[2],
+            "last_visit": row[3],
+            "elo": elo,
+            "exp_level": row[5] or "🟢 Новичок",
+            "skill_level": row[6] or "📉 Низкий",
+            "games_played": row[7] or 0,
+            "games_won": row[8] or 0,
+            "winrate_red": row[9] or 0,
+            "winrate_black": row[10] or 0,
+            "games_red": row[11] or 0,
+            "wins_red": row[12] or 0,
+            "games_black": row[13] or 0,
+            "wins_black": row[14] or 0,
+        }

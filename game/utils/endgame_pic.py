@@ -130,6 +130,38 @@ def _lerp_color(c1: Tuple[int, int, int], c2: Tuple[int, int, int], t: float) ->
     )
 
 
+def _get_elo_display(info: dict) -> Tuple[str, Tuple[int, int, int], str]:
+    """
+    Возвращает текст изменения Эло, цвет и итоговое Эло.
+    """
+    elo_change = info.get("elo_change")
+    new_elo = info.get("new_elo")
+
+    # Если нет изменения и нет итогового — ничего не показываем
+    if (elo_change is None or elo_change == 0) and not new_elo:
+        return "", None, ""
+
+    # Текст изменения
+    if elo_change and elo_change != 0:
+        if elo_change > 0:
+            change_text = f"+{elo_change}"
+            change_color = (46, 204, 113)  # зелёный
+        else:
+            change_text = f"{elo_change}"
+            change_color = (231, 76, 60)  # красный
+    else:
+        change_text = ""
+        change_color = None
+
+    # Итоговое Эло
+    if new_elo:
+        total_elo = f"{new_elo}"
+    else:
+        total_elo = ""
+
+    return change_text, change_color, total_elo
+
+
 def create_endgame_pic_summary(
         slots: Dict[Any, dict],
         game_date: str,
@@ -165,19 +197,16 @@ def create_endgame_pic_summary(
                 alive = info.get("alive", True)
                 kicked = info.get("kicked", False)
                 status_reason = info.get("status_reason", "")
-                # Игрок мёртв, если не alive, или kicked, или статус указывает на смерть
                 if not alive or kicked or "убит" in status_reason.lower() or "заголосован" in status_reason.lower():
                     night_kills_order.append(slot_num)
         night_kills_order.sort()
         print(f"[PIC_DEBUG] Fallback night kills order (from dead players): {night_kills_order}")
     # ========================================================================
 
-    # Если слотов меньше 10, добавляем недостающие для отладки
     print(f"[PIC_DEBUG] Всего слотов получено: {len(slots)}")
     for i in range(1, 11):
         if i not in slots:
             print(f"[PIC_DEBUG] Слот {i} отсутствует в данных!")
-    # ========== КОНЕЦ ФИЛЬТРАЦИИ ==========
 
     # --- Подготовка данных по командам ---
     red_slots: List[Tuple[int, dict]] = []
@@ -234,18 +263,20 @@ def create_endgame_pic_summary(
     padding_x = int(70 * scale / 2) * 2
     y = int(40 * scale)
 
-    # Шрифты под масштаб
+    # Шрифты под масштаб (уменьшены для лучшего выравнивания)
     font_title = _load_font(int(40 * scale / 2))
     font_subtitle = _load_font(int(24 * scale / 2))
     font_group = _load_font(int(26 * scale / 2))
-    font_name = _load_font(int(30 * scale / 2))
-    font_role = _load_font(int(20 * scale / 2))
+    font_name = _load_font(int(27 * scale / 2))
+    font_role = _load_font(int(18 * scale / 2))
     font_small = _load_font(int(18 * scale / 2))
-    font_status = _load_font(int(22 * scale / 2))
+    font_status = _load_font(int(18 * scale / 2))
     font_badge = _load_font(int(18 * scale / 2))
     font_total_big = _load_font(int(32 * scale / 2))
+    font_elo = _load_font(int(19 * scale / 2))
+    font_slot = _load_font(int(28 * scale / 2))
 
-    # --- Итог и цвет победителя (учитываем ППК) ---
+    # --- Итог и цвет победителя ---
     wl = (winner_label or "").lower()
 
     if "город" in wl:
@@ -347,13 +378,10 @@ def create_endgame_pic_summary(
     # Цвета бейджей
     plus_bg = (46, 125, 50)
     plus_fg = (236, 240, 241)
-
     zero_bg = (55, 71, 79)
     zero_fg = (189, 195, 199)
-
     minus_bg = (183, 28, 28)
     minus_fg = (248, 249, 249)
-
     pu_bg = (255, 193, 7)
     pu_fg = (33, 33, 33)
 
@@ -369,7 +397,6 @@ def create_endgame_pic_summary(
         if not group:
             return y_pos
 
-        # Функция статуса игрока + цвет
         def get_status_label(slot_info: dict) -> tuple[str, Tuple[int, int, int]]:
             alive = slot_info.get("alive", True)
             reason = (slot_info.get("status_reason") or "").strip()
@@ -400,7 +427,6 @@ def create_endgame_pic_summary(
                 return reason or "Убит", grey_passive
             if "фол" in r_low or "тех" in r_low:
                 return reason, red_dead
-
             return reason or "Мёртв", grey_neutral
 
         # Заголовок группы
@@ -435,6 +461,8 @@ def create_endgame_pic_summary(
             role_caps = (role or "").upper()
             alive = info.get("alive", True)
 
+            elo_change_text, elo_change_color, elo_total = _get_elo_display(info)
+
             accent, bg_soft = _role_color(role)
 
             if not alive:
@@ -449,7 +477,6 @@ def create_endgame_pic_summary(
                 max(bg_soft[1], 15),
                 max(bg_soft[2], 15),
             )
-
             outline_color = accent
 
             _draw_rounded_rect(
@@ -470,13 +497,12 @@ def create_endgame_pic_summary(
 
             # Номер слота
             slot_text = str(slot_num)
-            font_slot = _load_font(int(36 * scale / 2))
             slot_w, slot_h = _text_size(draw, slot_text, font_slot)
-            slot_badge_w = slot_w + int(16 * scale)
-            slot_badge_h = slot_h + int(10 * scale)
+            slot_badge_w = slot_w + int(14 * scale)
+            slot_badge_h = slot_h + int(8 * scale)
 
             slot_x1 = inner_left
-            slot_y1 = inner_top
+            slot_y1 = inner_top + int(4 * scale)
             slot_x2 = slot_x1 + slot_badge_w
             slot_y2 = slot_y1 + slot_badge_h
 
@@ -518,16 +544,44 @@ def create_endgame_pic_summary(
             name_color_dead = (130, 130, 130)
             name_color = name_color_alive if alive else name_color_dead
 
+            # Базовый Y для всех элементов строки
+            base_y = inner_top + int(4 * scale)
+
+            # Имя игрока
             draw.text(
-                (x_name_start, inner_top),
+                (x_name_start, base_y),
                 name,
                 fill=name_color,
                 font=font_name,
             )
             name_w, _ = _text_size(draw, name, font_name)
 
-            dot_x = x_name_start + name_w + int(10 * scale)
-            dot_y = inner_top + int(10 * scale)
+            # Текущая позиция X
+            current_x = x_name_start + name_w + int(6 * scale)
+
+            # Изменение Эло (+17) или (-15)
+            if elo_change_text:
+                draw.text(
+                    (current_x, base_y),
+                    f"({elo_change_text})",
+                    fill=elo_change_color,
+                    font=font_elo,
+                )
+                current_x += _text_size(draw, f"({elo_change_text})", font_elo)[0] + int(4 * scale)
+
+            # Итоговое Эло (→1517)
+            if elo_total:
+                draw.text(
+                    (current_x, base_y),
+                    f"→{elo_total}",
+                    fill=(255, 193, 7),
+                    font=font_elo,
+                )
+                current_x += _text_size(draw, f"→{elo_total}", font_elo)[0] + int(8 * scale)
+
+            # Точка-разделитель
+            dot_x = current_x + int(4 * scale)
+            dot_y = base_y + int(4 * scale)
             dot_r = int(4 * scale)
 
             if is_don:
@@ -543,8 +597,9 @@ def create_endgame_pic_summary(
                 outline=None,
             )
 
+            # Роль (капсом)
             role_x = dot_x + int(10 * scale)
-            role_y = inner_top + int(4 * scale)
+            role_y = base_y
             role_color = (189, 195, 199) if alive else (120, 120, 120)
             draw.text(
                 (role_x, role_y),
@@ -553,11 +608,12 @@ def create_endgame_pic_summary(
                 font=font_role,
             )
 
+            # Статус
             status_label, status_color = get_status_label(info)
             status_label_short = _shorten(status_label, max_len=26)
 
             status_x = role_x + _text_size(draw, role_caps, font_role)[0] + int(12 * scale)
-            status_y = inner_top + int(4 * scale)
+            status_y = base_y
 
             if not alive:
                 status_color = _lerp_color(status_color, (130, 130, 130), 0.7)
@@ -569,7 +625,7 @@ def create_endgame_pic_summary(
                 font=font_status,
             )
 
-            # Очки
+            # Очки (правый блок)
             base_pts = float(info.get("base_points", 0.0) or 0.0)
             bonus_pts = float(info.get("bonus_points", 0.0) or 0.0)
             lh_pts = float(info.get("lh_points", 0.0) or 0.0)
@@ -597,6 +653,7 @@ def create_endgame_pic_summary(
                 int(255 * 0.10),
             )
             sq_outline = accent
+
             _draw_rounded_rect(
                 draw,
                 sq_x1,

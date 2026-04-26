@@ -15,11 +15,174 @@ from game.admin_actions.common import save_slots, clear_game_state, ensure_judge
 router = Router()
 
 
+# ======================= НОВАЯ ЛОГИКА ЭЛО =======================
+
+STARTING_ELO = 1500
+K_FACTOR = 32
+BONUS_TO_ELO_RATIO = 10  # 0.1 доп. балла = 1 очко Эло
+MIN_TEAM_SIZE_FOR_CARRY = 2
+
+
+def expected_score(player_elo: float, opponent_elo: float) -> float:
+    """Ожидаемый результат по формуле Эло"""
+    return 1 / (1 + 10 ** ((opponent_elo - player_elo) / 400))
+
+
+def get_role_coefficient(team: str, is_win: bool) -> float:
+    """Ролевой коэффициент"""
+    if is_win:
+        return 1.2 if team == "Красные" else 0.9
+    else:
+        return 0.9 if team == "Красные" else 1.1
+
+
+def calculate_carry_modifier(player_elo: float, team_elos: list, is_win: bool) -> float:
+    """Carry-модификатор"""
+    if len(team_elos) < MIN_TEAM_SIZE_FOR_CARRY:
+        return 1.0
+
+    team_avg = sum(team_elos) / len(team_elos)
+    diff = player_elo - team_avg
+    normalized = min(1.0, max(-1.0, diff / 200))
+
+    if is_win:
+        if diff > 0:
+            bonus = normalized * 0.3
+            return 1 + bonus
+        else:
+            penalty = abs(normalized) * 0.2
+            return 1 - penalty
+    else:
+        if diff > 0:
+            penalty = normalized * 0.4
+            return 1 - penalty
+        else:
+            relief = abs(normalized) * 0.2
+            return 1 + relief
+
+
+def calculate_bonus_elo_impact(slot: dict) -> float:
+    """Рассчитывает влияние доп. баллов на Эло"""
+    total_bonus = (
+        slot.get("bonus_points", 0) +
+        slot.get("lh_points", 0) +
+        slot.get("will_protocol_points", 0) +
+        slot.get("will_opinion_points", 0) +
+        slot.get("dc_points", 0)
+    )
+    return total_bonus * BONUS_TO_ELO_RATIO
+
+
+async def calculate_all_elo_changes(slots: dict, winning_team: str) -> dict:
+    """
+    Рассчитывает новое Эло для всех игроков в игре
+    Возвращает словарь {slot_num: {"old_elo": int, "new_elo": int, "total_delta": int}}
+    """
+    # Собираем игроков с их текущим Эло
+    players = []
+    for slot_num, slot in slots.items():
+        if slot.get("user_id") and slot.get("user_id") > 0:
+            user_id = slot["user_id"]
+            current_elo = await database.get_elo(user_id)
+            players.append({
+                "slot_num": slot_num,
+                "user_id": user_id,
+                "team": slot.get("team"),
+                "current_elo": current_elo,
+                "bonus_points": slot.get("bonus_points", 0),
+                "lh_points": slot.get("lh_points", 0),
+                "will_protocol_points": slot.get("will_protocol_points", 0),
+                "will_opinion_points": slot.get("will_opinion_points", 0),
+                "dc_points": slot.get("dc_points", 0),
+            })
+
+    if len(players) < 4:
+        return {}
+
+    # Разделяем по командам
+    red_players = [p for p in players if p["team"] == "Красные"]
+    black_players = [p for p in players if p["team"] == "Чёрные"]
+
+    if not red_players or not black_players:
+        return {}
+
+    red_elos = [p["current_elo"] for p in red_players]
+    black_elos = [p["current_elo"] for p in black_players]
+
+    result = {}
+
+    for player in players:
+        is_win = (player["team"] == winning_team)
+        old_elo = player["current_elo"]
+
+        # Соперники
+        opponent_elos = black_elos if player["team"] == "Красные" else red_elos
+        opponent_avg = sum(opponent_elos) / len(opponent_elos)
+
+        # Ожидаемый результат
+        expected = expected_score(old_elo, opponent_avg)
+        actual = 1.0 if is_win else 0.0
+
+        # Базовая дельта
+        raw_delta = K_FACTOR * (actual - expected)
+
+        # Модификаторы
+        role_mod = get_role_coefficient(player["team"], is_win)
+        team_elos = red_elos if player["team"] == "Красные" else black_elos
+        carry_mod = calculate_carry_modifier(old_elo, team_elos, is_win)
+
+        # Игровая дельта
+        game_delta = int(round(raw_delta * role_mod * carry_mod))
+
+        # Бонусная дельта (доп. баллы)
+        bonus_impact = calculate_bonus_elo_impact(player)
+        bonus_delta = int(round(bonus_impact))
+
+        # Общая дельта
+        total_delta = game_delta + bonus_delta
+        new_elo = old_elo + total_delta
+
+        result[player["slot_num"]] = {
+            "old_elo": old_elo,
+            "new_elo": new_elo,
+            "game_delta": game_delta,
+            "bonus_delta": bonus_delta,
+            "total_delta": total_delta,
+            "is_win": is_win
+        }
+
+    return result
+
+
+async def update_elo_after_game(slots: dict, winning_team: str):
+    """
+    Обновляет Эло всех игроков после завершения игры
+    """
+    print("[ELO] Начинаем расчёт Эло...")
+
+    elo_changes = await calculate_all_elo_changes(slots, winning_team)
+
+    for slot_num, change in elo_changes.items():
+        user_id = slots[slot_num].get("user_id")
+        if not user_id:
+            continue
+
+        await database.update_elo(user_id, change["total_delta"])
+        await database.update_player_stats(user_id, slots[slot_num].get("team"), change["is_win"])
+        await database.update_player_statuses(user_id)
+
+        # Сохраняем изменение Эло и новое Эло в историю слота
+        slots[slot_num]["elo_change"] = change["total_delta"]
+        slots[slot_num]["new_elo"] = change["new_elo"]  # Правильное новое Эло
+
+        print(f"[ELO] {slots[slot_num].get('nickname')}: {change['old_elo']} → {change['new_elo']} ({change['total_delta']:+d})")
+
+
 # ========== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ УСТАНОВКИ КОМАНДЫ ПО РОЛИ ==========
 def _fix_team_by_role(slot: dict) -> None:
     """Принудительно устанавливает команду по роли, если team не задана."""
     if slot.get("team"):
-        return  # уже есть команда
+        return
 
     role = slot.get("role", "")
     role_lower = role.lower()
@@ -38,8 +201,7 @@ def _fix_all_teams_by_role(slots: dict) -> None:
         old_team = slot.get("team")
         _fix_team_by_role(slot)
         if old_team != slot.get("team"):
-            print(
-                f"[DEBUG] Слот {slot_num}: команда изменена с '{old_team}' на '{slot.get('team')}' (роль: {slot.get('role')})")
+            print(f"[DEBUG] Слот {slot_num}: команда изменена с '{old_team}' на '{slot.get('team')}' (роль: {slot.get('role')})")
 
 
 def _debug_print_slots(slots: dict, title: str = "DEBUG") -> None:
@@ -50,8 +212,7 @@ def _debug_print_slots(slots: dict, title: str = "DEBUG") -> None:
         print(f"  Слот {slot_num}: роль={info.get('role')}, команда={info.get('team')}, имя={info.get('nickname')}")
 
 
-# ========== КОНЕЦ ВСПОМОГАТЕЛЬНОЙ ФУНКЦИИ ==========
-
+# ========== ОСНОВНЫЕ ХЕНДЛЕРЫ ==========
 
 @router.callback_query(F.data.startswith("game_end:"))
 async def handle_game_finish(callback: CallbackQuery, state: FSMContext):
@@ -251,7 +412,6 @@ async def score_finish(callback: CallbackQuery, state: FSMContext):
     if not await ensure_judge_cb(callback):
         return
 
-    # Проверяем, не была ли уже сохранена эта игра (защита от двойного нажатия)
     data = await state.get_data()
     game_saved = data.get("game_saved", False)
 
@@ -259,23 +419,19 @@ async def score_finish(callback: CallbackQuery, state: FSMContext):
         await callback.answer("⚠️ Игра уже сохранена! Не нажимайте дважды.", show_alert=True)
         return
 
-    # Отмечаем, что игра начинает сохраняться
     await state.update_data(game_saved=True)
 
     slots = data.get("slots") or {}
     winning_team = data.get("winning_team")
     winner_label = data.get("winner_label")
 
-    # Отладка: показываем слоты ДО исправления
     _debug_print_slots(slots, "СЛОТЫ ДО ИСПРАВЛЕНИЯ")
 
-    # ========== ИСПРАВЛЕНИЕ: принудительная установка команды по роли ==========
     _fix_all_teams_by_role(slots)
-    # ========================================================================
 
-    # Отладка: показываем слоты ПОСЛЕ исправления
     _debug_print_slots(slots, "СЛОТЫ ПОСЛЕ ИСПРАВЛЕНИЯ")
 
+    # Расчёт ЛХ для ПУ
     for slot in slots.values():
         if not slot.get("pu_mark") or slot.get("team") != "Красные":
             slot["lh_points"] = float(slot.get("lh_points") or 0.0)
@@ -284,22 +440,21 @@ async def score_finish(callback: CallbackQuery, state: FSMContext):
         correct = sum(1 for n in suspects if slots.get(n, {}).get("team") == "Чёрные")
         slot["lh_points"] = [0.0, 0.1, 0.3, 0.6][correct] if correct <= 3 else 0.0
 
+    # Сохраняем результаты в БД (без Эло пока)
     await database.apply_game_result_to_users(slots, winning_team)
     game_date = await database.get_current_game_date() or "-"
     evening_num = await database.get_current_game_number() or 1
     global_num = await database.get_current_global_game_number() or 1
 
-    # Отладка: показываем, что передаётся в build_protocol_text
-    print(f"\n[DEBUG] Передаём в build_protocol_text: {len(slots)} слотов")
-    for slot_num in sorted([k for k in slots.keys() if isinstance(k, int)]):
-        info = slots[slot_num]
-        print(f"  Слот {slot_num}: команда={info.get('team')}, роль={info.get('role')}")
+    # ========== РАСЧЁТ ЭЛО (ДО сохранения истории, чтобы new_elo было в слотах) ==========
+    await update_elo_after_game(slots, winning_team)
+    # ====================================================================================
 
+    # Сохраняем в историю (уже с elo_change и new_elo)
     protocol_body = await build_protocol_text(slots, updated=False, winner_label=winner_label)
     await database.save_game_history(game_date, winner_label, protocol_body, evening_num, global_num)
     await database.save_game_slots_history(game_date, slots, game_number=evening_num)
 
-    # Сохраняем порядок убийств
     night_kills_order = data.get("night_kills_order", [])
     if night_kills_order:
         await database.save_night_kills_order(game_date, evening_num, night_kills_order)
@@ -324,7 +479,6 @@ async def score_cancel(callback: CallbackQuery, state: FSMContext):
         return
     data = await state.get_data()
     slots = data.get("slots") or {}
-    # Сбрасываем флаг сохранения при отмене
     await state.update_data(game_saved=False)
     await state.set_state(GameCreateState.editing_slots)
     try:

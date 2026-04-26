@@ -20,6 +20,8 @@ from database import (
     update_game_outcome,
     get_night_kills_order,
     save_night_kills_order,
+    get_elo,
+    get_players_elo_rating,
 )
 from keyboards import games_list_kb
 from pic_profile import create_profile_pic
@@ -104,11 +106,13 @@ def _build_slot_menu_kb(game_id: int, slot_num: int) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="📋 ПР (баллы)", callback_data=f"editgame_field:protocol:{game_id}:{slot_num}"),
-            InlineKeyboardButton(text="📋 ПР (текст)", callback_data=f"editgame_field:protocol_text:{game_id}:{slot_num}"),
+            InlineKeyboardButton(text="📋 ПР (текст)",
+                                 callback_data=f"editgame_field:protocol_text:{game_id}:{slot_num}"),
         ],
         [
             InlineKeyboardButton(text="💬 МН (баллы)", callback_data=f"editgame_field:opinion:{game_id}:{slot_num}"),
-            InlineKeyboardButton(text="💬 МН (текст)", callback_data=f"editgame_field:opinion_text:{game_id}:{slot_num}"),
+            InlineKeyboardButton(text="💬 МН (текст)",
+                                 callback_data=f"editgame_field:opinion_text:{game_id}:{slot_num}"),
         ],
         [
             InlineKeyboardButton(text="👑 ПУ (вкл/выкл)", callback_data=f"editgame_field:pu:{game_id}:{slot_num}"),
@@ -200,8 +204,15 @@ async def show_user_stats(message: types.Message):
     try:
         stats_data = await stats_utils.build_user_stats_data(user_id)
         nickname = stats_data.get("nickname") or message.from_user.full_name
+
+        elo = await get_elo(user_id)
+        stats_data["elo"] = elo
+
         img_path = create_profile_pic(nickname, stats_data)
         text = await stats_utils.build_user_stats_text(user_id)
+
+        text = f"🏆 **Рейтинг Эло: {elo}**\n\n{text}"
+
         doc = FSInputFile(img_path)
         timestamp = int(time.time())
         await message.answer_document(document=doc, caption=f"{text}\n\n🕐 Обновлено: {timestamp}",
@@ -210,6 +221,8 @@ async def show_user_stats(message: types.Message):
     except Exception as e:
         print(f"[PROFILE][ERROR] {e}")
         text = await stats_utils.build_user_stats_text(user_id)
+        elo = await get_elo(user_id)
+        text = f"🏆 **Рейтинг Эло: {elo}**\n\n{text}"
         await message.answer(text)
 
 
@@ -256,6 +269,130 @@ async def show_my_games(message: types.Message):
         buttons_data.append((game_id, title, game_number or 0))
     kb = games_list_kb(buttons_data, prefix="mygames")
     await message.answer("Выбери игру:", reply_markup=kb)
+
+
+# ======================= НОВЫЕ ФУНКЦИИ ДЛЯ НОМИНАЦИЙ =======================
+
+async def get_mvp() -> tuple:
+    """
+    Возвращает (имя_игрока, сумма_доп_баллов) для MVP
+    MVP — игрок с максимальной суммой доп. баллов за все игры
+    """
+    async with database.get_db() as conn:
+        async with conn.execute("""
+                                SELECT u.nickname,
+                                       u.full_name,
+                                       COALESCE(SUM(s.bonus_points + s.lh_points + s.will_protocol_points +
+                                                    s.will_opinion_points + s.dc_points), 0) as total_bonus
+                                FROM game_slots_history s
+                                         JOIN users u ON s.user_id = u.user_id
+                                GROUP BY s.user_id
+                                HAVING total_bonus != 0
+                                ORDER BY total_bonus DESC
+                                LIMIT 1
+                                """) as cur:
+            row = await cur.fetchone()
+            if row:
+                name = row[0] or row[1] or "Неизвестный"
+                return name, round(row[2], 1)
+    return None, 0
+
+
+async def get_best_by_role(role_name: str) -> tuple:
+    """
+    Возвращает (имя_игрока, сумма_доп_баллов) для лучшего игрока по роли
+    Используется bonus_points (Доп)
+    """
+    async with database.get_db() as conn:
+        async with conn.execute("""
+                                SELECT u.nickname,
+                                       u.full_name,
+                                       COALESCE(SUM(s.bonus_points), 0) as total_bonus
+                                FROM game_slots_history s
+                                         JOIN users u ON s.user_id = u.user_id
+                                WHERE s.role = ?
+                                GROUP BY s.user_id
+                                HAVING total_bonus != 0
+                                ORDER BY total_bonus DESC
+                                LIMIT 1
+                                """, (role_name,)) as cur:
+            row = await cur.fetchone()
+            if row:
+                name = row[0] or row[1] or "Неизвестный"
+                return name, round(row[2], 1)
+    return None, 0
+
+
+# ======================= РЕЙТИНГ С НОМИНАЦИЯМИ =======================
+
+@router.message(F.text == "🏆 Рейтинг")
+async def show_rating(message: types.Message):
+    """Показывает общий рейтинг игроков по Эло + MVP + лучшие по ролям"""
+    rating = await get_players_elo_rating(limit=30)
+
+    if not rating:
+        await message.answer("📊 Пока нет данных для рейтинга Эло.")
+        return
+
+    rating = [p for p in rating if p["games_played"] > 0]
+
+    if not rating:
+        await message.answer("📊 Пока нет игроков, сыгравших хотя бы одну игру.")
+        return
+
+    text = "🏆 **РЕЙТИНГ ЭЛО**\n\n"
+    text += "Рейтинг рассчитывается по формуле:\n"
+    text += "• Победа над сильным соперником даёт больше очков\n"
+    text += "• Доп. баллы (ЛХ, ПР, МН) влияют на рейтинг\n"
+    text += "• Учитывается сила команды (carry-эффект)\n\n"
+
+    # Топ-10 по Эло
+    for p in rating[:10]:
+        if p["place"] == 1:
+            medal = "🥇"
+        elif p["place"] == 2:
+            medal = "🥈"
+        elif p["place"] == 3:
+            medal = "🥉"
+        else:
+            medal = f"{p['place']}."
+
+        name = p["nickname"] or "Неизвестный"
+        winrate = round(p["games_won"] / p["games_played"] * 100, 1) if p["games_played"] > 0 else 0
+
+        text += f"{medal} **{name}** — **{p['elo']}** очков\n"
+        text += f"   🎮 Игр: {p['games_played']} | 🏆 Побед: {p['games_won']} ({winrate}%)\n\n"
+
+    # ========== MVP ==========
+    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    text += "🏅 **MVP (лучший по доп. баллам)**\n\n"
+
+    mvp_name, mvp_bonus = await get_mvp()
+    if mvp_name:
+        text += f"🏆 **{mvp_name}** — **{mvp_bonus:.1f}** доп. баллов\n\n"
+    else:
+        text += "📊 Нет данных для MVP\n\n"
+
+    # ========== ЛУЧШИЕ ПО РОЛЯМ ==========
+    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    text += "🎭 **Лучшие по ролям (Доп)**\n\n"
+
+    # Роли в порядке: Мирный, Шериф, Мафия, Дон
+    roles = [
+        ("Мирный", "👤"),
+        ("Шериф", "🕵️"),
+        ("Мафия", "🔪"),
+        ("Дон", "👑"),
+    ]
+
+    for role_name, icon in roles:
+        best_name, best_bonus = await get_best_by_role(role_name)
+        if best_name:
+            text += f"{icon} **{role_name}**: {best_name} — **{best_bonus:.1f}** доп.\n"
+        else:
+            text += f"{icon} **{role_name}**: нет данных\n"
+
+    await message.answer(text, parse_mode="Markdown")
 
 
 # ======================= ПРОТОКОЛ ИГРЫ + КАРТИНКА =======================
@@ -329,9 +466,10 @@ async def _send_protocol(message_or_callback, game_id: int, winner_label: str = 
 @router.callback_query(F.data.startswith(("allgames:", "mygames:")))
 async def show_game_protocol(callback: types.CallbackQuery, state: FSMContext):
     try:
-        prefix, game_id_str, game_number_str = callback.data.split(":", 2)
+        prefix, game_id_str = callback.data.split(":", 1)
         game_id = int(game_id_str)
-    except Exception:
+    except Exception as e:
+        print(f"[GAME_PROTOCOL][ERROR] Parse error: {e}")
         await callback.answer("Некорректные данные игры.", show_alert=True)
         return
 
@@ -459,7 +597,6 @@ async def editgame_show_protocol(callback: types.CallbackQuery, state: FSMContex
         await callback.answer("Нет слотов игры.", show_alert=True)
         return
 
-    # ПРИМЕНЯЕМ ВРЕМЕННЫЕ ИЗМЕНЕНИЯ
     data = await state.get_data()
     temp_slots = data.get("temp_slots", {})
     print(f"[DEBUG] temp_slots: {temp_slots}")
@@ -473,7 +610,6 @@ async def editgame_show_protocol(callback: types.CallbackQuery, state: FSMContex
     if temp_winner:
         winner_label = temp_winner
 
-    # Собираем только "Убит ночью"
     night_kills_order = []
     for slot_num, info in slots.items():
         if isinstance(slot_num, int):
@@ -691,8 +827,6 @@ async def editgame_set_outcome(callback: types.CallbackQuery, state: FSMContext)
     )
 
 
-# ======================= СОХРАНЕНИЕ И ОБНОВЛЕНИЕ ПРОТОКОЛА =======================
-
 @router.callback_query(F.data.startswith("editgame_regenerate:"))
 async def editgame_regenerate(callback: types.CallbackQuery, state: FSMContext):
     try:
@@ -718,12 +852,9 @@ async def editgame_regenerate(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Нет слотов игры.", show_alert=True)
         return
 
-    # Применяем временные изменения к слотам и сохраняем в БД
     for slot_num, changes in temp_slots.items():
         if slot_num in slots:
             update_params = {}
-
-            # Обрабатываем все возможные поля
             for key, value in changes.items():
                 if key == "alive":
                     update_params["alive"] = 1 if value else 0
@@ -770,17 +901,14 @@ async def editgame_regenerate(callback: types.CallbackQuery, state: FSMContext):
                 await update_game_slot(date_str, slot_num, **update_params)
                 print(f"[DEBUG] Saved slot {slot_num}: {update_params}")
 
-    # Сохраняем исход, если изменён
     if temp_winner:
         await update_game_outcome(game_id, temp_winner)
 
-    # Обновляем локальные слоты для генерации протокола
     for slot_num, changes in temp_slots.items():
         if slot_num in slots:
             for key, value in changes.items():
                 slots[slot_num][key] = value
 
-    # Собираем только "Убит ночью"
     night_kills_order = []
     for slot_num, info in slots.items():
         if isinstance(slot_num, int):
@@ -805,8 +933,6 @@ async def editgame_regenerate(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer("✅ Изменения сохранены! Протокол обновлён.")
     await _send_protocol(callback, game_id, final_winner)
 
-
-# ======================= ОТМЕНА ИЗМЕНЕНИЙ =======================
 
 @router.callback_query(F.data.startswith("editgame_cancel_confirm:"))
 async def editgame_cancel_confirm(callback: types.CallbackQuery, state: FSMContext):
@@ -842,8 +968,6 @@ async def editgame_close(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("✅ Редактор закрыт.")
     await callback.answer()
 
-
-# ======================= ОБРАБОТЧИКИ ПОЛЕЙ РЕДАКТИРОВАНИЯ =======================
 
 def _apply_change_to_temp_slots(state_data: dict, slot_num: int, changes: dict):
     temp_slots = state_data.get("temp_slots", {})
@@ -888,11 +1012,9 @@ async def editgame_field_entry(callback: types.CallbackQuery, state: FSMContext)
         return
 
     if field == "fouls":
-        # Перенаправляем на меню фолов
         await editgame_fouls_menu(callback, state)
         return
 
-    # Для всех остальных полей
     await state.set_state(EditGameState.waiting_for_value)
     await state.update_data(has_changes=True, current_field=field, current_slot=slot_num, current_game_id=game_id)
 
@@ -978,7 +1100,8 @@ async def editgame_protocol_text_entry(callback: types.CallbackQuery, state: FSM
         current_game_id=game_id
     )
 
-    await callback.message.answer("📋 Введи текст протокола (ПР):\nПример: 3 6 7 красные, 1 4 чёрные\nИли 'нет' для очистки")
+    await callback.message.answer(
+        "📋 Введи текст протокола (ПР):\nПример: 3 6 7 красные, 1 4 чёрные\nИли 'нет' для очистки")
     await callback.answer()
 
 
@@ -1073,7 +1196,6 @@ async def editgame_field_apply(message: types.Message, state: FSMContext):
             await state.clear()
             return
 
-        # Сохраняем изменения во временные слоты
         state_data = await state.get_data()
         temp_slots = state_data.get("temp_slots", {})
         if slot_num not in temp_slots:
@@ -1095,7 +1217,6 @@ async def editgame_field_apply(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # Отправляем новое сообщение с меню слота
     date_str = game.get("game_date") or "-"
     game_number = game.get("game_number") or 0
     base_slots = await get_game_slots_by_date(date_str, game_number=game_number)
@@ -1146,14 +1267,10 @@ async def editgame_field_apply(message: types.Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("editgame_field:fouls:"))
 async def editgame_fouls_menu(callback: types.CallbackQuery, state: FSMContext):
-    """Меню редактирования фолов и техфолов"""
     try:
-        # Получаем данные из callback
         parts = callback.data.split(":")
-        # Формат: editgame_field:fouls:game_id:slot_num
         game_id = int(parts[2])
         slot_num = int(parts[3])
-
     except Exception as e:
         print(f"[FOULS] Parse error: {e}")
         await callback.answer("Некорректные данные.", show_alert=True)
@@ -1172,7 +1289,6 @@ async def editgame_fouls_menu(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Слот не найден.", show_alert=True)
         return
 
-    # Применяем временные изменения
     data = await state.get_data()
     temp_slots = data.get("temp_slots", {})
     slot = slots[slot_num].copy()
@@ -1217,16 +1333,11 @@ async def editgame_fouls_menu(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("editgame_set_fouls:"))
 async def editgame_set_fouls(callback: types.CallbackQuery, state: FSMContext):
-    """Устанавливает фолы/техфолы игроку"""
     try:
-        # Формат: editgame_set_fouls:game_id:slot_num:action
         parts = callback.data.split(":")
         game_id = int(parts[1])
         slot_num = int(parts[2])
         action = parts[3]
-
-        print(f"[FOULS] game_id={game_id}, slot_num={slot_num}, action={action}")
-
     except Exception as e:
         print(f"[FOULS] Parse error: {e}")
         await callback.answer("Некорректные данные.", show_alert=True)
@@ -1334,13 +1445,41 @@ async def editgame_set_fouls(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer(f"Ошибка: {e}", show_alert=True)
         return
 
-    # Сохраняем изменения во временные слоты
     if slot_num not in temp_slots:
         temp_slots[slot_num] = {}
     temp_slots[slot_num].update(changes)
     await state.update_data(temp_slots=temp_slots, has_changes=True)
 
     await callback.answer(message_text, show_alert=False)
-
-    # Обновляем меню фолов
     await editgame_fouls_menu(callback, state)
+
+
+@router.message(F.text == "🏆 Рейтинг (старый)")
+async def show_old_rating(message: types.Message):
+    rating = await database.get_players_rating(limit=30)
+
+    if not rating:
+        await message.answer("📊 Пока нет данных для рейтинга.")
+        return
+
+    text = "🏆 **ОБЩИЙ РЕЙТИНГ ИГРОКОВ (по баллам)**\n\n"
+
+    for p in rating[:15]:
+        if p["place"] == 1:
+            medal = "🥇"
+        elif p["place"] == 2:
+            medal = "🥈"
+        elif p["place"] == 3:
+            medal = "🥉"
+        else:
+            medal = f"{p['place']}."
+
+        name = p["nickname"] or p["full_name"]
+        winrate = round(p["games_won"] / p["games_played"] * 100, 1) if p["games_played"] > 0 else 0
+
+        text += f"{medal} **{name}**\n"
+        text += f"   🎮 Игр: {p['games_played']} | 🏆 Побед: {p['games_won']} ({winrate}%)\n"
+        text += f"   ⭐ Средний балл: {p['avg_points']:.2f}\n"
+        text += f"   💰 Всего баллов: {p['total_points']:.1f}\n\n"
+
+    await message.answer(text, parse_mode="Markdown")

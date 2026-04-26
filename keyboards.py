@@ -26,12 +26,13 @@ def main_menu():
         "📊 Статистика",
         "📜 Мои игры",
         "📜 Все игры",
+        "🏆 Рейтинг",
         "📋 РЕГЛАМЕНТ",
     ]
     for btn in buttons:
         builder.button(text=btn)
 
-    builder.adjust(3, 2, 2)
+    builder.adjust(3, 2, 2, 2)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
@@ -49,13 +50,14 @@ def main_menu_judge():
         "📊 Статистика",
         "📜 Мои игры",
         "📜 Все игры",
+        "🏆 Рейтинг",
         "⚖ Панель судьи",
         "📋 РЕГЛАМЕНТ",
     ]
     for btn in buttons:
         builder.button(text=btn)
 
-    builder.adjust(3, 3, 2)
+    builder.adjust(3, 3, 2, 2)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
@@ -74,13 +76,14 @@ def main_menu_admin():
         "📊 Статистика",
         "📜 Мои игры",
         "📜 Все игры",
+        "🏆 Рейтинг",
         "🛠 Админ-панель",
         "📋 РЕГЛАМЕНТ",
     ]
     for btn in buttons:
         builder.button(text=btn)
 
-    builder.adjust(3, 3, 2)
+    builder.adjust(3, 3, 2, 2)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
@@ -207,7 +210,8 @@ def games_list_kb(games: list, prefix: str):
     for game_id, title, number in games:
         if len(title) > 35:
             title = title[:32] + "..."
-        builder.button(text=title, callback_data=f"{prefix}:{game_id}:{number}")
+        # Убираем number из callback, оставляем только game_id
+        builder.button(text=title, callback_data=f"{prefix}:{game_id}")
     builder.adjust(1)
     return builder.as_markup()
 

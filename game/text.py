@@ -118,6 +118,23 @@ def _safe_get_tech_fouls_display(info: dict) -> str:
     return ""
 
 
+def _get_elo_display(info: dict) -> str:
+    """
+    Возвращает строку с изменением Эло для отображения в протоколе.
+    Формат: (+13) или (-17) с использованием tg-spoiler для цвета.
+    """
+    elo_change = info.get("elo_change")
+    if elo_change is None:
+        return ""
+
+    if elo_change > 0:
+        return f" <tg-spoiler>(+{elo_change})</tg-spoiler>"
+    elif elo_change < 0:
+        return f" <tg-spoiler>({elo_change})</tg-spoiler>"
+    else:
+        return " <tg-spoiler>(0)</tg-spoiler>"
+
+
 # =========================================================
 
 
@@ -266,6 +283,7 @@ async def build_protocol_text(
     """
     Собирает ТОЛЬКО ТЕЛО протокола игры из slots (HTML).
     ДОБАВЛЕНО: в шапке выводится Судья (берётся из БД), если сохранён.
+    ДОБАВЛЕНО: отображение изменения Эло для каждого игрока (+13) или (-17).
     """
     lines: list[str] = []
 
@@ -331,6 +349,10 @@ async def build_protocol_text(
         for slot_num, info in items:
             raw_name = info.get("nickname") or info.get("full_name") or "Без имени"
             name = _trim_name(raw_name)
+
+            # Получаем отображение изменения Эло
+            elo_display = _get_elo_display(info)
+
             role = info.get("role", "Не задана")
             alive = info.get("alive", True)
             status_reason = info.get("status_reason", "Жив")
@@ -403,7 +425,9 @@ async def build_protocol_text(
             if will_opinion in trash_words:
                 will_opinion = ""
 
-            lines.append(f"{slot_num}. <b>{name}</b> — <i>{role}</i> {status_text}")
+            # Строка с именем и изменением Эло
+            name_line = f"{slot_num}. <b>{name}</b>{elo_display} — <i>{role}</i> {status_text}"
+            lines.append(name_line)
             lines.append(
                 f"   {prefix}"
                 f"Игра: {base_pts} | "

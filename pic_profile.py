@@ -68,8 +68,8 @@ def _fmt_float(value, digits: int = 2) -> str:
 
 
 def create_profile_pic(player_nickname: str, stats: Dict) -> str:
-    # Чуть увеличиваем базовую высоту, чтобы всё влезло
-    base_w, base_h = 1200, 1000
+    # Увеличиваем базовую высоту, чтобы влезло Эло
+    base_w, base_h = 1200, 1050
     scale = 2
     w, h = base_w * scale, base_h * scale
 
@@ -84,6 +84,8 @@ def create_profile_pic(player_nickname: str, stats: Dict) -> str:
     font_text = fs(24)
     font_big = fs(38)
     font_role = fs(28)
+    font_elo = fs(44)  # шрифт для Эло
+    font_elo_label = fs(28)  # шрифт для надписи "ELO РЕЙТИНГ"
 
     padding = int(70 * scale / 2) * 2
     y = int(40 * scale)
@@ -100,6 +102,48 @@ def create_profile_pic(player_nickname: str, stats: Dict) -> str:
     card_l, card_r = padding, w - padding
     draw.line([(card_l, y), (card_r, y)], fill=(44, 62, 80), width=int(1 * scale))
     y += int(16 * scale)
+
+    # ========== НОВЫЙ БЛОК: ELO РЕЙТИНГ ==========
+    elo = stats.get("elo", 1500)
+
+    # Рисуем плашку Эло в верхней части
+    elo_box_h = int(60 * scale)
+    elo_box_y = y
+    draw.rounded_rectangle(
+        (card_l, elo_box_y, card_r, elo_box_y + elo_box_h),
+        radius=int(12 * scale),
+        outline=(255, 193, 7),
+        fill=(30, 30, 40),
+        width=int(2 * scale),
+    )
+
+    # Определяем цвет для Эло в зависимости от значения
+    if elo >= 1700:
+        elo_color = (255, 215, 0)  # золотой
+    elif elo >= 1550:
+        elo_color = (192, 192, 192)  # серебряный
+    elif elo >= 1400:
+        elo_color = (205, 127, 50)  # бронзовый
+    else:
+        elo_color = (150, 150, 150)  # серый
+
+    # Рисуем надпись "ELO РЕЙТИНГ" и значение
+    draw.text(
+        (card_l + int(20 * scale), elo_box_y + int(18 * scale)),
+        "ELO РЕЙТИНГ",
+        fill=elo_color,
+        font=font_elo_label,
+    )
+    draw.text(
+        (card_r - int(20 * scale), elo_box_y + int(12 * scale)),
+        str(elo),
+        fill=elo_color,
+        font=font_elo,
+        anchor="ra",
+    )
+
+    y = elo_box_y + elo_box_h + int(16 * scale)
+    # ========== КОНЕЦ БЛОКА ЭЛО ==========
 
     # Общая статистика (левый блок)
     left_x1, left_x2 = card_l, card_l + int((card_r - card_l) * 0.48)
@@ -352,12 +396,12 @@ def create_profile_pic(player_nickname: str, stats: Dict) -> str:
             ry += _text_size(draw, line, font=font_text)[1] + int(2 * scale)
 
     # Сохраняем файл
-    safe_nick = "".join(ch for ch in (nick or "player") if ch.isalnum() or ch in "._-")
+    safe_nick = "".join(ch for ch in (player_nickname or "player") if ch.isalnum() or ch in "._-")
     ts = int(time.time())
     filename = f"profile_{safe_nick}_{ts}.png"
     out_path = os.path.join(TEMP_DIR, filename)
     img.save(out_path, "PNG", optimize=True)
 
-    _cleanup_old_profile_files(nick, keep=5)
+    _cleanup_old_profile_files(player_nickname, keep=5)
 
     return out_path
