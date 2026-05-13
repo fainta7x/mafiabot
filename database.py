@@ -713,26 +713,33 @@ async def archive_current_evening():
         await conn.commit()
 
 
-async def get_evenings_list(limit: int = 10) -> list:
+async def get_evening_players(date_str: str) -> list:
     async with get_db() as conn:
-        async with conn.execute(
-            "SELECT date, COUNT(*) FROM evening_history "
-            "WHERE status IN ('Вовремя', 'Позже') "
-            "GROUP BY date ORDER BY date ASC LIMIT ?",  # <-- ASC или DESC?
-            (limit,)
-        ) as cur:
+        # Берем список людей, которые были записаны на этот вечер
+        async with conn.execute("""
+            SELECT user_id, full_name, nickname, status, amount 
+            FROM evening_history 
+            WHERE date = ?
+        """, (date_str,)) as cur:
             return await cur.fetchall()
 
 
-async def get_evening_players(date_str: str) -> list:
-    """Возвращает ТОЛЬКО пришедших игроков (Вовремя или Позже) за указанную дату"""
+async def get_evenings_list(limit: int = 10) -> list:
+    # Список имен и ников организаторов для исключения
+    orgs = ("Чагин", "Матроскина", "Стаут", "Гриня", "Evgeniy Chagin", "Екатерина", "Di D", "Григорий Подколзин")
+
     async with get_db() as conn:
-        async with conn.execute(
-            "SELECT full_name, nickname, status, amount FROM evening_history "
-            "WHERE date = ? AND status IN ('Вовремя', 'Позже') "
-            "ORDER BY full_name",
-            (date_str,)
-        ) as cur:
+        # Считаем только тех, кто пришел И кто не является организатором
+        async with conn.execute(f"""
+            SELECT date, COUNT(*) 
+            FROM evening_history 
+            WHERE status IN ('Вовремя', 'Позже')
+              AND nickname NOT IN {orgs}
+              AND full_name NOT IN {orgs}
+            GROUP BY date 
+            ORDER BY id DESC 
+            LIMIT ?
+        """, (limit,)) as cur:
             return await cur.fetchall()
 
 

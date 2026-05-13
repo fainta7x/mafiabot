@@ -702,26 +702,85 @@ async def admin_history_menu(message: types.Message):
     await message.answer("📚 Выберите вечер, чтобы посмотреть список игроков:", reply_markup=kb)
 
 
+# --- 1. Обработчик кнопки "Назад" (возвращает к списку вечеров) ---
+@router.callback_query(F.data == "admin_evenings_history")
+async def back_to_evenings_list(call: types.CallbackQuery):
+    evenings = await database.get_evenings_list(limit=10)
+    if not evenings:
+        await call.answer("История вечеров пуста.")
+        return
+    # Используем клавиатуру из твоего файла keyboards.py
+    kb = keyboards.evenings_history_kb(evenings)
+    await call.message.edit_text("📚 Выберите вечер, чтобы посмотреть список игроков:", reply_markup=kb)
+    await call.answer()
+
+
+# --- 2. Сам отчет по конкретному вечеру ---
 @router.callback_query(F.data.startswith("hist_"))
-async def admin_history_detail(call: CallbackQuery):
+async def admin_history_detail(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id):
         await call.answer("Недостаточно прав.", show_alert=True)
         return
+
     date_str = call.data.replace("hist_", "")
     players = await database.get_evening_players(date_str)
+
     if not players:
-        await call.answer("Для этого вечера нет записей.", show_alert=True)
+        await call.answer(f"Данных за {date_str} нет.", show_alert=True)
         return
-    text = f"📅 Вечер {date_str}\n\n"
-    total_amount = 0
-    for i, (full_name, nickname, status, amount) in enumerate(players, 1):
-        nick_part = nickname if nickname not in (None, "", "Не установлен") else "ник не указан"
-        amount_text = f"{amount}₽" if amount and amount > 0 else "—"
-        text += f"{i}. {full_name} ({nick_part}) — _{status}_ — оплатил: {amount_text}\n"
-        if amount:
-            total_amount += amount
-    text += f"\n💰 Сумма за вечер: {total_amount}₽"
-    await call.message.answer(text, parse_mode="Markdown")
+
+    # Список для исключения
+    EXCLUDED = ["Чагин", "Матроскина", "Стаут", "Гриня", "Evgeniy Chagin", "Екатерина", "Di D", "Григорий Подколзин"]
+
+    # Достаем протоколы
+    all_protocols = []
+    async with database.get_db() as conn:
+        async with conn.execute(
+                "SELECT protocol_text FROM game_history WHERE game_date LIKE ?",
+                (f"%{date_str}%",)
+        ) as cur:
+            rows = await cur.fetchall()
+            all_protocols = [r[0] for r in rows if r[0]]
+
+    text = f"📅 *Финансовый отчет за {date_str}*\n\n"
+    total_evening_sum = 0
+    count_index = 1
+
+    for p in players:
+        full_name = p[1]
+        nickname = p[2]
+        status = p[3]
+
+        # УСЛОВИЕ ИСКЛЮЧЕНИЯ: если человек в списке оргов или нажал "Не идёт" — пропускаем
+        if status == "Не идёт" or nickname in EXCLUDED or full_name in EXCLUDED:
+            continue
+
+        # Определяем никнейм для вывода
+        display_name = nickname if nickname and str(nickname).strip() not in ["", "None", "Не установлен"] else "Гость"
+
+        # Считаем игры
+        games_count = 0
+        for proto in all_protocols:
+            if (full_name and str(full_name) in proto) or (nickname and str(nickname) in proto):
+                games_count += 1
+
+        if games_count == 0 and status in ["Вовремя", "Позже"]:
+            games_count = 1
+
+        cost = 400 if games_count >= 4 else (games_count * 100)
+        total_evening_sum += cost
+
+        text += f"{count_index}. {display_name} — {games_count} игр — {cost}₽\n"
+        count_index += 1
+
+    text += f"\n💰 *ИТОГО К ОПЛАТЕ: {total_evening_sum}₽*"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"📊 Итого со всех: {total_evening_sum}₽", callback_data="none")
+    builder.button(text="🔙 Назад", callback_data="admin_evenings_history")
+    builder.adjust(1)
+
+    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=builder.as_markup())
     await call.answer()
 
 
