@@ -5,10 +5,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import config
 import keyboards
-import database  # важно!
+import database
 
 router = Router()
-bot: Bot | None = None  # сюда положим экземпляр из main
+bot: Bot | None = None
 
 
 def setup_payment_handlers(bot_instance: Bot):
@@ -62,20 +62,21 @@ async def to_admin(call: CallbackQuery):
         nick_part = f"Ник: {nickname}" if nickname else "Ник: не указан"
         user_part = f" (@{username})" if username else ""
 
+        # ОТКЛЮЧАЕМ MARKDOWN - убираем ** и ``
         text = (
-            "🔔 **Запрос оплаты!**\n"
+            "🔔 Запрос оплаты!\n"
             f"Игрок: {full_name}{user_part}\n"
             f"{nick_part}\n"
-            f"ID: `{u_id}`"
+            f"ID: {u_id}"
         )
 
-        # Отправляем ПЕРВОМУ админу из списка (или всем?)
+        # Отправляем ПЕРВОМУ админу из списка
         if config.ADMIN_IDS:
             await bot.send_message(
-                config.ADMIN_IDS[0],  # берём первого админа
+                config.ADMIN_IDS[0],
                 text,
                 reply_markup=keyboards.admin_pay_kb(u_id),
-                parse_mode="Markdown"
+                parse_mode=None  # <-- ОТКЛЮЧАЕМ MARKDOWN
             )
         await call.answer("Запрос отправлен администратору!", show_alert=True)
         await call.message.edit_reply_markup(reply_markup=None)
@@ -118,11 +119,11 @@ async def confirm_payment(callback: CallbackQuery):
 
         await callback.answer("✅ Оплата подтверждена!", show_alert=True)
 
-        # Редактируем сообщение админа
+        # Редактируем сообщение админа (БЕЗ Markdown)
         try:
             await callback.message.edit_text(
-                callback.message.text + "\n\n✅ **Оплата подтверждена**",
-                parse_mode="Markdown"
+                callback.message.text + "\n\n✅ Оплата подтверждена",
+                parse_mode=None
             )
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
@@ -156,11 +157,11 @@ async def decline_payment(callback: CallbackQuery):
 
         await callback.answer("❌ Оплата отклонена", show_alert=True)
 
-        # Редактируем сообщение админа
+        # Редактируем сообщение админа (БЕЗ Markdown)
         try:
             await callback.message.edit_text(
-                callback.message.text + "\n\n❌ **Оплата отклонена**",
-                parse_mode="Markdown"
+                callback.message.text + "\n\n❌ Оплата отклонена",
+                parse_mode=None
             )
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:

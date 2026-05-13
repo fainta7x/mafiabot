@@ -93,7 +93,7 @@ async def nominate_start(message: types.Message, state: FSMContext):
 
 
 @router.callback_query(GameCreateState.nominate_select, F.data.startswith("nominate_toggle_"))
-async def nominate_toggle(callback: types.CallbackQuery, state: FSMContext):
+async def nominate_toggle(callback: CallbackQuery, state: FSMContext):
     slot_num = int(callback.data.split("_")[2])
 
     data = await state.get_data()
@@ -106,15 +106,27 @@ async def nominate_toggle(callback: types.CallbackQuery, state: FSMContext):
 
     if slot_num in nominated:
         nominated.remove(slot_num)
-        await callback.answer(f"❌ Игрок {slot_num} убран из списка")
+        action_text = f"❌ Игрок {slot_num} убран из списка"
     else:
         nominated.append(slot_num)
-        await callback.answer(f"✅ Игрок {slot_num} добавлен в список")
+        action_text = f"✅ Игрок {slot_num} добавлен в список"
 
     await state.update_data(nominated_list=nominated)
 
     alive_slots = {k: v for k, v in slots.items() if v.get("alive", True)}
-    await callback.message.edit_reply_markup(reply_markup=keyboards.nominate_select_kb(alive_slots, nominated))
+
+    # ПРОВЕРКА: обновляем клавиатуру только если она изменилась
+    new_markup = keyboards.nominate_select_kb(alive_slots, nominated)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=new_markup)
+        await callback.answer(action_text)
+    except Exception as e:
+        if "message is not modified" in str(e):
+            # Клавиатура не изменилась — просто отвечаем на callback
+            await callback.answer(action_text)
+        else:
+            raise
 
 
 @router.callback_query(GameCreateState.nominate_select, F.data == "nominate_confirm")

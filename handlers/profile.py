@@ -1,13 +1,15 @@
 import os
 import time
 import re
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple
+from collections import defaultdict
 
 from aiogram import Router, F, types
 from aiogram.enums import ParseMode
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import stats_utils
 import database
@@ -57,6 +59,8 @@ def _build_game_edit_kb(game_id: int, has_changes: bool = False) -> InlineKeyboa
     buttons.append([InlineKeyboardButton(text="🏆 Редактировать исход", callback_data=f"editgame_outcome:{game_id}")])
     buttons.append([InlineKeyboardButton(text="📋 Показать актуальный протокол",
                                          callback_data=f"editgame_show_protocol:{game_id}")])
+    buttons.append([InlineKeyboardButton(text="✏️ Изменить номер/дату", callback_data=f"editgame_metadata:{game_id}")])
+    buttons.append([InlineKeyboardButton(text="🗑 Удалить игру", callback_data=f"editgame_delete_confirm:{game_id}")])
 
     if has_changes:
         buttons.append([InlineKeyboardButton(text="🔄 Сохранить и обновить протокол",
@@ -95,7 +99,6 @@ def _build_players_edit_kb(game_id: int, slots: Dict[int, dict]) -> InlineKeyboa
 
 
 def _build_slot_menu_kb(game_id: int, slot_num: int) -> InlineKeyboardMarkup:
-    """Меню редактирования одного слота."""
     kb = [
         [
             InlineKeyboardButton(text="🎭 Роль", callback_data=f"editgame_field:role:{game_id}:{slot_num}"),
@@ -196,8 +199,59 @@ def _build_cancel_confirm_kb(game_id: int) -> InlineKeyboardMarkup:
 class EditGameState(StatesGroup):
     waiting_for_value = State()
 
+class EditGameMetadataState(StatesGroup):
+    waiting_for_new_number = State()
+    waiting_for_new_date = State()
 
-# ======================= Профиль / списки игр =======================
+
+# ======================= НОВЫЕ ФУНКЦИИ ДЛЯ НАВИГАЦИИ ПО ИГРАМ =======================
+
+async def get_all_game_dates() -> List[Tuple[str, int]]:
+    """Возвращает список дат, в которые были игры, и количество игр в эту дату"""
+    async with database.get_db() as conn:
+        async with conn.execute("""
+            SELECT game_date, COUNT(*) as games_count
+            FROM game_history
+            GROUP BY game_date
+            ORDER BY 
+                CASE 
+                    WHEN LENGTH(game_date) = 5 THEN substr(game_date, 4, 2) || substr(game_date, 1, 2)
+                    ELSE substr(game_date, 7, 4) || substr(game_date, 4, 2) || substr(game_date, 1, 2)
+                END ASC
+        """) as cur:
+            return await cur.fetchall()
+
+
+def get_games_by_date_kb(dates: List[Tuple[str, int]], prefix: str) -> InlineKeyboardMarkup:
+    """Клавиатура для выбора даты"""
+    builder = []
+    for date_str, count in dates:
+        builder.append([InlineKeyboardButton(
+            text=f"📅 {date_str} ({count} игр)",
+            callback_data=f"{prefix}_date:{date_str}"
+        )])
+    builder.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_games_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=builder)
+
+
+def get_games_by_date_inline_kb(games: List[Dict], date_str: str, prefix: str) -> InlineKeyboardMarkup:
+    """Клавиатура для выбора игры из конкретной даты"""
+    builder = []
+    for game in games:
+        game_id = game["id"]
+        game_number = game.get("game_number", "?")
+        winner = game.get("winner_label", "")
+        winner_icon = "🏙" if "город" in winner.lower() else "💀" if "мафи" in winner.lower() else "⚠️"
+        builder.append([InlineKeyboardButton(
+            text=f"🎮 №{game_number} {winner_icon}",
+            callback_data=f"{prefix}_game:{game_id}"
+        )])
+    builder.append([InlineKeyboardButton(text="◀️ Назад к датам", callback_data=f"{prefix}_back_to_dates")])
+    builder.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="close_games")])
+    return InlineKeyboardMarkup(inline_keyboard=builder)
+
+
+# ======================= ОСНОВНЫЕ ХЕНДЛЕРЫ =======================
 
 @router.message(F.text == "📊 Статистика")
 async def show_user_stats(message: types.Message):
@@ -227,67 +281,379 @@ async def show_user_stats(message: types.Message):
         await message.answer(text)
 
 
-@router.message(F.text == "📜 Все игры")
-async def show_all_games(message: types.Message):
-    games = await get_last_games(limit=10)
-    if not games:
-        await message.answer("Пока нет завершённых игр.")
-        return
-    buttons_data = []
-    for g in games:
-        game_id = g["id"]
-        date_str = g.get("game_date") or ""
-        game_number = g.get("game_number")
-        global_game_number = g.get("global_game_number")
-        title = f"Игра №{game_number}" if game_number else "Игра"
-        if date_str:
-            title += f" ({date_str})"
-        if global_game_number:
-            title += f" — №{global_game_number} по истории"
-        buttons_data.append((game_id, title, game_number or 0))
-    kb = games_list_kb(buttons_data, prefix="allgames")
-    await message.answer("Выбери игру:", reply_markup=kb)
+# ======================= ВСЕ ИГРЫ (НОВАЯ ЛОГИКА) =======================
 
+@router.message(F.text == "📜 Все игры")
+async def show_all_games_dates(message: types.Message):
+    """Показывает список дат, в которые были игры"""
+    dates = await get_all_game_dates()
+    if not dates:
+        await message.answer("📭 Пока нет завершённых игр.")
+        return
+
+    kb = get_games_by_date_kb(dates, "allgames")
+    await message.answer("📅 **Выберите дату,** чтобы посмотреть игры этого вечера:", reply_markup=kb,
+                         parse_mode=ParseMode.MARKDOWN)
+
+
+@router.callback_query(F.data.startswith("allgames_date:"))
+async def show_games_by_date(callback: types.CallbackQuery):
+    """Показывает игры за выбранную дату"""
+    date_str = callback.data.split(":", 1)[1]
+
+    # Получаем игры за эту дату
+    async with database.get_db() as conn:
+        async with conn.execute("""
+                                SELECT id, game_date, game_number, winner_label
+                                FROM game_history
+                                WHERE game_date = ?
+                                ORDER BY game_number
+                                """, (date_str,)) as cur:
+            games = await cur.fetchall()
+
+    games_list = [{"id": g[0], "game_date": g[1], "game_number": g[2], "winner_label": g[3]} for g in games]
+
+    if not games_list:
+        await callback.answer("Нет игр за эту дату", show_alert=True)
+        return
+
+    kb = get_games_by_date_inline_kb(games_list, date_str, "allgames")
+    await callback.message.edit_text(
+        f"📅 **Игры за {date_str}:**\n\nВыберите игру для просмотра протокола:",
+        reply_markup=kb,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("allgames_game:"))
+async def show_game_by_id(callback: types.CallbackQuery):
+    """Показывает протокол выбранной игры"""
+    game_id = int(callback.data.split(":", 1)[1])
+
+    game = await get_game_by_id(game_id)
+    if not game:
+        await callback.answer("Игра не найдена", show_alert=True)
+        return
+
+    date_str = game.get("game_date") or "-"
+    winner_label = game.get("winner_label") or "Результат не указан"
+    game_number = game.get("game_number")
+    global_game_number = game.get("global_game_number") or 0
+    judge_id = game.get("judge_id")
+
+    # Получаем имя судьи
+    judge_name = None
+    if judge_id:
+        user_info = await get_user_by_id(judge_id)
+        if user_info:
+            _, full_name, username, nickname = user_info
+            judge_name = nickname or full_name or username
+
+    # Получаем слоты
+    slots = await get_game_slots_by_date(date_str, game_number=game_number)
+    if not slots:
+        await callback.answer("Нет слотов игры", show_alert=True)
+        return
+
+    night_kills_order = await get_night_kills_order(date_str, game_number or 0)
+    filtered_order = []
+    for slot_num in night_kills_order:
+        if slot_num in slots:
+            status_reason = slots[slot_num].get("status_reason", "")
+            if "убит" in status_reason.lower() and "заголосован" not in status_reason.lower():
+                filtered_order.append(slot_num)
+    slots["_night_kills_order"] = filtered_order
+
+    from game.text import build_protocol_text
+    protocol_body = await build_protocol_text(slots, winner_label=winner_label)
+
+    # Строим шапку
+    header = f"📑 Протокол игры №{game_number} ({date_str}): {winner_label}"
+    if global_game_number:
+        header += f" — №{global_game_number} по общей истории"
+
+    if judge_name:
+        full_text = f"{header}\n\n<b>Судья:</b> {judge_name}\n\n{protocol_body}"
+    else:
+        full_text = f"{header}\n\n{protocol_body}"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Редактировать игру", callback_data=f"editgame_menu:{game_id}")],
+        [InlineKeyboardButton(text="◀️ Назад к дате", callback_data=f"allgames_date:{date_str}")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_games")]
+    ])
+
+    timestamp = int(time.time())
+
+    try:
+        img_path = create_endgame_pic_summary(
+            slots=slots, game_date=date_str,
+            evening_game_number=game_number or 0,
+            global_game_number=global_game_number or 0,
+            winner_label=winner_label,
+            judge_name=judge_name,
+        )
+        doc = FSInputFile(img_path)
+
+        # Отправляем новое сообщение (не редактируем старое)
+        await callback.message.answer_document(document=doc, caption=None)
+        await callback.message.answer(
+            f"{full_text}\n\n🕐 Обновлено: {timestamp}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+        _cleanup_old_files("endgame_summary_", keep=10)
+    except Exception as e:
+        print(f"[GAME_PROTOCOL][ERROR] {e}")
+        await callback.message.answer(
+            f"{full_text}\n\n🕐 Обновлено: {timestamp}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+
+    await callback.answer()
+
+
+# ======================= МОИ ИГРЫ (НОВАЯ ЛОГИКА) =======================
 
 @router.message(F.text == "📜 Мои игры")
-async def show_my_games(message: types.Message):
+async def show_my_games_dates(message: types.Message):
+    """Показывает список дат, в которые пользователь играл"""
     user_id = message.from_user.id
-    games = await get_user_games(user_id=user_id, limit=10)
-    if not games:
-        await message.answer("Пока нет игр с твоим участием.")
+
+    async with database.get_db() as conn:
+        async with conn.execute("""
+                                SELECT DISTINCT g.game_date, COUNT(*) as games_count
+                                FROM game_history g
+                                         JOIN game_slots_history s
+                                              ON g.game_date = s.game_date AND g.game_number = s.game_number
+                                WHERE s.user_id = ?
+                                GROUP BY g.game_date
+                                ORDER BY g.game_date DESC
+                                """, (user_id,)) as cur:
+            dates = await cur.fetchall()
+
+    if not dates:
+        await message.answer("📭 У вас пока нет сыгранных игр.")
         return
-    buttons_data = []
-    for g in games:
-        game_id = g["id"]
-        date_str = g.get("game_date") or ""
-        game_number = g.get("game_number")
-        global_game_number = g.get("global_game_number")
-        title = f"Игра №{game_number}" if game_number else "Игра"
-        if date_str:
-            title += f" ({date_str})"
-        if global_game_number:
-            title += f" — №{global_game_number} по истории"
-        buttons_data.append((game_id, title, game_number or 0))
-    kb = games_list_kb(buttons_data, prefix="mygames")
-    await message.answer("Выбери игру:", reply_markup=kb)
+
+    kb = get_games_by_date_kb(dates, "mygames")
+    await message.answer("📅 **Выберите дату,** чтобы посмотреть ваши игры в этот вечер:", reply_markup=kb,
+                         parse_mode=ParseMode.MARKDOWN)
 
 
-# ======================= НОВЫЕ ФУНКЦИИ ДЛЯ НОМИНАЦИЙ =======================
+@router.callback_query(F.data.startswith("mygames_date:"))
+async def show_my_games_by_date(callback: types.CallbackQuery):
+    """Показывает игры пользователя за выбранную дату"""
+    date_str = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+
+    async with database.get_db() as conn:
+        async with conn.execute("""
+                                SELECT DISTINCT g.id, g.game_date, g.game_number, g.winner_label
+                                FROM game_history g
+                                         JOIN game_slots_history s
+                                              ON g.game_date = s.game_date AND g.game_number = s.game_number
+                                WHERE s.user_id = ?
+                                  AND g.game_date = ?
+                                ORDER BY g.game_number
+                                """, (user_id, date_str)) as cur:
+            games = await cur.fetchall()
+
+    games_list = [{"id": g[0], "game_date": g[1], "game_number": g[2], "winner_label": g[3]} for g in games]
+
+    if not games_list:
+        await callback.answer("Нет ваших игр за эту дату", show_alert=True)
+        return
+
+    kb = get_games_by_date_inline_kb(games_list, date_str, "mygames")
+    await callback.message.edit_text(
+        f"📅 **Ваши игры за {date_str}:**\n\nВыберите игру для просмотра протокола:",
+        reply_markup=kb,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("mygames_game:"))
+async def show_my_game_by_id(callback: types.CallbackQuery):
+    """Показывает протокол выбранной игры пользователя"""
+    game_id = int(callback.data.split(":", 1)[1])
+
+    game = await get_game_by_id(game_id)
+    if not game:
+        await callback.answer("Игра не найдена", show_alert=True)
+        return
+
+    date_str = game.get("game_date") or "-"
+    winner_label = game.get("winner_label") or "Результат не указан"
+    game_number = game.get("game_number")
+    global_game_number = game.get("global_game_number") or 0
+    judge_id = game.get("judge_id")
+
+    judge_name = None
+    if judge_id:
+        user_info = await get_user_by_id(judge_id)
+        if user_info:
+            _, full_name, username, nickname = user_info
+            judge_name = nickname or full_name or username
+
+    slots = await get_game_slots_by_date(date_str, game_number=game_number)
+    if not slots:
+        await callback.answer("Нет слотов игры", show_alert=True)
+        return
+
+    night_kills_order = await get_night_kills_order(date_str, game_number or 0)
+    filtered_order = []
+    for slot_num in night_kills_order:
+        if slot_num in slots:
+            status_reason = slots[slot_num].get("status_reason", "")
+            if "убит" in status_reason.lower() and "заголосован" not in status_reason.lower():
+                filtered_order.append(slot_num)
+    slots["_night_kills_order"] = filtered_order
+
+    from game.text import build_protocol_text
+    protocol_body = await build_protocol_text(slots, winner_label=winner_label)
+
+    header = f"📑 Протокол игры №{game_number} ({date_str}): {winner_label}"
+    if global_game_number:
+        header += f" — №{global_game_number} по общей истории"
+
+    if judge_name:
+        full_text = f"{header}\n\n<b>Судья:</b> {judge_name}\n\n{protocol_body}"
+    else:
+        full_text = f"{header}\n\n{protocol_body}"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к дате", callback_data=f"mygames_date:{date_str}")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_games")]
+    ])
+
+    timestamp = int(time.time())
+
+    try:
+        img_path = create_endgame_pic_summary(
+            slots=slots, game_date=date_str,
+            evening_game_number=game_number or 0,
+            global_game_number=global_game_number or 0,
+            winner_label=winner_label,
+            judge_name=judge_name,
+        )
+        doc = FSInputFile(img_path)
+
+        await callback.message.answer_document(document=doc, caption=None)
+        await callback.message.answer(
+            f"{full_text}\n\n🕐 Обновлено: {timestamp}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+        _cleanup_old_files("endgame_summary_", keep=10)
+    except Exception as e:
+        print(f"[GAME_PROTOCOL][ERROR] {e}")
+        await callback.message.answer(
+            f"{full_text}\n\n🕐 Обновлено: {timestamp}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_games_menu")
+async def back_to_games_menu(callback: types.CallbackQuery):
+    """Возврат к списку дат"""
+    dates = await get_all_game_dates()
+    if not dates:
+        await callback.message.edit_text("📭 Пока нет завершённых игр.")
+        await callback.answer()
+        return
+
+    kb = get_games_by_date_kb(dates, "allgames")
+    try:
+        await callback.message.edit_text(
+            "📅 **Выберите дату,** чтобы посмотреть игры этого вечера:",
+            reply_markup=kb,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception:
+        # Игнорируем ошибку "message is not modified"
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "close_games")
+async def close_games(callback: types.CallbackQuery):
+    """Закрывает окно с играми"""
+    await callback.message.delete()
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("allgames_back_to_dates"))
+async def allgames_back_to_dates(callback: types.CallbackQuery):
+    """Возврат к списку дат из allgames"""
+    dates = await get_all_game_dates()
+    if not dates:
+        await callback.message.edit_text("📭 Пока нет завершённых игр.")
+        await callback.answer()
+        return
+
+    kb = get_games_by_date_kb(dates, "allgames")
+    await callback.message.edit_text(
+        "📅 **Выберите дату,** чтобы посмотреть игры этого вечера:",
+        reply_markup=kb,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("mygames_back_to_dates"))
+async def mygames_back_to_dates(callback: types.CallbackQuery):
+    """Возврат к списку дат из mygames"""
+    user_id = callback.from_user.id
+
+    async with database.get_db() as conn:
+        async with conn.execute("""
+                                SELECT DISTINCT g.game_date, COUNT(*) as games_count
+                                FROM game_history g
+                                         JOIN game_slots_history s
+                                              ON g.game_date = s.game_date AND g.game_number = s.game_number
+                                WHERE s.user_id = ?
+                                GROUP BY g.game_date
+                                ORDER BY g.game_date DESC
+                                """, (user_id,)) as cur:
+            dates = await cur.fetchall()
+
+    if not dates:
+        await callback.message.edit_text("📭 У вас пока нет сыгранных игр.")
+        await callback.answer()
+        return
+
+    kb = get_games_by_date_kb(dates, "mygames")
+    await callback.message.edit_text(
+        "📅 **Выберите дату,** чтобы посмотреть ваши игры в этот вечер:",
+        reply_markup=kb,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
+
+# ======================= ОСТАЛЬНЫЕ ФУНКЦИИ (MVP, РЕЙТИНГ, РЕДАКТИРОВАНИЕ) =======================
 
 async def get_mvp() -> tuple:
     async with database.get_db() as conn:
         async with conn.execute("""
-            SELECT u.nickname,
-                   u.full_name,
-                   COALESCE(SUM(s.bonus_points + s.lh_points + s.will_protocol_points +
-                                s.will_opinion_points + s.dc_points), 0) as total_bonus
-            FROM game_slots_history s
-            JOIN users u ON s.user_id = u.user_id
-            GROUP BY s.user_id
-            HAVING total_bonus > 0
-            ORDER BY total_bonus DESC
-            LIMIT 1
-        """) as cur:
+                                SELECT u.nickname,
+                                       u.full_name,
+                                       COALESCE(SUM(s.bonus_points + s.lh_points + s.will_protocol_points +
+                                                    s.will_opinion_points + s.dc_points), 0) as total_bonus
+                                FROM game_slots_history s
+                                         JOIN users u ON s.user_id = u.user_id
+                                GROUP BY s.user_id
+                                HAVING total_bonus > 0
+                                ORDER BY total_bonus DESC
+                                LIMIT 1
+                                """) as cur:
             row = await cur.fetchone()
             if row:
                 name = row[0] or row[1] or "Неизвестный"
@@ -298,17 +664,17 @@ async def get_mvp() -> tuple:
 async def get_best_by_role(role_name: str) -> tuple:
     async with database.get_db() as conn:
         async with conn.execute("""
-            SELECT u.nickname,
-                   u.full_name,
-                   COALESCE(SUM(s.bonus_points), 0) as total_bonus
-            FROM game_slots_history s
-            JOIN users u ON s.user_id = u.user_id
-            WHERE s.role = ?
-            GROUP BY s.user_id
-            HAVING total_bonus > 0
-            ORDER BY total_bonus DESC
-            LIMIT 1
-        """, (role_name,)) as cur:
+                                SELECT u.nickname,
+                                       u.full_name,
+                                       COALESCE(SUM(s.bonus_points), 0) as total_bonus
+                                FROM game_slots_history s
+                                         JOIN users u ON s.user_id = u.user_id
+                                WHERE s.role = ?
+                                GROUP BY s.user_id
+                                HAVING total_bonus > 0
+                                ORDER BY total_bonus DESC
+                                LIMIT 1
+                                """, (role_name,)) as cur:
             row = await cur.fetchone()
             if row:
                 name = row[0] or row[1] or "Неизвестный"
@@ -316,12 +682,12 @@ async def get_best_by_role(role_name: str) -> tuple:
     return None, 0
 
 
-# ======================= РЕЙТИНГ С НОМИНАЦИЯМИ =======================
-
 @router.message(F.text == "🏆 Рейтинг")
 async def show_rating(message: types.Message):
-    """Показывает общий рейтинг игроков по Эло + MVP + лучшие по ролям"""
-    rating = await get_players_elo_rating(limit=30)
+    """Показывает общий рейтинг игроков по Эло + MVP + лучшие по ролям с пагинацией"""
+
+    # Получаем всех игроков с Эло
+    rating = await get_players_elo_rating(limit=100)
 
     if not rating:
         await message.answer("📊 Пока нет данных для рейтинга Эло.")
@@ -333,22 +699,45 @@ async def show_rating(message: types.Message):
         await message.answer("📊 Пока нет игроков, сыгравших хотя бы одну игру.")
         return
 
+    # Сохраняем кэш в боте
+    if not hasattr(message.bot, "rating_cache"):
+        message.bot.rating_cache = {}
+    message.bot.rating_cache[message.chat.id] = rating
+
+    # Показываем первую страницу
+    await show_rating_page(message, 0, rating)
+
+
+async def show_rating_page(message: types.Message, page: int, rating: list):
+    """Показывает конкретную страницу рейтинга"""
+
+    page_size = 10
+    total_players = len(rating)
+    total_pages = (total_players + page_size - 1) // page_size
+    start_idx = page * page_size
+    end_idx = min(start_idx + page_size, total_players)
+    current_page_players = rating[start_idx:end_idx]
+
+    # Формируем текст
     text = "🏆 **РЕЙТИНГ ЭЛО**\n\n"
     text += "Рейтинг рассчитывается по формуле:\n"
     text += "• Победа над сильным соперником даёт больше очков\n"
     text += "• Доп. баллы (ЛХ, ПР, МН) влияют на рейтинг\n"
     text += "• Учитывается сила команды (carry-эффект)\n\n"
 
-    # Топ-10 по Эло
-    for p in rating[:10]:
-        if p["place"] == 1:
+    # Добавляем информацию о странице
+    text += f"📊 **Страница {page + 1} из {total_pages}** (всего игроков: {total_players})\n\n"
+
+    for p in current_page_players:
+        place = p["place"]
+        if place == 1:
             medal = "🥇"
-        elif p["place"] == 2:
+        elif place == 2:
             medal = "🥈"
-        elif p["place"] == 3:
+        elif place == 3:
             medal = "🥉"
         else:
-            medal = f"{p['place']}."
+            medal = f"{place}."
 
         name = p["nickname"] or "Неизвестный"
         winrate = round(p["games_won"] / p["games_played"] * 100, 1) if p["games_played"] > 0 else 0
@@ -356,7 +745,6 @@ async def show_rating(message: types.Message):
         text += f"{medal} **{name}** — **{p['elo']}** очков\n"
         text += f"   🎮 Игр: {p['games_played']} | 🏆 Побед: {p['games_won']} ({winrate}%)\n\n"
 
-    # ========== MVP ==========
     text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     text += "🏅 **MVP (лучший по доп. баллам)**\n\n"
 
@@ -366,11 +754,9 @@ async def show_rating(message: types.Message):
     else:
         text += "📊 Нет данных для MVP\n\n"
 
-    # ========== ЛУЧШИЕ ПО РОЛЯМ ==========
     text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     text += "🎭 **Лучшие по ролям (Доп)**\n\n"
 
-    # Роли в порядке: Мирный, Шериф, Мафия, Дон
     roles = [
         ("Мирный", "👤"),
         ("Шериф", "🕵️"),
@@ -385,10 +771,153 @@ async def show_rating(message: types.Message):
         else:
             text += f"{icon} **{role_name}**: нет данных\n"
 
+    # Формируем клавиатуру для пагинации
+    builder = InlineKeyboardBuilder()
+
+    if page > 0:
+        builder.button(text="◀️ Предыдущие", callback_data=f"rating_page:{page}")
+    if page < total_pages - 1:
+        builder.button(text="Следующие ▶️", callback_data=f"rating_page:{page + 1}")
+
+    builder.button(text="❌ Закрыть", callback_data="rating_close")
+    builder.adjust(2, 1)
+
+    await message.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("rating_page:"))
+async def rating_page_callback(callback: types.CallbackQuery):
+    """Обработчик переключения страниц рейтинга"""
+    page = int(callback.data.split(":")[1])
+
+    # Получаем рейтинг из кэша бота
+    if not hasattr(callback.bot, "rating_cache") or callback.message.chat.id not in callback.bot.rating_cache:
+        await callback.answer("Данные устарели, нажмите '🏆 Рейтинг' заново", show_alert=True)
+        return
+
+    rating = callback.bot.rating_cache[callback.message.chat.id]
+
+    # Обновляем сообщение
+    await callback.message.edit_text("🔄 Загрузка...")
+    await show_rating_page_from_callback(callback, page, rating)
+    await callback.answer()
+
+
+async def show_rating_page_from_callback(callback: types.CallbackQuery, page: int, rating: list):
+    """Показывает страницу рейтинга из callback"""
+
+    page_size = 10
+    total_players = len(rating)
+    total_pages = (total_players + page_size - 1) // page_size
+    start_idx = page * page_size
+    end_idx = min(start_idx + page_size, total_players)
+    current_page_players = rating[start_idx:end_idx]
+
+    # Формируем текст
+    text = "🏆 **РЕЙТИНГ ЭЛО**\n\n"
+    text += "Рейтинг рассчитывается по формуле:\n"
+    text += "• Победа над сильным соперником даёт больше очков\n"
+    text += "• Доп. баллы (ЛХ, ПР, МН) влияют на рейтинг\n"
+    text += "• Учитывается сила команды (carry-эффект)\n\n"
+
+    text += f"📊 **Страница {page + 1} из {total_pages}** (всего игроков: {total_players})\n\n"
+
+    for p in current_page_players:
+        place = p["place"]
+        if place == 1:
+            medal = "🥇"
+        elif place == 2:
+            medal = "🥈"
+        elif place == 3:
+            medal = "🥉"
+        else:
+            medal = f"{place}."
+
+        name = p["nickname"] or "Неизвестный"
+        winrate = round(p["games_won"] / p["games_played"] * 100, 1) if p["games_played"] > 0 else 0
+
+        text += f"{medal} **{name}** — **{p['elo']}** очков\n"
+        text += f"   🎮 Игр: {p['games_played']} | 🏆 Побед: {p['games_won']} ({winrate}%)\n\n"
+
+    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    text += "🏅 **MVP (лучший по доп. баллам)**\n\n"
+
+    mvp_name, mvp_bonus = await get_mvp()
+    if mvp_name and mvp_bonus > 0:
+        text += f"🏆 **{mvp_name}** — **{mvp_bonus:.1f}** доп. баллов\n\n"
+    else:
+        text += "📊 Нет данных для MVP\n\n"
+
+    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    text += "🎭 **Лучшие по ролям (Доп)**\n\n"
+
+    roles = [
+        ("Мирный", "👤"),
+        ("Шериф", "🕵️"),
+        ("Мафия", "🔪"),
+        ("Дон", "👑"),
+    ]
+
+    for role_name, icon in roles:
+        best_name, best_bonus = await get_best_by_role(role_name)
+        if best_name and best_bonus > 0:
+            text += f"{icon} **{role_name}**: {best_name} — **{best_bonus:.1f}** доп.\n"
+        else:
+            text += f"{icon} **{role_name}**: нет данных\n"
+
+    # Формируем клавиатуру
+    builder = InlineKeyboardBuilder()
+
+    if page > 0:
+        builder.button(text="◀️ Предыдущие", callback_data=f"rating_page:{page - 1}")
+    if page < total_pages - 1:
+        builder.button(text="Следующие ▶️", callback_data=f"rating_page:{page + 1}")
+
+    builder.button(text="❌ Закрыть", callback_data="rating_close")
+    builder.adjust(2, 1)
+
+    await callback.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data == "rating_close")
+async def rating_close(callback: types.CallbackQuery):
+    """Закрывает окно с рейтингом"""
+    await callback.message.delete()
+    await callback.answer()
+
+
+@router.message(F.text == "🏆 Рейтинг (старый)")
+async def show_old_rating(message: types.Message):
+    rating = await database.get_players_rating(limit=30)
+
+    if not rating:
+        await message.answer("📊 Пока нет данных для рейтинга.")
+        return
+
+    text = "🏆 **ОБЩИЙ РЕЙТИНГ ИГРОКОВ (по баллам)**\n\n"
+
+    for p in rating[:15]:
+        if p["place"] == 1:
+            medal = "🥇"
+        elif p["place"] == 2:
+            medal = "🥈"
+        elif p["place"] == 3:
+            medal = "🥉"
+        else:
+            medal = f"{p['place']}."
+
+        name = p["nickname"] or p["full_name"]
+        winrate = round(p["games_won"] / p["games_played"] * 100, 1) if p["games_played"] > 0 else 0
+
+        text += f"{medal} **{name}**\n"
+        text += f"   🎮 Игр: {p['games_played']} | 🏆 Побед: {p['games_won']} ({winrate}%)\n"
+        text += f"   ⭐ Средний балл: {p['avg_points']:.2f}\n"
+        text += f"   💰 Всего баллов: {p['total_points']:.1f}\n\n"
+
     await message.answer(text, parse_mode="Markdown")
 
 
-# ======================= ПРОТОКОЛ ИГРЫ + КАРТИНКА =======================
+# ======================= ОСТАЛЬНЫЕ ХЕНДЛЕРЫ РЕДАКТИРОВАНИЯ =======================
 
 async def _send_protocol(message_or_callback, game_id: int, winner_label: str = None):
     game = await get_game_by_id(game_id)
@@ -915,7 +1444,8 @@ async def editgame_regenerate(callback: types.CallbackQuery, state: FSMContext):
                     update_params[key] = value
 
             if update_params:
-                await update_game_slot(date_str, slot_num, **update_params)
+                # ========== ИСПРАВЛЕНИЕ: передаём game_number ==========
+                await update_game_slot(date_str, slot_num, game_number=game_number, **update_params)
                 print(f"[DEBUG] Saved slot {slot_num}: {update_params}")
 
     if temp_winner:
@@ -1438,21 +1968,54 @@ async def editgame_set_fouls(callback: types.CallbackQuery, state: FSMContext):
                 message_text = f"✅ Большой техфол добавлен (-0.6 ДЦ)"
 
         elif action == "tech_remove":
-            tech_list = slot.get("technical_fouls", [])
-            if isinstance(tech_list, int):
-                tech_list = []
-            if tech_list:
-                removed = tech_list.pop()
-                changes["technical_fouls"] = tech_list
-                current_dc = slot.get("dc_points", 0.0)
-                if removed == "small":
+            tech_value = slot.get("technical_fouls", [])
+            message_text = "✅ Техфол снят"
+
+            # Обработка разных форматов
+            if isinstance(tech_value, list):
+                # Новый формат: список ["small", "big"]
+                if tech_value:
+                    removed = tech_value.pop()
+                    changes["technical_fouls"] = tech_value
+                    current_dc = slot.get("dc_points", 0.0)
+                    if removed == "small":
+                        changes["dc_points"] = round(current_dc + 0.3, 1)
+                    elif removed == "big":
+                        changes["dc_points"] = round(current_dc + 0.6, 1)
+                    else:
+                        changes["dc_points"] = round(current_dc + 0.3, 1)
+                else:
+                    await callback.answer("Нет техфолов для снятия", show_alert=True)
+                    return
+
+            elif isinstance(tech_value, int):
+                # Старый формат: просто число
+                if tech_value > 0:
+                    new_tech = tech_value - 1
+                    changes["technical_fouls"] = new_tech
+                    current_dc = slot.get("dc_points", 0.0)
                     changes["dc_points"] = round(current_dc + 0.3, 1)
                 else:
-                    changes["dc_points"] = round(current_dc + 0.6, 1)
-                message_text = "✅ Техфол снят"
+                    await callback.answer("Нет техфолов для снятия", show_alert=True)
+                    return
             else:
                 await callback.answer("Нет техфолов для снятия", show_alert=True)
                 return
+
+            # Если техфолов стало меньше 2, снимаем удаление
+            tech_count = 0
+            if isinstance(changes.get("technical_fouls", tech_value), list):
+                tech_count = len(changes.get("technical_fouls", tech_value))
+            elif isinstance(changes.get("technical_fouls", tech_value), int):
+                tech_count = changes.get("technical_fouls", tech_value)
+            else:
+                tech_count = 0
+
+            if tech_count < 2 and slot.get("kicked", False):
+                changes["kicked"] = False
+                changes["alive"] = True
+                changes["status_reason"] = "Жив"
+                message_text += " (удаление снято)"
         else:
             await callback.answer("Неизвестное действие", show_alert=True)
             return
@@ -1500,3 +2063,294 @@ async def show_old_rating(message: types.Message):
         text += f"   💰 Всего баллов: {p['total_points']:.1f}\n\n"
 
     await message.answer(text, parse_mode="Markdown")
+
+
+@router.callback_query(F.data.startswith("editgame_metadata:"))
+async def editgame_metadata_menu(callback: types.CallbackQuery, state: FSMContext):
+    """Меню выбора: изменить номер или дату"""
+    try:
+        game_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    await state.update_data(edit_game_id=game_id)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔢 Изменить номер игры", callback_data=f"editgame_change_number:{game_id}")],
+        [InlineKeyboardButton(text="📅 Изменить дату", callback_data=f"editgame_change_date:{game_id}")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"editgame_back:{game_id}")]
+    ])
+
+    await callback.message.edit_text(
+        "✏️ **Изменение метаданных игры**\n\nВыберите, что хотите изменить:",
+        reply_markup=kb,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("editgame_change_number:"))
+async def editgame_change_number_start(callback: types.CallbackQuery, state: FSMContext):
+    """Начало изменения номера игры"""
+    try:
+        game_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    game = await get_game_by_id(game_id)
+    if not game:
+        await callback.answer("Игра не найдена.", show_alert=True)
+        return
+
+    current_number = game.get("game_number", "?")
+    await state.update_data(edit_game_id=game_id, current_number=current_number)
+    await state.set_state(EditGameMetadataState.waiting_for_new_number)
+
+    await callback.message.edit_text(
+        f"🔢 **Изменение номера игры**\n\n"
+        f"Текущий номер: **{current_number}**\n\n"
+        f"Введите новый номер игры (целое число, например: 1, 2, 3...):\n\n"
+        f"⚠️ Внимание: номер игры в рамках одного вечера должен быть уникальным!",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
+
+@router.message(EditGameMetadataState.waiting_for_new_number)
+async def editgame_change_number_apply(message: types.Message, state: FSMContext):
+    """Применение нового номера игры"""
+    data = await state.get_data()
+    game_id = data.get("edit_game_id")
+
+    if not game_id:
+        await message.answer("❌ Ошибка: игра не найдена. Попробуйте снова.")
+        await state.clear()
+        return
+
+    try:
+        new_number = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введите целое число (например: 1, 2, 3...)")
+        return
+
+    if new_number < 1:
+        await message.answer("❌ Номер игры должен быть больше 0")
+        return
+
+    game = await get_game_by_id(game_id)
+    if not game:
+        await message.answer("❌ Игра не найдена")
+        await state.clear()
+        return
+
+    old_number = game.get("game_number")
+    old_date = game.get("game_date")
+
+    # Обновляем номер игры в game_history
+    async with database.get_db() as conn:
+        await conn.execute("""
+                           UPDATE game_history
+                           SET game_number = ?
+                           WHERE id = ?
+                           """, (new_number, game_id))
+
+        # Обновляем номер игры в game_slots_history с флагом редактора
+        await conn.execute("""
+                           UPDATE game_slots_history
+                           SET game_number = ?, updated_by_editor = 1
+                           WHERE game_date = ?
+                             AND game_number = ?
+                           """, (new_number, old_date, old_number))
+
+        await conn.commit()
+
+    await message.answer(
+        f"✅ Номер игры изменён с **{old_number}** на **{new_number}**\n\n"
+        f"⚠️ Если в этот вечер был другой игрок с таким же номером, возможны конфликты.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    await state.clear()
+
+    # Возвращаемся в меню редактирования
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Вернуться в редактор", callback_data=f"editgame_menu:{game_id}")]
+    ])
+    await message.answer("Вернуться в редактор:", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("editgame_change_date:"))
+async def editgame_change_date_start(callback: types.CallbackQuery, state: FSMContext):
+    """Начало изменения даты игры"""
+    try:
+        game_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    game = await get_game_by_id(game_id)
+    if not game:
+        await callback.answer("Игра не найдена.", show_alert=True)
+        return
+
+    current_date = game.get("game_date", "?")
+    await state.update_data(edit_game_id=game_id, current_date=current_date)
+    await state.set_state(EditGameMetadataState.waiting_for_new_date)
+
+    await callback.message.edit_text(
+        f"📅 **Изменение даты игры**\n\n"
+        f"Текущая дата: **{current_date}**\n\n"
+        f"Введите новую дату в формате **ДД.ММ** или **ДД.ММ.ГГГГ**\n"
+        f"Примеры: `01.05`, `24.04.2026`\n\n"
+        f"⚠️ Внимание: формат **ДД.ММ** преобразуется в текущий год.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
+
+@router.message(EditGameMetadataState.waiting_for_new_date)
+async def editgame_change_date_apply(message: types.Message, state: FSMContext):
+    """Применение новой даты игры"""
+    data = await state.get_data()
+    game_id = data.get("edit_game_id")
+
+    if not game_id:
+        await message.answer("❌ Ошибка: игра не найдена. Попробуйте снова.")
+        await state.clear()
+        return
+
+    import re
+    new_date = message.text.strip()
+
+    # Проверка формата ДД.ММ или ДД.ММ.ГГГГ
+    if re.match(r'^\d{2}\.\d{2}$', new_date):
+        # Добавляем текущий год
+        from datetime import datetime
+        new_date = f"{new_date}.{datetime.now().year}"
+    elif not re.match(r'^\d{2}\.\d{2}\.\d{4}$', new_date):
+        await message.answer("❌ Неверный формат даты. Используйте ДД.ММ или ДД.ММ.ГГГГ")
+        return
+
+    game = await get_game_by_id(game_id)
+    if not game:
+        await message.answer("❌ Игра не найдена")
+        await state.clear()
+        return
+
+    old_date = game.get("game_date")
+    old_number = game.get("game_number")
+
+    # Обновляем дату игры в game_history
+    async with database.get_db() as conn:
+        await conn.execute("""
+                           UPDATE game_history
+                           SET game_date = ?
+                           WHERE id = ?
+                           """, (new_date, game_id))
+
+        # Обновляем дату игры в game_slots_history с флагом редактора
+        await conn.execute("""
+                           UPDATE game_slots_history
+                           SET game_date = ?, updated_by_editor = 1
+                           WHERE game_date = ?
+                             AND game_number = ?
+                           """, (new_date, old_date, old_number))
+
+        await conn.commit()
+
+    await message.answer(
+        f"✅ Дата игры изменена с **{old_date}** на **{new_date}**",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    await state.clear()
+
+    # Возвращаемся в меню редактирования
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Вернуться в редактор", callback_data=f"editgame_menu:{game_id}")]
+    ])
+    await message.answer("Вернуться в редактор:", reply_markup=kb)
+
+
+# ======================= УДАЛЕНИЕ ИГРЫ =======================
+
+@router.callback_query(F.data.startswith("editgame_delete_confirm:"))
+async def editgame_delete_confirm(callback: types.CallbackQuery, state: FSMContext):
+    """Подтверждение удаления игры"""
+    try:
+        game_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    game = await get_game_by_id(game_id)
+    if not game:
+        await callback.answer("Игра не найдена.", show_alert=True)
+        return
+
+    await state.update_data(delete_game_id=game_id)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚠️ ДА, УДАЛИТЬ ИГРУ", callback_data=f"editgame_delete_yes:{game_id}")],
+        [InlineKeyboardButton(text="❌ Нет, отмена", callback_data=f"editgame_back:{game_id}")]
+    ])
+
+    await callback.message.edit_text(
+        f"⚠️ **УДАЛЕНИЕ ИГРЫ**\n\n"
+        f"Вы уверены, что хотите удалить игру?\n\n"
+        f"📅 Дата: {game.get('game_date')}\n"
+        f"🎮 Номер: {game.get('game_number')}\n"
+        f"🏆 Победитель: {game.get('winner_label')}\n\n"
+        f"❗️ Это действие НЕЛЬЗЯ отменить!\n"
+        f"❗️ Статистика игроков будет пересчитана.\n\n"
+        f"Введите **ДА, УДАЛИТЬ** для подтверждения:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("editgame_delete_yes:"))
+async def editgame_delete_yes(callback: types.CallbackQuery, state: FSMContext):
+    """Полное удаление игры"""
+    try:
+        game_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    game = await get_game_by_id(game_id)
+    if not game:
+        await callback.answer("Игра не найдена.", show_alert=True)
+        return
+
+    date_str = game.get("game_date")
+    game_number = game.get("game_number")
+
+    # Удаляем слоты игры
+    async with database.get_db() as conn:
+        await conn.execute("""
+                           DELETE
+                           FROM game_slots_history
+                           WHERE game_date = ?
+                             AND game_number = ?
+                           """, (date_str, game_number))
+
+        # Удаляем запись об игре
+        await conn.execute("DELETE FROM game_history WHERE id = ?", (game_id,))
+
+        await conn.commit()
+
+    # Пересчитываем статистику игроков
+    await database.recalc_all_stats()
+
+    await callback.message.edit_text(
+        f"✅ **Игра удалена!**\n\n"
+        f"📅 Дата: {date_str}\n"
+        f"🎮 Номер: {game_number}\n\n"
+        f"Статистика игроков пересчитана.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()

@@ -159,12 +159,13 @@ async def show_judges_list(callback: CallbackQuery):
 
 # ========== 3. НАЧАТЬ НАЗНАЧЕНИЕ СУДЬИ (ТОЛЬКО АДМИНЫ) ==========
 
+# ========== 3. НАЧАТЬ НАЗНАЧЕНИЕ СУДЬИ (ТОЛЬКО АДМИНЫ) ==========
+
 @router.callback_query(F.data == "judge_add")
 async def judge_add_start(callback: CallbackQuery, state: FSMContext):
     if not await ensure_admin_cb(callback):
         return
 
-    # Устанавливаем состояние ожидания ввода ID
     await state.set_state(JudgeForm.waiting_for_judge_id)
 
     await callback.message.edit_text(
@@ -181,13 +182,10 @@ async def judge_add_start(callback: CallbackQuery, state: FSMContext):
 
 # ========== 4. ОБРАБОТКА СООБЩЕНИЙ ДЛЯ НАЗНАЧЕНИЯ (ТОЛЬКО АДМИНЫ) ==========
 
-@router.message(F.text.regexp(r"^\d+$"), JudgeForm.waiting_for_judge_id)
+@router.message(JudgeForm.waiting_for_judge_id, F.text.regexp(r"^\d+$"))
 async def judge_add_by_id(message: Message, state: FSMContext):
-    # ========== ВАЖНО: проверяем, не в режиме ли редактирования игры ==========
     if await _is_in_game_edit_state(state):
-        # Если мы в игровом состоянии - игнорируем, не отвечаем
         return
-    # ========================================================================
 
     if not await ensure_admin_pm(message):
         return
@@ -206,7 +204,43 @@ async def judge_add_by_id(message: Message, state: FSMContext):
     display_name = nickname or full_name or (f"@{username}" if username else f"ID {user_id}")
 
     await message.answer(
-        f"Найден пользователь:\n"
+        f"🔍 Найден пользователь:\n"
+        f"• {display_name}\n"
+        f"• ID: `{user_id}`\n\n"
+        f"Назначить его судьёй?",
+        parse_mode="Markdown",
+        reply_markup=keyboards.judge_candidate_kb(user_id, display_name)
+    )
+
+
+@router.message(JudgeForm.waiting_for_judge_id, F.text)
+async def judge_add_by_name(message: Message, state: FSMContext):
+    """Обработка ввода имени/ника для назначения судьи"""
+
+    if await _is_in_game_edit_state(state):
+        return
+
+    if not await ensure_admin_pm(message):
+        return
+
+    search_query = message.text.strip()
+
+    # Ищем пользователя по нику или имени
+    user_info = await database.get_user_by_nickname(search_query)
+
+    if not user_info:
+        await message.answer(
+            f"❌ Пользователь с ником/именем '{search_query}' не найден в базе.\n"
+            f"Попробуйте ввести ID или другой ник.",
+            reply_markup=keyboards.judge_back_kb()
+        )
+        return
+
+    user_id, full_name, username, nickname = user_info
+    display_name = nickname or full_name or (f"@{username}" if username else f"ID {user_id}")
+
+    await message.answer(
+        f"🔍 Найден пользователь:\n"
         f"• {display_name}\n"
         f"• ID: `{user_id}`\n\n"
         f"Назначить его судьёй?",

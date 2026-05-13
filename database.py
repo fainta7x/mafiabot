@@ -28,6 +28,7 @@ async def _ensure_columns():
         ("game_slots_history", ["game_number"], "INTEGER DEFAULT 0"),
         ("game_slots_history", ["alive"], "INTEGER DEFAULT 1"),
         ("game_slots_history", ["status_reason"], "TEXT DEFAULT 'Жив'"),
+        ("game_slots_history", ["updated_by_editor"], "INTEGER DEFAULT 0"),  # ДОБАВИТЬ ЭТУ СТРОКУ
     ]
     async with get_db() as conn:
         for table, cols, col_type in alters:
@@ -66,7 +67,8 @@ async def init_db():
                                will_protocol_raw    TEXT    DEFAULT '',
                                will_opinion         TEXT    DEFAULT '',
                                alive                INTEGER DEFAULT 1,
-                               status_reason        TEXT    DEFAULT 'Жив'
+                               status_reason        TEXT    DEFAULT 'Жив',
+                               updated_by_editor    INTEGER DEFAULT 0
                            )
                            """)
         await conn.execute("""
@@ -119,7 +121,8 @@ async def init_db():
                                winner_label       TEXT,
                                protocol_text      TEXT,
                                game_number        INTEGER,
-                               global_game_number INTEGER
+                               global_game_number INTEGER,
+                               judge_id           INTEGER DEFAULT 0
                            )
                            """)
         await conn.execute("""
@@ -131,7 +134,7 @@ async def init_db():
                                PRIMARY KEY (game_date, game_number)
                            )
                            """)
-        # ========== ДОБАВИТЬ ЭТУ ТАБЛИЦУ ==========
+        # ========== ТАБЛИЦА АЧИВОК ==========
         await conn.execute("""
                            CREATE TABLE IF NOT EXISTS user_achievements
                            (
@@ -158,7 +161,6 @@ async def init_db():
                                FOREIGN KEY (game_id) REFERENCES game_history (id)
                            )
                            """)
-
         await conn.execute("""
                            CREATE TABLE IF NOT EXISTS user_bets
                            (
@@ -172,9 +174,39 @@ async def init_db():
                                FOREIGN KEY (bet_id) REFERENCES bets_active (id)
                            )
                            """)
+
+        # ========== СОЗДАНИЕ ТРИГГЕРА ==========
+        await conn.execute("""
+                           CREATE TRIGGER IF NOT EXISTS prevent_direct_update
+                               BEFORE UPDATE
+                               ON game_slots_history
+                               FOR EACH ROW
+                               WHEN NEW.updated_by_editor != 1
+                                   AND (OLD.role != NEW.role OR
+                                        OLD.team != NEW.team OR
+                                        OLD.base_points != NEW.base_points OR
+                                        OLD.bonus_points != NEW.bonus_points OR
+                                        OLD.lh_points != NEW.lh_points OR
+                                        OLD.will_protocol_points != NEW.will_protocol_points OR
+                                        OLD.will_opinion_points != NEW.will_opinion_points OR
+                                        OLD.dc_points != NEW.dc_points OR
+                                        OLD.kick != NEW.kick OR
+                                        OLD.ppk != NEW.ppk OR
+                                        OLD.technical_fouls != NEW.technical_fouls OR
+                                        OLD.pu != NEW.pu OR
+                                        OLD.alive != NEW.alive OR
+                                        OLD.status_reason != NEW.status_reason OR
+                                        OLD.fouls != NEW.fouls)
+                           BEGIN
+                               SELECT RAISE(ABORT, 'Изменение данных игры разрешено только через редактор!');
+                           END;
+                           """)
+
         await conn.commit()
 
     await _ensure_columns()
+    await add_fouls_column()
+    await create_elo_table()
 
 
 # ========== 2. SETTINGS (обобщённые функции) ==========
@@ -476,13 +508,13 @@ async def get_booked_players_for_game() -> list:
     async with get_db() as conn:
         async with conn.execute("""
             SELECT e.user_id,
-                   IFNULL(u.full_name, 'Неизвестный') AS full_name,
+                   COALESCE(u.full_name, 'Неизвестный') AS full_name,
                    u.username,
                    u.nickname,
                    e.status
             FROM evening_booking e
             LEFT JOIN users u ON e.user_id = u.user_id
-            WHERE e.status IN ('Вовремя', 'Позже')  # <-- ЭТО ВАЖНО
+            WHERE e.status IN ('Вовремя', 'Позже')  -- Важно: только пришедшие
         """) as cur:
             return await cur.fetchall()
 
@@ -682,12 +714,11 @@ async def archive_current_evening():
 
 
 async def get_evenings_list(limit: int = 10) -> list:
-    """Возвращает список дат и количество ПРИШЕДШИХ игроков"""
     async with get_db() as conn:
         async with conn.execute(
             "SELECT date, COUNT(*) FROM evening_history "
             "WHERE status IN ('Вовремя', 'Позже') "
-            "GROUP BY date ORDER BY date DESC LIMIT ?",
+            "GROUP BY date ORDER BY date ASC LIMIT ?",  # <-- ASC или DESC?
             (limit,)
         ) as cur:
             return await cur.fetchall()
@@ -1154,15 +1185,6 @@ async def get_game_slots_by_date(game_date: str, game_number: int = None) -> Opt
 
 # ========== 9. ОБНОВЛЕНИЕ ИСХОДА ИГРЫ ==========
 
-async def update_game_outcome(game_id: int, winner_label: str) -> None:
-    async with get_db() as conn:
-        await conn.execute(
-            "UPDATE game_history SET winner_label = ? WHERE id = ?",
-            (winner_label, game_id),
-        )
-        await conn.commit()
-
-
 async def update_game_slot(
         game_date: str,
         slot_num: int,
@@ -1184,49 +1206,118 @@ async def update_game_slot(
         game_number: Optional[int] = None,
         alive: Optional[int] = None,
         status_reason: Optional[str] = None,
-        fouls: Optional[int] = None,  # <-- ДОБАВИТЬ
+        fouls: Optional[int] = None,
 ) -> None:
-    """Частичное обновление одного слота игры по дате и номеру слота."""
     fields: List[str] = []
     params: List[Any] = []
 
-    def add(field: str, value: Any):
-        if value is not None:
-            fields.append(f"{field} = ?")
-            params.append(value)
+    # ФЛАГ РЕДАКТОРА — всегда добавляем
+    fields.append("updated_by_editor = 1")
 
-    add("role", role)
-    add("team", team)
-    add("base_points", base_points)
-    add("bonus_points", bonus_points)
-    add("lh_points", lh_points)
-    add("will_protocol_points", will_protocol_points)
-    add("will_opinion_points", will_opinion_points)
-    add("will_protocol_raw", will_protocol_raw)
-    add("will_opinion", will_opinion)
-    add("dc_points", dc_points)
-    add("kick", kick)
-    add("ppk", ppk)
-    add("technical_fouls", technical_fouls)
-    add("pu", pu)
-    add("game_number", game_number)
-    add("alive", alive)
-    add("status_reason", status_reason)
-    add("fouls", fouls)  # <-- ДОБАВИТЬ
+    # Добавляем только те поля, которые реально переданы
+    if role is not None:
+        fields.append("role = ?")
+        params.append(role)
+    if team is not None:
+        fields.append("team = ?")
+        params.append(team)
+    if base_points is not None:
+        fields.append("base_points = ?")
+        params.append(base_points)
+    if bonus_points is not None:
+        fields.append("bonus_points = ?")
+        params.append(bonus_points)
+    if lh_points is not None:
+        fields.append("lh_points = ?")
+        params.append(lh_points)
+    if will_protocol_points is not None:
+        fields.append("will_protocol_points = ?")
+        params.append(will_protocol_points)
+    if will_opinion_points is not None:
+        fields.append("will_opinion_points = ?")
+        params.append(will_opinion_points)
+    if will_protocol_raw is not None:
+        fields.append("will_protocol_raw = ?")
+        params.append(will_protocol_raw)
+    if will_opinion is not None:
+        fields.append("will_opinion = ?")
+        params.append(will_opinion)
+    if dc_points is not None:
+        fields.append("dc_points = ?")
+        params.append(dc_points)
+    if kick is not None:
+        fields.append("kick = ?")
+        params.append(kick)
+    if ppk is not None:
+        fields.append("ppk = ?")
+        params.append(ppk)
+    if technical_fouls is not None:
+        fields.append("technical_fouls = ?")
+        params.append(technical_fouls)
+    if pu is not None:
+        fields.append("pu = ?")
+        params.append(pu)
+    if alive is not None:
+        fields.append("alive = ?")
+        params.append(alive)
+    if status_reason is not None:
+        fields.append("status_reason = ?")
+        params.append(status_reason)
+    if fouls is not None:
+        fields.append("fouls = ?")
+        params.append(fouls)
 
-    if not fields:
+    if len(fields) == 1:  # только updated_by_editor без других полей
         return
 
-    params.extend([game_date, slot_num])
+    # Получаем game_number если не передан
+    if game_number is None:
+        async with get_db() as conn:
+            async with conn.execute(
+                    "SELECT game_number FROM game_slots_history WHERE game_date = ? AND slot_num = ? LIMIT 1",
+                    (game_date, slot_num)
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    game_number = row[0]
+                else:
+                    raise ValueError(f"Slot {slot_num} in game {game_date} not found")
+
+    # Добавляем WHERE параметры
+    params.append(game_date)
+    params.append(game_number)
+    params.append(slot_num)
+
+    sql = f"UPDATE game_slots_history SET {', '.join(fields)} WHERE game_date = ? AND game_number = ? AND slot_num = ?"
+
+    async with get_db() as conn:
+        await conn.execute(sql, tuple(params))
+        await conn.commit()
+
+    # ========== КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ==========
+    # Если game_number не передан — используем значение из БД для этого слота
+    if game_number is None:
+        async with get_db() as conn:
+            async with conn.execute(
+                "SELECT game_number FROM game_slots_history WHERE game_date = ? AND slot_num = ? LIMIT 1",
+                (game_date, slot_num)
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    game_number = row[0]
+                else:
+                    raise ValueError(f"Slot {slot_num} in game {game_date} not found")
+    # ============================================
+
+    params.extend([game_date, game_number, slot_num])
 
     async with get_db() as conn:
         await conn.execute(
             f"UPDATE game_slots_history SET {', '.join(fields)} "
-            "WHERE game_date = ? AND slot_num = ?",
+            "WHERE game_date = ? AND game_number = ? AND slot_num = ?",
             tuple(params),
         )
         await conn.commit()
-
 
 # ========== 10. АНОНСЫ СТОЛА ==========
 
@@ -1444,6 +1535,8 @@ async def get_players_elo_rating(limit: int = 50) -> List[Dict]:
 
 async def update_elo(user_id: int, delta: int):
     """Обновляет Эло игрока"""
+    STARTING_ELO = 1500  # Добавь эту константу внутри функции или в начале файла
+
     async with get_db() as conn:
         async with conn.execute("SELECT 1 FROM elo_ratings WHERE user_id = ?", (user_id,)) as cur:
             exists = await cur.fetchone()
@@ -1820,3 +1913,54 @@ async def get_team_avg_elo(game_id: int, team: str) -> float:
             if not elos:
                 return 1500
             return sum(elos) / len(elos)
+
+async def get_judged_games_count(user_id: int) -> int:
+    """Сколько игр пользователь был судьёй"""
+    async with get_db() as conn:
+        async with conn.execute(
+            "SELECT COUNT(*) FROM game_history WHERE judge_id = ?",
+            (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
+async def recalc_all_stats():
+    """Пересчитывает статистику всех игроков на основе game_slots_history"""
+    async with get_db() as conn:
+        # Сбрасываем статистику
+        await conn.execute("UPDATE users SET games_played = 0, games_won = 0, points = 0")
+
+        # Пересчитываем
+        async with conn.execute("""
+                                SELECT user_id,
+                                       COUNT(*)                                         as games_played,
+                                       SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END) as games_won,
+                                       SUM(base_points)                                 as points
+                                FROM game_slots_history
+                                WHERE user_id IS NOT NULL
+                                GROUP BY user_id
+                                """) as cur:
+            stats = await cur.fetchall()
+
+        for user_id, games, wins, points in stats:
+            await conn.execute("""
+                               UPDATE users
+                               SET games_played = ?,
+                                   games_won    = ?,
+                                   points       = ?
+                               WHERE user_id = ?
+                               """, (games, wins, points, user_id))
+
+        await conn.commit()
+        print(f"[STATS] Пересчитана статистика для {len(stats)} игроков")
+
+
+async def update_game_outcome(game_id: int, winner_label: str) -> None:
+    """Обновляет исход игры (победителя) в game_history"""
+    async with get_db() as conn:
+        await conn.execute(
+            "UPDATE game_history SET winner_label = ? WHERE id = ?",
+            (winner_label, game_id)
+        )
+        await conn.commit()

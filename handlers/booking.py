@@ -190,24 +190,19 @@ async def handle_book(call: CallbackQuery, bot: Bot):
         status_map = {"book_ontime": "Вовремя", "book_late": "Позже"}
         status = status_map[call.data]
 
-        await database.add_booking(call.from_user.id, status, date)
-
-        # ========== НАЧИСЛЕНИЕ ЖЕТОНОВ ЗА ЗАПИСЬ ==========
+        # ВЫЧИСЛЯЕМ КОЛИЧЕСТВО ЖЕТОНОВ
         tokens = get_tokens_for_booking(status)
-        if tokens > 0:
-            await database.add_tokens(call.from_user.id, tokens)
-            print(f"[TOKENS] +{tokens} жетонов {call.from_user.id} за запись ({status})")
-        # =================================================
+
+        await database.add_booking(call.from_user.id, status, date)
 
         # Ответ пользователю
         if call.message.chat.type == "private":
             await call.message.edit_text(
-                f"✅ Вы записаны на {date}! Статус: {status}\n"
-                f"💰 Получено жетонов: +{tokens}"
+                f"✅ Вы записаны на {date}! Статус: {status}"
             )
         else:
             await call.answer(
-                f"✅ Записал вас на {date}! Статус: {status} (+{tokens} жетонов)",
+                f"✅ Записал вас на {date}! Статус: {status}",
                 show_alert=False,
             )
 
@@ -279,7 +274,7 @@ async def handle_announce_confirm(callback: CallbackQuery, bot: Bot, state: FSMC
         await callback.message.edit_text(
             f"🕐 Введите время сбора в формате ЧЧ:ММ (например, 20:00 или 19:30):"
         )
-        await state.update_data(date=date)
+        await state.update_data(announce_date=date)
         await state.set_state(AnnounceConfirm.waiting_for_confirmation)
         await callback.answer()
 
@@ -306,7 +301,12 @@ async def process_announce_time(message: Message, bot: Bot, state: FSMContext):
     """
     time_str = message.text.strip()
     data = await state.get_data()
-    date = data.get('date')
+    date = data.get('announce_date')
+
+    if not date:
+        await message.answer("❌ Ошибка: дата не найдена. Попробуйте выбрать анонс заново.")
+        await state.clear()
+        return
 
     # Простая валидация формата времени
     import re

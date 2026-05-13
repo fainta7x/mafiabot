@@ -191,11 +191,34 @@ async def start_new_game(message: types.Message, state: FSMContext):
         await message.answer("Уже есть активная игра. Сначала завершите её.", reply_markup=keyboards.game_admin_menu())
         return
 
-    booked = await database.get_booked_players_for_game()
-    if not booked:
+    booked_raw = await database.get_booked_players_for_game()
+    if not booked_raw:
         rm = keyboards.admin_menu() if message.from_user.id in config.ADMIN_IDS else keyboards.judge_menu()
         await message.answer("На вечер никто не записан.", reply_markup=rm)
         return
+
+    # ========== ОГРАНИЧЕНИЕ ДО 10 ИГРОКОВ ==========
+    # Фильтруем только тех, кто идёт (Вовремя или Позже)
+    attending_players = [p for p in booked_raw if p and p[4] in ("Вовремя", "Позже")]
+
+    if len(attending_players) > 10:
+        # Случайно выбираем 10 игроков
+        booked = random.sample(attending_players, 10)
+        await message.answer(
+            f"🎲 В очереди {len(attending_players)} человек. "
+            f"Случайно выбраны 10 игроков для игры:\n\n" +
+            "\n".join([f"• {p[3] or p[1]}" for p in booked])
+        )
+    elif len(attending_players) < 4:
+        rm = keyboards.admin_menu() if message.from_user.id in config.ADMIN_IDS else keyboards.judge_menu()
+        await message.answer(
+            f"❌ Недостаточно игроков для игры! Нужно минимум 4, а пришло {len(attending_players)}.",
+            reply_markup=rm
+        )
+        return
+    else:
+        booked = attending_players
+    # ==============================================
 
     # Сбрасываем судью (пока не выбран)
     await database.set_current_game_judge_id(None)
@@ -497,15 +520,15 @@ async def select_sheriff_callback(callback: CallbackQuery, state: FSMContext):
         parse_mode="Markdown"
     )
 
-    # ========== ОТКРЫТИЕ СТАВОК ==========
+    # ========== ОТКРЫТИЕ СТАВОК (ВРЕМЕННО ОТКЛЮЧЕНО) ==========
     # Получаем ID созданной игры
-    async with database.get_db() as conn:
-        async with conn.execute("SELECT id FROM game_history ORDER BY id DESC LIMIT 1") as cur:
-            row = await cur.fetchone()
-            if row:
-                game_id = row[0]
-                await open_bets_for_game(callback.message, state, game_id, evening_num)
-    # ===================================
+    # async with database.get_db() as conn:
+    #     async with conn.execute("SELECT id FROM game_history ORDER BY id DESC LIMIT 1") as cur:
+    #         row = await cur.fetchone()
+    #         if row:
+    #             game_id = row[0]
+    #             await open_bets_for_game(callback.message, state, game_id, evening_num)
+    # ==========================================================
 
     await state.set_state(GameCreateState.editing_slots)
     await callback.answer("✅ Игра готова к старту!")
@@ -589,6 +612,13 @@ async def send_bet_offer_to_user(bot: Bot, user_id: int, game_id: int, game_numb
                                  red_players: list, black_players: list,
                                  red_avg_elo: float, black_avg_elo: float):
     """Отправляет одному пользователю предложение сделать ставку"""
+
+    # Проверяем, есть ли пользователь в БД (писал ли боту)
+    user_exists = await database.get_user_by_id(user_id)
+    if not user_exists:
+        print(f"[BETS] User {user_id} not found in DB, skipping")
+        return
+
     # Рассчитываем коэффициенты
     red_prob = 1 / (1 + 10 ** ((black_avg_elo - red_avg_elo) / 400))
     black_prob = 1 - red_prob
@@ -596,7 +626,7 @@ async def send_bet_offer_to_user(bot: Bot, user_id: int, game_id: int, game_numb
     red_coef = round(1 / red_prob, 2) if red_prob > 0 else 2.0
     black_coef = round(1 / black_prob, 2) if black_prob > 0 else 2.0
 
-    # Формируем текст
+    # Формируем текст (без Markdown)
     red_names = ", ".join([p.get("nickname", f"Игрок {p['slot_num']}") for p in red_players[:5]])
     if len(red_players) > 5:
         red_names += f" и ещё {len(red_players) - 5}"
@@ -606,12 +636,12 @@ async def send_bet_offer_to_user(bot: Bot, user_id: int, game_id: int, game_numb
         black_names += f" и ещё {len(black_players) - 5}"
 
     text = (
-        f"📊 **СТАВКИ НА ИГРУ #{game_number}**\n\n"
-        f"🔴 **КРАСНЫЕ** (ср.Эло {red_avg_elo:.0f}):\n"
+        f"📊 СТАВКИ НА ИГРУ #{game_number}\n\n"
+        f"🔴 КРАСНЫЕ (ср.Эло {red_avg_elo:.0f}):\n"
         f"   {red_names}\n\n"
-        f"⚫ **ЧЁРНЫЕ** (ср.Эло {black_avg_elo:.0f}):\n"
+        f"⚫ ЧЁРНЫЕ (ср.Эло {black_avg_elo:.0f}):\n"
         f"   {black_names}\n\n"
-        f"📈 **КОЭФФИЦИЕНТЫ:**\n"
+        f"📈 КОЭФФИЦИЕНТЫ:\n"
         f"   🔴 На красных: {red_coef}\n"
         f"   ⚫ На чёрных: {black_coef}\n\n"
         f"💰 Минимальная ставка: 50 жетонов\n"
@@ -627,9 +657,17 @@ async def send_bet_offer_to_user(bot: Bot, user_id: int, game_id: int, game_numb
     builder.adjust(1)
 
     try:
-        await bot.send_message(user_id, text, reply_markup=builder.as_markup(), parse_mode=ParseMode.MARKDOWN)
+        await bot.send_message(user_id, text, reply_markup=builder.as_markup())
     except Exception as e:
-        print(f"[BETS] Failed to send to {user_id}: {e}")
+        error_msg = str(e).lower()
+        if "can't initiate" in error_msg:
+            print(f"[BETS] User {user_id} never started bot, skipping")
+        elif "blocked" in error_msg:
+            print(f"[BETS] User {user_id} blocked the bot, skipping")
+        elif "chat not found" in error_msg:
+            print(f"[BETS] Chat {user_id} not found, skipping")
+        else:
+            print(f"[BETS] Failed to send to {user_id}: {e}")
 
 
 async def open_bets_for_game(message: types.Message, state: FSMContext, game_id: int, game_number: int):

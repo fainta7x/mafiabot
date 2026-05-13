@@ -165,7 +165,7 @@ def create_endgame_pic_summary(
         evening_game_number: int,
         global_game_number: int,
         winner_label: str | None,
-        judge_name: str | None = None,  # <-- НОВЫЙ ПАРАМЕТР
+        judge_name: str | None = None,
 ) -> str:
     """
     Современный общий протокол игры.
@@ -759,16 +759,40 @@ def create_endgame_pic_summary(
                     radius=int(8 * scale),
                 ) + int(6 * scale)
 
-            technical_fouls = info.get("technical_fouls") or []
-            if technical_fouls:
+            # ========== ИСПРАВЛЕНИЕ ДЛЯ TECHNICAL_FOULS ==========
+            technical_fouls = info.get("technical_fouls")
+
+            # Обрабатываем разные форматы
+            if technical_fouls is None:
+                tech_fouls_count = 0
+                small_count = 0
+                big_count = 0
+            elif isinstance(technical_fouls, int):
+                # Старый формат - просто число
+                tech_fouls_count = technical_fouls
+                small_count = 0
+                big_count = 0
+            elif isinstance(technical_fouls, list):
+                # Новый формат - список
+                tech_fouls_count = len(technical_fouls)
                 small_count = sum(1 for t in technical_fouls if t == "small")
                 big_count = sum(1 for t in technical_fouls if t == "big")
-                parts = []
-                if small_count:
-                    parts.append(f"{small_count}S")
-                if big_count:
-                    parts.append(f"{big_count}B")
-                tech_text = "Тех: " + "/".join(parts)
+            else:
+                tech_fouls_count = 0
+                small_count = 0
+                big_count = 0
+
+            if tech_fouls_count > 0:
+                if small_count > 0 or big_count > 0:
+                    parts = []
+                    if small_count:
+                        parts.append(f"{small_count}S")
+                    if big_count:
+                        parts.append(f"{big_count}B")
+                    tech_text = "Тех: " + "/".join(parts)
+                else:
+                    tech_text = f"Тех: {tech_fouls_count}"
+
                 badges_x = _draw_badge(
                     draw,
                     badges_x,
@@ -781,6 +805,7 @@ def create_endgame_pic_summary(
                     padding_y=int(4 * scale),
                     radius=int(8 * scale),
                 ) + int(6 * scale)
+            # =====================================================
 
             y_pos = row_bottom + row_gap
 

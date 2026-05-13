@@ -16,6 +16,208 @@ from handlers.booking import build_stats_text, get_next_friday
 router = Router()
 bot: Bot | None = None
 
+import asyncio
+from collections import defaultdict
+
+# Константы для Эло
+STARTING_ELO = 1500
+
+# Категории ачивок (скопируй из achievements.py или добавь здесь)
+ACHIEVEMENTS = {
+    # ========== ИГРОВЫЕ (games) ==========
+    "first_game": {"name": "Первая игра", "description": "Сыграть первую игру", "icon": "🎭", "type": "games",
+                   "value": 1},
+    "ten_games": {"name": "Новичок", "description": "Сыграть 10 игр", "icon": "🌟", "type": "games", "value": 10},
+    "twenty_games": {"name": "Любитель", "description": "Сыграть 20 игр", "icon": "🎲", "type": "games", "value": 20},
+    "thirty_games": {"name": "Завсегдатай", "description": "Сыграть 30 игр", "icon": "🎯", "type": "games", "value": 30},
+    "fifty_games": {"name": "Опытный игрок", "description": "Сыграть 50 игр", "icon": "⚡", "type": "games",
+                    "value": 50},
+    "seventy_games": {"name": "Профи", "description": "Сыграть 70 игр", "icon": "🎓", "type": "games", "value": 70},
+    "hundred_games": {"name": "Ветеран", "description": "Сыграть 100 игр", "icon": "🔥", "type": "games", "value": 100},
+    "one_fifty_games": {"name": "Мастер", "description": "Сыграть 150 игр", "icon": "🏆", "type": "games", "value": 150},
+    "two_hundred_games": {"name": "Легенда", "description": "Сыграть 200 игр", "icon": "👑", "type": "games",
+                          "value": 200},
+
+    # ========== ПОБЕДНЫЕ (wins) ==========
+    "first_win": {"name": "Первая победа", "description": "Одержать первую победу", "icon": "🏆", "type": "wins",
+                  "value": 1},
+    "five_wins": {"name": "Первые успехи", "description": "Одержать 5 побед", "icon": "🌱", "type": "wins", "value": 5},
+    "ten_wins": {"name": "Серийный победитель", "description": "Одержать 10 побед", "icon": "🎯", "type": "wins",
+                 "value": 10},
+    "twenty_wins": {"name": "Закалка", "description": "Одержать 20 побед", "icon": "⚔️", "type": "wins", "value": 20},
+    "thirty_wins": {"name": "Победный дух", "description": "Одержать 30 побед", "icon": "🎖️", "type": "wins",
+                    "value": 30},
+    "forty_wins": {"name": "Покоритель", "description": "Одержать 40 побед", "icon": "⭐", "type": "wins", "value": 40},
+    "fifty_wins": {"name": "Мастер побед", "description": "Одержать 50 побед", "icon": "🏅", "type": "wins",
+                   "value": 50},
+    "seventy_wins": {"name": "Герой", "description": "Одержать 70 побед", "icon": "🦸", "type": "wins", "value": 70},
+    "hundred_wins": {"name": "Легенда побед", "description": "Одержать 100 побед", "icon": "🏅", "type": "wins",
+                     "value": 100},
+
+    # ========== РЕЙТИНГОВЫЕ (rating) ==========
+    "elo_1400": {"name": "Начало пути", "description": "Достичь рейтинга Эло 1400", "icon": "🌱", "type": "rating",
+                 "value": 1400},
+    "elo_1500": {"name": "Старт", "description": "Достичь рейтинга Эло 1500", "icon": "🌱", "type": "rating",
+                 "value": 1500},
+    "elo_1550": {"name": "Бронзовый рейтинг", "description": "Достичь рейтинга Эло 1550", "icon": "🥉", "type": "rating",
+                 "value": 1550},
+    "elo_1600": {"name": "Серебряный рейтинг", "description": "Достичь рейтинга Эло 1600", "icon": "⭐",
+                 "type": "rating", "value": 1600},
+    "elo_1650": {"name": "Золотой рейтинг", "description": "Достичь рейтинга Эло 1650", "icon": "⭐", "type": "rating",
+                 "value": 1650},
+    "elo_1700": {"name": "Платиновый рейтинг", "description": "Достичь рейтинга Эло 1700", "icon": "🏅",
+                 "type": "rating", "value": 1700},
+    "elo_1750": {"name": "Алмазный рейтинг", "description": "Достичь рейтинга Эло 1750", "icon": "💎", "type": "rating",
+                 "value": 1750},
+    "elo_1800": {"name": "Мастер Эло", "description": "Достичь рейтинга Эло 1800", "icon": "💎", "type": "rating",
+                 "value": 1800},
+    "elo_1900": {"name": "Элитный рейтинг", "description": "Достичь рейтинга Эло 1900", "icon": "👑", "type": "rating",
+                 "value": 1900},
+
+    # ========== СУДЕЙСКИЕ (judge) ==========
+    "first_judge": {"name": "Первое свидание с правосудием", "description": "Отсудить первую игру", "icon": "⚖️",
+                    "type": "judged", "value": 1},
+    "five_judged": {"name": "Стажёр", "description": "Отсудить 5 игр", "icon": "📋", "type": "judged", "value": 5},
+    "ten_judged": {"name": "Судья", "description": "Отсудить 10 игр", "icon": "👨‍⚖️", "type": "judged", "value": 10},
+    "twenty_judged": {"name": "Мировой судья", "description": "Отсудить 20 игр", "icon": "🏛️", "type": "judged",
+                      "value": 20},
+    "fifty_judged": {"name": "Верховный судья", "description": "Отсудить 50 игр", "icon": "⚖️👑", "type": "judged",
+                     "value": 50},
+
+    # ========== РОЛЕВЫЕ (roles) ==========
+    "sheriff_win": {"name": "Защитник города", "description": "Выиграть в роли Шерифа", "icon": "🕵️", "type": "role",
+                    "value": "Шериф"},
+    "mafia_win": {"name": "Тень", "description": "Выиграть в роли Мафии", "icon": "🔪", "type": "role",
+                  "value": "Мафия"},
+    "don_win": {"name": "Крёстный отец", "description": "Выиграть в роли Дона", "icon": "👑", "type": "role",
+                "value": "Дон"},
+
+    # ========== ОСОБЫЕ (special) ==========
+    "pu_once": {"name": "В центре внимания", "description": "Стать ПУ в первый раз", "icon": "🎯", "type": "special",
+                "value": 1},
+    "pu_three": {"name": "Частая цель", "description": "Стать ПУ 3 раза", "icon": "🎪", "type": "special", "value": 3},
+    "pu_master": {"name": "ПУ-мастер", "description": "Стать ПУ 5 раз", "icon": "👑", "type": "special", "value": 5},
+    "pu_ten": {"name": "Легендарная жертва", "description": "Стать ПУ 10 раз", "icon": "🦁", "type": "special",
+               "value": 10},
+}
+
+
+async def check_and_award_achievements(bot, user_id: int = None):
+    """
+    Проверяет и выдаёт ачивки.
+    Если user_id указан — только для одного игрока.
+    Если нет — для всех.
+    Возвращает список выданных ачивок.
+    """
+    async with database.get_db() as conn:
+
+        # Получаем игроков
+        if user_id:
+            players = [(user_id,)]
+        else:
+            async with conn.execute("SELECT user_id FROM users WHERE games_played > 0") as cur:
+                players = await cur.fetchall()
+
+        all_new_achievements = []
+
+        for (user_id,) in players:
+            # Получаем данные игрока
+            async with conn.execute("SELECT nickname, games_played, games_won, elo FROM users WHERE user_id = ?",
+                                    (user_id,)) as cur:
+                player_data = await cur.fetchone()
+                if not player_data:
+                    continue
+                nickname, games_played, games_won, elo = player_data
+
+            # Получаем уже имеющиеся ачивки
+            async with conn.execute("SELECT achievement_id FROM user_achievements WHERE user_id = ?",
+                                    (user_id,)) as cur:
+                earned = {row[0] for row in await cur.fetchall()}
+
+            # Получаем статистику по ролям (победы)
+            async with conn.execute("""
+                                    SELECT role, COUNT(*) as wins
+                                    FROM game_slots_history s
+                                             JOIN game_history g
+                                                  ON g.game_date = s.game_date AND g.game_number = s.game_number
+                                    WHERE s.user_id = ?
+                                      AND s.base_points = 1
+                                    GROUP BY s.role
+                                    """, (user_id,)) as cur:
+                role_wins = {row[0]: row[1] for row in await cur.fetchall()}
+
+            # Получаем количество ПУ
+            async with conn.execute("SELECT COUNT(*) FROM game_slots_history WHERE user_id = ? AND pu = 1",
+                                    (user_id,)) as cur:
+                pu_count = (await cur.fetchone())[0] or 0
+
+            # Получаем количество отсуженных игр
+            async with conn.execute("SELECT COUNT(*) FROM game_history WHERE judge_id = ?", (user_id,)) as cur:
+                judged_games = (await cur.fetchone())[0] or 0
+
+            # Проверяем каждую ачивку
+            for ach_id, ach in ACHIEVEMENTS.items():
+                if ach_id in earned:
+                    continue
+
+                earned_ach = False
+
+                if ach["type"] == "games":
+                    if games_played >= ach["value"]:
+                        earned_ach = True
+
+                elif ach["type"] == "wins":
+                    if games_won >= ach["value"]:
+                        earned_ach = True
+
+                elif ach["type"] == "rating":
+                    if elo and elo >= ach["value"]:
+                        earned_ach = True
+
+                elif ach["type"] == "judged":
+                    if judged_games >= ach["value"]:
+                        earned_ach = True
+
+                elif ach["type"] == "role":
+                    role_name = ach["value"]
+                    if role_wins.get(role_name, 0) >= 1:
+                        earned_ach = True
+
+                elif ach["type"] == "special":
+                    if ach_id == "pu_once" and pu_count >= 1:
+                        earned_ach = True
+                    elif ach_id == "pu_three" and pu_count >= 3:
+                        earned_ach = True
+                    elif ach_id == "pu_master" and pu_count >= 5:
+                        earned_ach = True
+                    elif ach_id == "pu_ten" and pu_count >= 10:
+                        earned_ach = True
+
+                if earned_ach:
+                    await conn.execute("""
+                                       INSERT INTO user_achievements (user_id, achievement_id, earned_at)
+                                       VALUES (?, ?, datetime('now'))
+                                       """, (user_id, ach_id))
+                    all_new_achievements.append((user_id, nickname, ach_id, ach))
+
+            await conn.commit()
+
+            # Отправляем уведомление о новых ачивках
+            for user_id, nickname, ach_id, ach in all_new_achievements:
+                if user_id == user_id:
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            f"🏆 **НОВАЯ АЧИВКА!**\n\n"
+                            f"{ach['icon']} **{ach['name']}**\n"
+                            f"_{ach['description']}_\n\n"
+                            f"Поздравляем! 🎉",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    except Exception as e:
+                        print(f"[ACHIEVEMENT] Failed to notify {nickname}: {e}")
+
+        return all_new_achievements
 
 # =========================================================
 # 1. ОБЩИЕ ВСПОМОГАТЕЛЬНЫЕ ШТУКИ
@@ -167,10 +369,6 @@ async def admin_all_users_btn(message: types.Message):
 
 @router.message(F.text == "💸 Разослать счета", F.chat.type == "private")
 async def admin_send_bills_btn(message: types.Message):
-    """
-    Разослать счета всем игрокам, участвовавшим в вечере.
-    Сумма зависит от количества сыгранных игр.
-    """
     if not _is_admin(message.from_user.id):
         return
 
@@ -190,14 +388,23 @@ async def admin_send_bills_btn(message: types.Message):
     failed_users = []
     bills_info = []
 
-    # Рассылаем счета
+    # Рассылаем счета и начисляем жетоны за игры
     for player in players:
         try:
             p_id = player[0]
+            nickname = player[3]
+            status = player[4]
+
             if await database.has_unpaid_session(p_id):
                 continue
 
-            # Подсчитываем количество игр игрока за этот вечер
+            # 1. Жетоны за запись (начисляются при архивации)
+            tokens_for_booking = 500 if status == "Вовремя" else 400 if status == "Позже" else 0
+            if tokens_for_booking > 0:
+                await database.add_tokens(p_id, tokens_for_booking)
+                print(f"[TOKENS] {nickname}: +{tokens_for_booking} жетонов за запись ({status})")
+
+            # 2. Сумма к оплате за игры
             games_played = await get_player_games_count_for_evening(p_id, date_str)
             cost = calculate_evening_cost(games_played)
 
@@ -215,8 +422,9 @@ async def admin_send_bills_btn(message: types.Message):
             await bot.send_message(
                 p_id,
                 f"🎭 Игры окончены!\n\n"
-                f"Вы сыграли {games_played} игр.\n"
-                f"Сумма к оплате: {cost}₽ (100₽ за игру, максимум 400₽)",
+                f"✅ Жетоны за запись: +{tokens_for_booking}\n"
+                f"🎮 Вы сыграли {games_played} игр.\n"
+                f"💰 Сумма к оплате: {cost}₽ (100₽ за игру, максимум 400₽)",
                 reply_markup=kb,
             )
             count += 1
@@ -224,6 +432,54 @@ async def admin_send_bills_btn(message: types.Message):
             print(f"[BILLS] Error for user {player}: {e}")
             failed_users.append(player[0])
             continue
+
+    # ========== АРХИВАЦИЯ ВЕЧЕРА И УСТАНОВКА ФЛАГА ==========
+    try:
+        await database.archive_current_evening()
+        await database.set_setting("evening_archived", "1")
+        await database.mark_evening_bills_sent(date_str)
+
+        # Отправляем отчёт админу
+        report = f"✅ Счета разосланы {count} игрокам.\n\n"
+        if bills_info:
+            report += "📊 **Детали:**\n" + "\n".join(bills_info) + "\n\n"
+        report += f"🗄 Вечер сохранён в истории.\n"
+        report += f"🗑 Текущий список записей очищен.\n"
+        report += f"📅 Следующий вечер будет на {get_next_friday()}"
+
+        await message.answer(report)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при архивации вечера: {e}")
+        return
+    # ========================================================
+
+    # ========== ВЫДАЧА АЧИВОК ВСЕМ ИГРОКАМ ==========
+    try:
+        # Импортируем функцию проверки ачивок
+        from achievements import check_and_award_achievements
+
+        # Проверяем и выдаём ачивки для всех игроков, у которых есть игры
+        new_achievements = await check_and_award_achievements(bot)
+
+        if new_achievements:
+            print(f"[ACHIEVEMENTS] Выдано {len(new_achievements)} новых ачивок")
+
+            # Отправляем админу отчёт о новых ачивках
+            achievements_report = "\n🏆 **Новые ачивки:**\n"
+            for user_id, nickname, ach_id, ach in new_achievements:
+                achievements_report += f"   • {nickname}: {ach['icon']} {ach['name']}\n"
+            await message.answer(achievements_report, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        print(f"[ACHIEVEMENTS] Error: {e}")
+    # ==================================================
+
+    if failed_users:
+        await message.answer(f"⚠️ Не удалось отправить счёт пользователям: {failed_users}")
+
+    await message.answer(
+        "🛠 Панель администратора.",
+        reply_markup=keyboards.admin_menu(),
+    )
 
     # ========== АРХИВАЦИЯ ВЕЧЕРА И УСТАНОВКА ФЛАГА ==========
     try:
