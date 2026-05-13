@@ -807,14 +807,26 @@ async def apply_game_result_to_users(slots: Dict[int, dict], winning_team: str):
 
 
 async def get_user_game_counters(user_id: int) -> Optional[Dict[str, int]]:
+    """
+    Возвращает общее количество игр, побед и очков.
+    Считает динамически по истории слотов для 100% точности.
+    """
     async with get_db() as conn:
-        async with conn.execute(
-                "SELECT games_played, games_won, points FROM users WHERE user_id = ?",
-                (user_id,)
-        ) as cur:
-            row = await cur.fetchone()
-            if not row:
+        # Проверяем, существует ли пользователь
+        async with conn.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)) as cur:
+            if not await cur.fetchone():
                 return None
+
+        # Считаем статистику напрямую из game_slots_history
+        async with conn.execute("""
+                                SELECT COUNT(*)                                         AS played,
+                                       SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END) AS won,
+                                       SUM(base_points)                                 AS points
+                                FROM game_slots_history
+                                WHERE user_id = ?
+                                """, (user_id,)) as cur:
+            row = await cur.fetchone()
+
             return {
                 "games_played": row[0] or 0,
                 "games_won": row[1] or 0,
@@ -1933,34 +1945,45 @@ async def get_judged_games_count(user_id: int) -> int:
 
 
 async def recalc_all_stats():
-    """Пересчитывает статистику всех игроков на основе game_slots_history"""
+    """Пересчитывает и синхронизирует статистику всех игроков во всех таблицах."""
     async with get_db() as conn:
-        # Сбрасываем статистику
+        print("[STATS] Начало глобального пересчета...")
+
+        # 1. Сбрасываем старые значения в users
         await conn.execute("UPDATE users SET games_played = 0, games_won = 0, points = 0")
 
-        # Пересчитываем
+        # 2. Получаем актуальные данные из истории слотов
         async with conn.execute("""
                                 SELECT user_id,
-                                       COUNT(*)                                         as games_played,
-                                       SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END) as games_won,
-                                       SUM(base_points)                                 as points
+                                       COUNT(*)                                         as games,
+                                       SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END) as wins,
+                                       SUM(base_points)                                 as pts
                                 FROM game_slots_history
                                 WHERE user_id IS NOT NULL
                                 GROUP BY user_id
                                 """) as cur:
             stats = await cur.fetchall()
 
-        for user_id, games, wins, points in stats:
+        for user_id, games, wins, pts in stats:
+            # Обновляем таблицу users
             await conn.execute("""
                                UPDATE users
                                SET games_played = ?,
                                    games_won    = ?,
                                    points       = ?
                                WHERE user_id = ?
-                               """, (games, wins, points, user_id))
+                               """, (games, wins, pts, user_id))
+
+            # Обновляем таблицу elo_ratings (счётчики игр внутри неё)
+            await conn.execute("""
+                               UPDATE elo_ratings
+                               SET games_played = ?,
+                                   games_won    = ?
+                               WHERE user_id = ?
+                               """, (games, wins, user_id))
 
         await conn.commit()
-        print(f"[STATS] Пересчитана статистика для {len(stats)} игроков")
+        print(f"[STATS] Пересчет завершен. Обновлено игроков: {len(stats)}")
 
 
 async def update_game_outcome(game_id: int, winner_label: str) -> None:
