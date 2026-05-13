@@ -23,19 +23,11 @@ router = Router()
 
 
 async def get_current_game_date() -> str:
-    """
-    Возвращает дату для текущей игры.
-    Если вечер ещё не архивирован -> используем текущую пятницу.
-    Если вечер уже архивирован -> используем следующую пятницу.
-    """
-    # Проверяем, архивирован ли текущий вечер
     is_archived = await database.get_setting("evening_archived") == "1"
-
     from handlers.booking import get_next_friday
     current_friday = get_next_friday()
 
     if is_archived:
-        # Если вечер архивирован -> берём следующую пятницу
         now = datetime.utcnow()
         days_ahead = 4 - now.weekday()
         if days_ahead <= 0:
@@ -47,7 +39,6 @@ async def get_current_game_date() -> str:
 
 
 async def show_players_list_for_game(message: types.Message, state: FSMContext, booked: list | None = None):
-    """Показывает предварительный список всех 10 слотов + выбор судьи."""
     if booked is None:
         data = await state.get_data()
         booked = data.get("booked_players", []) or []
@@ -55,7 +46,6 @@ async def show_players_list_for_game(message: types.Message, state: FSMContext, 
     judge_id = await database.get_current_game_judge_id()
     judge_name = await database.get_current_game_judge_name()
 
-    # Получаем список всех игроков (включая тех, кто может быть судьёй)
     all_players = []
     for p in booked:
         if p and p[3] not in [None, "Свободно", ""]:
@@ -63,7 +53,6 @@ async def show_players_list_for_game(message: types.Message, state: FSMContext, 
 
     lines = [f"📋 Предварительный состав игры (10 слотов):\n"]
 
-    # Отображение судьи
     if judge_name:
         lines.append(f"⚖️ **Судья:** {judge_name}")
     else:
@@ -82,12 +71,9 @@ async def show_players_list_for_game(message: types.Message, state: FSMContext, 
     lines.append(f"\n👥 Заполнено слотов: {real_players}/10\n")
     lines.append("⚠️ Минимальное количество игроков: 4" if real_players < 4 else "✅ Можно начинать игру!")
 
-    # Клавиатура с выбором судьи
     kb = keyboards.game_confirm_kb()
 
-    # Добавляем кнопку выбора судьи, если есть игроки
     if all_players:
-        # Создаём новую клавиатуру с дополнительной кнопкой
         builder = InlineKeyboardBuilder()
         builder.button(text="👨‍⚖️ Выбрать судью", callback_data="game_choose_judge")
         builder.button(text="✅ Подтвердить", callback_data="game_confirm_yes")
@@ -101,11 +87,9 @@ async def show_players_list_for_game(message: types.Message, state: FSMContext, 
 
 @router.callback_query(F.data == "game_choose_judge")
 async def choose_judge_start(callback: CallbackQuery, state: FSMContext):
-    """Начало выбора судьи - показываем список игроков"""
     data = await state.get_data()
     booked = data.get("booked_players", []) or []
 
-    # Собираем всех записанных игроков
     players = []
     for p in booked:
         if p and p[3] not in [None, "Свободно", ""] and p[1] not in ["Свободно"]:
@@ -117,7 +101,6 @@ async def choose_judge_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Нет игроков для выбора судьи!", show_alert=True)
         return
 
-    # Строим клавиатуру выбора судьи
     builder = InlineKeyboardBuilder()
     for user_id, name in players:
         name_short = name[:20] + ".." if len(name) > 20 else name
@@ -136,14 +119,12 @@ async def choose_judge_start(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("game_set_judge:"))
 async def set_judge(callback: CallbackQuery, state: FSMContext):
-    """Устанавливает выбранного судью"""
     try:
         judge_id = int(callback.data.split(":")[1])
     except:
         await callback.answer("Некорректные данные", show_alert=True)
         return
 
-    # Получаем данные пользователя
     user_info = await database.get_user_by_id(judge_id)
     if user_info:
         user_id, full_name, username, nickname = user_info
@@ -151,31 +132,25 @@ async def set_judge(callback: CallbackQuery, state: FSMContext):
     else:
         judge_name = f"ID {judge_id}"
 
-    # Сохраняем судью
     await database.set_current_game_judge_id(judge_id)
     await database.set_current_game_judge_name(judge_name)
 
-    # Удаляем судью из списка игроков (если он там есть)
     data = await state.get_data()
     booked = data.get("booked_players", []) or []
 
     new_booked = []
     for p in booked:
         if p and p[0] == judge_id:
-            continue  # пропускаем судью
+            continue
         new_booked.append(p)
 
     await state.update_data(booked_players=new_booked)
-
     await callback.answer(f"✅ Судья выбран: {judge_name}")
-
-    # Показываем обновлённый список
     await show_players_list_for_game(callback.message, state, new_booked)
 
 
 @router.callback_query(F.data == "game_cancel_judge")
 async def cancel_choose_judge(callback: CallbackQuery, state: FSMContext):
-    """Отмена выбора судьи - возврат к списку"""
     data = await state.get_data()
     booked = data.get("booked_players", []) or []
     await show_players_list_for_game(callback.message, state, booked)
@@ -197,12 +172,9 @@ async def start_new_game(message: types.Message, state: FSMContext):
         await message.answer("На вечер никто не записан.", reply_markup=rm)
         return
 
-    # ========== ОГРАНИЧЕНИЕ ДО 10 ИГРОКОВ ==========
-    # Фильтруем только тех, кто идёт (Вовремя или Позже)
     attending_players = [p for p in booked_raw if p and p[4] in ("Вовремя", "Позже")]
 
     if len(attending_players) > 10:
-        # Случайно выбираем 10 игроков
         booked = random.sample(attending_players, 10)
         await message.answer(
             f"🎲 В очереди {len(attending_players)} человек. "
@@ -218,9 +190,7 @@ async def start_new_game(message: types.Message, state: FSMContext):
         return
     else:
         booked = attending_players
-    # ==============================================
 
-    # Сбрасываем судью (пока не выбран)
     await database.set_current_game_judge_id(None)
     await database.set_current_game_judge_name(None)
 
@@ -249,9 +219,7 @@ async def start_new_game(message: types.Message, state: FSMContext):
 async def confirm_game_players(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     booked = data.get("booked_players", []) or []
-    judge_id = await database.get_current_game_judge_id()
 
-    # Собираем игроков (судья уже исключён из списка на предыдущем этапе)
     real_players = []
     for p in booked:
         if not p:
@@ -268,10 +236,8 @@ async def confirm_game_players(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # Проверяем, выбран ли судья
     judge_name = await database.get_current_game_judge_name()
     if not judge_name:
-        # Предлагаем выбрать судью
         await callback.message.edit_text(
             "⚠️ **Судья не выбран!**\n\n"
             "Пожалуйста, выберите судью из списка игроков или нажмите «Пропустить», если судья будет назначен позже.\n\n"
@@ -300,7 +266,6 @@ async def confirm_game_players(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "game_confirm_skip_judge")
 async def confirm_skip_judge(callback: CallbackQuery, state: FSMContext):
-    """Пропустить выбор судьи (судья будет назначен позже)"""
     data = await state.get_data()
     booked = data.get("booked_players", []) or []
 
@@ -405,8 +370,7 @@ async def show_players_for_role_selection(message: types.Message, state: FSMCont
         lines.append(f"• Слот {slot_num}: {name}")
     lines.append("\nНажмите на игрока, чтобы выбрать.")
 
-    await message.answer("\n".join(lines), reply_markup=keyboards.players_selection_kb(available, role_key, count),
-                         parse_mode="Markdown")
+    await message.answer("\n".join(lines), reply_markup=keyboards.players_selection_kb(available, role_key, count), parse_mode="Markdown")
 
 
 @router.callback_query(F.data.startswith("select_mafia_"))
@@ -489,59 +453,150 @@ async def select_sheriff_callback(callback: CallbackQuery, state: FSMContext):
             info["team"] = "Красные"
 
     await state.update_data(slots=slots, roles_assigned=True)
-    await save_slots(state, slots)
 
-    # ========== ПОЛУЧАЕМ ДАТУ ИГРЫ ==========
+    # Инициализация игры в базе
     game_date = await get_current_game_date()
     await database.set_current_game_date(game_date)
-    # Сбрасываем флаг архивации (начало нового вечера)
     await database.set_setting("evening_archived", "0")
-    # ========================================
 
     evening_games = await database.get_games_by_date(game_date)
     evening_num = len(evening_games) + 1
     await database.set_current_game_number(evening_num)
+
     total_games = await database.get_total_games_count()
     global_num = total_games + 1
     await database.set_current_global_game_number(global_num)
+
+    judge_id = await database.get_current_game_judge_id() or 0
+    judge_name = await database.get_current_game_judge_name()
+
+    # Создаем запись в базе СРАЗУ
+    game_id = await database.save_game_history(
+        game_date=game_date,
+        winner_label="Идет игра...",
+        protocol_text="Протокол формируется...",
+        game_number=evening_num,
+        global_game_number=global_num,
+        judge_id=judge_id
+    )
+
+    await database.save_game_slots_history(game_date, slots, game_number=evening_num)
     await database.set_setting("game_active", "1")
+    await state.update_data(current_game_id=game_id)
 
     try:
         await callback.message.delete()
     except Exception:
         pass
 
-    judge_name = await database.get_current_game_judge_name()
     await callback.message.answer(
-        f"✅ **Игра создана!**\n\n🎲 Игра №{evening_num} ({game_date}): №{global_num} по общей истории\n\n"
+        f"✅ **Игра создана и внесена в базу!**\n\n"
+        f"🎲 Игра №{evening_num} ({game_date}): №{global_num} в истории\n"
         f"⚖️ **Судья:** {judge_name if judge_name else 'Не назначен'}\n\n"
         f"{build_slots_text(slots, judge_name=judge_name)}",
         reply_markup=keyboards.game_admin_menu(),
         parse_mode="Markdown"
     )
 
-    # ========== ОТКРЫТИЕ СТАВОК (ВРЕМЕННО ОТКЛЮЧЕНО) ==========
-    # Получаем ID созданной игры
-    # async with database.get_db() as conn:
-    #     async with conn.execute("SELECT id FROM game_history ORDER BY id DESC LIMIT 1") as cur:
-    #         row = await cur.fetchone()
-    #         if row:
-    #             game_id = row[0]
-    #             await open_bets_for_game(callback.message, state, game_id, evening_num)
-    # ==========================================================
+    # Открытие ставок
+    await open_bets_for_game(callback.message, state, game_id, evening_num)
 
     await state.set_state(GameCreateState.editing_slots)
-    await callback.answer("✅ Игра готова к старту!")
+    await callback.answer("✅ Игра готова, ставки разосланы!")
 
+
+# ========== СТАВКИ ==========
+async def open_bets_for_game(message: types.Message, state: FSMContext, game_id: int, game_number: int):
+    """Открывает ставки на игру и рассылает предложения зрителям"""
+    data = await state.get_data()
+    slots = data.get("slots") or {}
+
+    red_players, black_players = [], []
+    red_elos, black_elos = [], []
+
+    for slot_num, slot in slots.items():
+        u_id = slot.get("user_id")
+        if u_id and u_id > 0:
+            elo = await database.get_elo(u_id)
+            player_info = {"user_id": u_id, "nickname": slot.get("nickname"), "slot_num": slot_num}
+
+            if slot.get("team") == "Красные":
+                red_players.append(player_info)
+                red_elos.append(elo)
+            else:
+                black_players.append(player_info)
+                black_elos.append(elo)
+
+    await database.set_setting(f"bet_game_{game_id}_red", json.dumps(red_players))
+    await database.set_setting(f"bet_game_{game_id}_black", json.dumps(black_players))
+
+    bet_id = await database.create_bet(
+        game_id=game_id,
+        game_number=game_number,
+        game_date=await database.get_current_game_date(),
+        created_by=message.from_user.id
+    )
+
+    red_avg = sum(red_elos) / len(red_elos) if red_elos else 1500
+    black_avg = sum(black_elos) / len(black_elos) if black_elos else 1500
+
+    async with database.get_db() as conn:
+        async with conn.execute("SELECT user_id FROM users") as cur:
+            all_users = [row[0] for row in await cur.fetchall()]
+
+    players_in_game = [p["user_id"] for p in red_players + black_players]
+    spectators = [uid for uid in all_users if uid not in players_in_game and uid > 0]
+
+    bot = message.bot
+    sent_count = 0
+
+    for user_id in spectators:
+        try:
+            await send_bet_offer_to_user(
+                bot, user_id, game_id, game_number,
+                red_players, black_players, red_avg, black_avg
+            )
+            sent_count += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            continue
+
+    await message.answer(f"📊 **Ставки открыты!**\nПредложения отправлены {sent_count} зрителям.")
+
+async def send_bet_offer_to_user(bot: Bot, user_id: int, game_id: int, game_number: int,
+                                 red_players: list, black_players: list,
+                                 red_avg_elo: float, black_avg_elo: float):
+    """Формирует и отправляет сообщение со ставкой"""
+    red_prob = 1 / (1 + 10 ** ((black_avg_elo - red_avg_elo) / 400))
+    black_prob = 1 - red_prob
+
+    red_coef = max(1.1, min(5.0, round(1 / red_prob, 2)))
+    black_coef = max(1.1, min(5.0, round(1 / black_prob, 2)))
+
+    red_list = ", ".join([p['nickname'] for p in red_players])
+    black_list = ", ".join([p['nickname'] for p in black_players])
+
+    text = (
+        f"🎲 **СТАВКИ НА ИГРУ №{game_number}**\n\n"
+        f"🔴 **КРАСНЫЕ** (ср. Эло: {red_avg_elo:.0f}):\n_{red_list}_\n\n"
+        f"⚫ **ЧЁРНЫЕ** (ср. Эло: {black_avg_elo:.0f}):\n_{black_list}_\n\n"
+        f"📈 **Коэффициенты:**\n"
+        f"└ Красные: **x{red_coef}**\n"
+        f"└ Чёрные: **x{black_coef}**\n\n"
+        f"💰 Баланс: {await database.get_user_tokens(user_id)} 🪙"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"🔴 На Красных (x{red_coef})", callback_data=f"bet_red:{game_id}")
+    builder.button(text=f"⚫ На Чёрных (x{black_coef})", callback_data=f"bet_black:{game_id}")
+    builder.button(text="❌ Пропустить", callback_data=f"bet_skip:{game_id}")
+    builder.adjust(2, 1)
+
+    await bot.send_message(user_id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
 # ========== РЕДАКТИРОВАНИЕ СПИСКА ИГРОКОВ ==========
-
 @router.message(GameCreateState.editing_players_list, F.text.regexp(r"^\d+\s+"))
 async def edit_player_by_number(message: types.Message, state: FSMContext):
-    """
-    Редактирование списка игроков по номеру слота.
-    Доступно только для судей/админов.
-    """
     if not await ensure_judge_pm(message):
         return
 
@@ -571,176 +626,31 @@ async def edit_player_by_number(message: types.Message, state: FSMContext):
     user_data = await database.get_user_by_nickname(new_nick)
 
     while len(booked) < slot_num:
-        booked.append(
-            (-(len(booked) + 1), "Свободно", None, "Свободно", "Пусто")
-        )
+        booked.append((-(len(booked) + 1), "Свободно", None, "Свободно", "Пусто"))
 
     old_name = booked[slot_num - 1][3] or booked[slot_num - 1][1]
 
     if user_data:
         user_id, full_name, username, nickname = user_data
-        booked[slot_num - 1] = (
-            user_id,
-            full_name,
-            username,
-            nickname,
-            "Добавлен вручную",
-        )
+        booked[slot_num - 1] = (user_id, full_name, username, nickname, "Добавлен вручную")
         await state.update_data(booked_players=booked)
-        await message.answer(
-            f"✅ Слот {slot_num}: {old_name} → {nickname} (найден в БД)"
-        )
+        await message.answer(f"✅ Слот {slot_num}: {old_name} → {nickname} (найден в БД)")
     else:
-        booked[slot_num - 1] = (
-            -slot_num,
-            new_nick,
-            None,
-            new_nick,
-            "Добавлен вручную",
-        )
+        booked[slot_num - 1] = (-slot_num, new_nick, None, new_nick, "Добавлен вручную")
         await state.update_data(booked_players=booked)
-        await message.answer(
-            f"⚠️ Слот {slot_num}: {old_name} → {new_nick} (не найден в БД, статистика не сохранится)"
-        )
+        await message.answer(f"⚠️ Слот {slot_num}: {old_name} → {new_nick} (не найден в БД, статистика не сохранится)")
 
     await show_current_players_list(message, state)
 
-
-# ========== СТАВКИ ==========
-
-async def send_bet_offer_to_user(bot: Bot, user_id: int, game_id: int, game_number: int,
-                                 red_players: list, black_players: list,
-                                 red_avg_elo: float, black_avg_elo: float):
-    """Отправляет одному пользователю предложение сделать ставку"""
-
-    # Проверяем, есть ли пользователь в БД (писал ли боту)
-    user_exists = await database.get_user_by_id(user_id)
-    if not user_exists:
-        print(f"[BETS] User {user_id} not found in DB, skipping")
-        return
-
-    # Рассчитываем коэффициенты
-    red_prob = 1 / (1 + 10 ** ((black_avg_elo - red_avg_elo) / 400))
-    black_prob = 1 - red_prob
-
-    red_coef = round(1 / red_prob, 2) if red_prob > 0 else 2.0
-    black_coef = round(1 / black_prob, 2) if black_prob > 0 else 2.0
-
-    # Формируем текст (без Markdown)
-    red_names = ", ".join([p.get("nickname", f"Игрок {p['slot_num']}") for p in red_players[:5]])
-    if len(red_players) > 5:
-        red_names += f" и ещё {len(red_players) - 5}"
-
-    black_names = ", ".join([p.get("nickname", f"Игрок {p['slot_num']}") for p in black_players[:5]])
-    if len(black_players) > 5:
-        black_names += f" и ещё {len(black_players) - 5}"
-
-    text = (
-        f"📊 СТАВКИ НА ИГРУ #{game_number}\n\n"
-        f"🔴 КРАСНЫЕ (ср.Эло {red_avg_elo:.0f}):\n"
-        f"   {red_names}\n\n"
-        f"⚫ ЧЁРНЫЕ (ср.Эло {black_avg_elo:.0f}):\n"
-        f"   {black_names}\n\n"
-        f"📈 КОЭФФИЦИЕНТЫ:\n"
-        f"   🔴 На красных: {red_coef}\n"
-        f"   ⚫ На чёрных: {black_coef}\n\n"
-        f"💰 Минимальная ставка: 50 жетонов\n"
-        f"💡 Выигрыш = ставка × коэффициент\n\n"
-        f"Сделайте ставку (ставки принимаются до окончания игры):"
-    )
-
-    # Клавиатура для ставок
-    builder = InlineKeyboardBuilder()
-    builder.button(text=f"🔴 Поставить на красных (x{red_coef})", callback_data=f"bet_red:{game_id}")
-    builder.button(text=f"⚫ Поставить на чёрных (x{black_coef})", callback_data=f"bet_black:{game_id}")
-    builder.button(text="❌ Пропустить", callback_data=f"bet_skip:{game_id}")
-    builder.adjust(1)
-
-    try:
-        await bot.send_message(user_id, text, reply_markup=builder.as_markup())
-    except Exception as e:
-        error_msg = str(e).lower()
-        if "can't initiate" in error_msg:
-            print(f"[BETS] User {user_id} never started bot, skipping")
-        elif "blocked" in error_msg:
-            print(f"[BETS] User {user_id} blocked the bot, skipping")
-        elif "chat not found" in error_msg:
-            print(f"[BETS] Chat {user_id} not found, skipping")
-        else:
-            print(f"[BETS] Failed to send to {user_id}: {e}")
-
-
-async def open_bets_for_game(message: types.Message, state: FSMContext, game_id: int, game_number: int):
-    """Открывает ставки на игру и рассылает предложения всем не играющим"""
-    data = await state.get_data()
-    slots = data.get("slots") or {}
-
-    # Получаем игроков и их Эло
-    red_players = []
-    black_players = []
-    red_elos = []
-    black_elos = []
-
-    for slot_num, slot in slots.items():
-        if slot.get("user_id") and slot.get("user_id") > 0:
-            team = slot.get("team")
-            elo = await database.get_elo(slot["user_id"])
-            if team == "Красные":
-                red_players.append({"user_id": slot["user_id"], "nickname": slot.get("nickname"), "slot_num": slot_num})
-                red_elos.append(elo)
-            elif team == "Чёрные":
-                black_players.append(
-                    {"user_id": slot["user_id"], "nickname": slot.get("nickname"), "slot_num": slot_num})
-                black_elos.append(elo)
-
-    # Сохраняем состав игры для ставок
-    await database.set_setting(f"bet_game_{game_id}_red", json.dumps(red_players))
-    await database.set_setting(f"bet_game_{game_id}_black", json.dumps(black_players))
-
-    # Создаём запись о ставках
-    bet_id = await database.create_bet(game_id, game_number, await database.get_current_game_date(),
-                                       message.from_user.id)
-    await state.update_data(current_bet_id=bet_id)
-
-    # Получаем всех пользователей
-    async with database.get_db() as conn:
-        async with conn.execute("SELECT user_id FROM users") as cur:
-            all_users = [row[0] for row in await cur.fetchall()]
-
-    # Исключаем игроков
-    players_in_game = [p["user_id"] for p in red_players + black_players]
-    spectators = [uid for uid in all_users if uid not in players_in_game and uid > 0]
-
-    # Рассылаем предложения
-    red_avg = sum(red_elos) / len(red_elos) if red_elos else 1500
-    black_avg = sum(black_elos) / len(black_elos) if black_elos else 1500
-
-    bot = message.bot
-
-    sent = 0
-    for user_id in spectators:
-        await send_bet_offer_to_user(bot, user_id, game_id, game_number, red_players, black_players, red_avg, black_avg)
-        sent += 1
-        await asyncio.sleep(0.05)
-
-    await message.answer(f"📊 Ставки открыты! Предложения отправлены {sent} зрителям.")
-
-
 @router.message(GameCreateState.editing_players_list, F.text.regexp(r"^очистить\s+\d+"))
 async def clear_player_by_number(message: types.Message, state: FSMContext):
-    """
-    Очистка слота по номеру.
-    Доступно только для судей/админов.
-    """
     if not await ensure_judge_pm(message):
         return
 
     try:
         slot_num = int(message.text.replace("очистить", "").strip())
     except ValueError:
-        await message.answer(
-            "❌ Формат: `очистить <номер>`\nПример: `очистить 7`"
-        )
+        await message.answer("❌ Формат: `очистить <номер>`\nПример: `очистить 7`")
         return
 
     if slot_num < 1 or slot_num > 10:
@@ -751,13 +661,7 @@ async def clear_player_by_number(message: types.Message, state: FSMContext):
     booked = data.get("booked_players", []) or []
 
     if slot_num <= len(booked):
-        booked[slot_num - 1] = (
-            -slot_num,
-            "Свободно",
-            None,
-            "Свободно",
-            "Пусто",
-        )
+        booked[slot_num - 1] = (-slot_num, "Свободно", None, "Свободно", "Пусто")
         await state.update_data(booked_players=booked)
         await message.answer(f"✅ Слот {slot_num} очищен")
     else:

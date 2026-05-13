@@ -338,7 +338,11 @@ async def build_all_games_history_text(limit: int = 5) -> str:
     lines: List[str] = ["📜 Последние игры:\n"]
     for g in games:
         gid = g["id"]
-        date_str = g["game_date"] or "-"
+        # Было: date_str = g["game_date"] or "-"
+        # Стало: получаем дату из базы и «красим» её для пользователя
+        raw_date = g["game_date"] or "-"
+        date_str = database.format_date_to_user(raw_date)
+
         winner = g["winner_label"] or "Итог не указан"
         protocol_text = g["protocol_text"] or ""
 
@@ -357,7 +361,10 @@ async def build_user_games_history_text(user_id: int, limit: int = 5) -> str:
     lines: List[str] = ["📜 Твои игры:\n"]
     for g in games:
         gid = g["id"]
-        date_str = g["game_date"] or "-"
+        # То же самое: превращаем 2026-05-13 в 13.05.2026
+        raw_date = g["game_date"] or "-"
+        date_str = database.format_date_to_user(raw_date)
+
         winner = g["winner_label"] or "Итог не указан"
         protocol_text = g["protocol_text"] or ""
 

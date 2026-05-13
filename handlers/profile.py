@@ -223,12 +223,15 @@ async def get_all_game_dates() -> List[Tuple[str, int]]:
 
 
 def get_games_by_date_kb(dates: List[Tuple[str, int]], prefix: str) -> InlineKeyboardMarkup:
-    """Клавиатура для выбора даты"""
+    """Клавиатура для выбора даты (с красивым отображением)"""
     builder = []
     for date_str, count in dates:
+        # Конвертируем ISO дату в ДД.ММ.ГГГГ только для ТЕКСТА на кнопке
+        display_date = database.format_date_to_user(date_str)
+
         builder.append([InlineKeyboardButton(
-            text=f"📅 {date_str} ({count} игр)",
-            callback_data=f"{prefix}_date:{date_str}"
+            text=f"📅 {display_date} ({count} игр)",
+            callback_data=f"{prefix}_date:{date_str}"  # Внутри остается 2026-05-13 для поиска
         )])
     builder.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_games_menu")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
@@ -666,7 +669,8 @@ async def get_best_by_role(role_name: str) -> tuple:
         async with conn.execute("""
                                 SELECT u.nickname,
                                        u.full_name,
-                                       COALESCE(SUM(s.bonus_points), 0) as total_bonus
+                                       COALESCE(SUM(s.bonus_points + s.lh_points + s.will_protocol_points +
+                                                    s.will_opinion_points + s.dc_points), 0) as total_bonus
                                 FROM game_slots_history s
                                          JOIN users u ON s.user_id = u.user_id
                                 WHERE s.role = ?
@@ -708,9 +712,62 @@ async def show_rating(message: types.Message):
     await show_rating_page(message, 0, rating)
 
 
-async def show_rating_page(message: types.Message, page: int, rating: list):
-    """Показывает конкретную страницу рейтинга"""
+def build_compact_rating_page(players: list, page: int, total_pages: int, total_players: int, mvp_data: tuple,
+                              roles_data: dict) -> str:
+    """Генерирует компактный и красивый текст для страницы рейтинга."""
+    lines = [
+        f"🏆 **РЕЙТИНГ ЭЛО** • Страница {page}/{total_pages}",
+        f"👥 Всего игроков: {total_players}\n",
+        "```"  # Начинаем моноширинный блок для основного рейтинга
+    ]
 
+    for p in players:
+        pos = p["place"]
+        name = p["nickname"] or "Неизвестный"
+        elo = p["elo"]
+        games = p["games_played"]
+        wins = p["games_won"]
+        winrate = int((wins / games * 100)) if games > 0 else 0
+
+        icon = f"{pos:2}."
+        name_pad = name[:12].ljust(12)
+        games_pad = f"{games:>2}"
+        wins_pad = f"{wins:>2}"
+        win_pad = f"{winrate:>3}"
+
+        lines.append(f"{icon} {name_pad} • {elo} ⚜️ | Игр: {games_pad} | Побед: {wins_pad} ({win_pad}%)")
+
+    lines.append("```\n")
+
+    # Показываем номинации только на первой странице
+    if page == 1:
+        mvp_name, mvp_score = mvp_data
+        if mvp_name and mvp_score > 0:
+            lines.append(f"🌟 **MVP (Общий Доп):** {mvp_name} (+{mvp_score})\n")
+
+        if roles_data:
+            lines.append("🎭 **Лучшие по ролям:**")
+            lines.append("```")  # Открываем второй моноширинный блок для ролей
+
+            # Строгий порядок ролей
+            for role_name in ["Мирный", "Шериф", "Мафия", "Дон"]:
+                if role_name in roles_data:
+                    name, score = roles_data[role_name]
+
+                    # Выравнивание: Роль (6 символов), Имя (12 символов)
+                    role_pad = role_name.ljust(6)
+                    name_pad = name[:12].ljust(12)
+                    score_pad = f"+{score:.1f}"
+
+                    lines.append(f"{role_pad} | {name_pad} | {score_pad}")
+
+            lines.append("```")
+
+    return "\n".join(lines)
+
+
+async def show_rating_page(message: types.Message, page: int, rating: list):
+    """Показывает конкретную страницу рейтинга (Новое сообщение)"""
     page_size = 10
     total_players = len(rating)
     total_pages = (total_players + page_size - 1) // page_size
@@ -718,71 +775,85 @@ async def show_rating_page(message: types.Message, page: int, rating: list):
     end_idx = min(start_idx + page_size, total_players)
     current_page_players = rating[start_idx:end_idx]
 
-    # Формируем текст
-    text = "🏆 **РЕЙТИНГ ЭЛО**\n\n"
-    text += "Рейтинг рассчитывается по формуле:\n"
-    text += "• Победа над сильным соперником даёт больше очков\n"
-    text += "• Доп. баллы (ЛХ, ПР, МН) влияют на рейтинг\n"
-    text += "• Учитывается сила команды (carry-эффект)\n\n"
+    # Подгружаем номинации только для 1 страницы
+    mvp_data = await get_mvp() if page == 0 else (None, 0)
+    roles_data = {}
+    if page == 0:
+        for role_name in ["Мирный", "Шериф", "Мафия", "Дон"]:
+            best_name, best_bonus = await get_best_by_role(role_name)
+            if best_name and best_bonus > 0:
+                # Теперь мы сохраняем и имя, и баллы!
+                roles_data[role_name] = (best_name, best_bonus)
 
-    # Добавляем информацию о странице
-    text += f"📊 **Страница {page + 1} из {total_pages}** (всего игроков: {total_players})\n\n"
+    text = build_compact_rating_page(
+        players=current_page_players,
+        page=page + 1,
+        total_pages=total_pages,
+        total_players=total_players,
+        mvp_data=mvp_data,
+        roles_data=roles_data
+    )
 
-    for p in current_page_players:
-        place = p["place"]
-        if place == 1:
-            medal = "🥇"
-        elif place == 2:
-            medal = "🥈"
-        elif place == 3:
-            medal = "🥉"
-        else:
-            medal = f"{place}."
-
-        name = p["nickname"] or "Неизвестный"
-        winrate = round(p["games_won"] / p["games_played"] * 100, 1) if p["games_played"] > 0 else 0
-
-        text += f"{medal} **{name}** — **{p['elo']}** очков\n"
-        text += f"   🎮 Игр: {p['games_played']} | 🏆 Побед: {p['games_won']} ({winrate}%)\n\n"
-
-    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    text += "🏅 **MVP (лучший по доп. баллам)**\n\n"
-
-    mvp_name, mvp_bonus = await get_mvp()
-    if mvp_name and mvp_bonus > 0:
-        text += f"🏆 **{mvp_name}** — **{mvp_bonus:.1f}** доп. баллов\n\n"
-    else:
-        text += "📊 Нет данных для MVP\n\n"
-
-    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    text += "🎭 **Лучшие по ролям (Доп)**\n\n"
-
-    roles = [
-        ("Мирный", "👤"),
-        ("Шериф", "🕵️"),
-        ("Мафия", "🔪"),
-        ("Дон", "👑"),
-    ]
-
-    for role_name, icon in roles:
-        best_name, best_bonus = await get_best_by_role(role_name)
-        if best_name and best_bonus > 0:
-            text += f"{icon} **{role_name}**: {best_name} — **{best_bonus:.1f}** доп.\n"
-        else:
-            text += f"{icon} **{role_name}**: нет данных\n"
-
-    # Формируем клавиатуру для пагинации
     builder = InlineKeyboardBuilder()
-
     if page > 0:
-        builder.button(text="◀️ Предыдущие", callback_data=f"rating_page:{page}")
+        builder.button(text="◀️ Назад", callback_data=f"rating_page:{page - 1}")
     if page < total_pages - 1:
-        builder.button(text="Следующие ▶️", callback_data=f"rating_page:{page + 1}")
+        builder.button(text="Вперед ▶️", callback_data=f"rating_page:{page + 1}")
 
+    builder.button(text="ℹ️ Как считается рейтинг?", callback_data="rating_rules")
     builder.button(text="❌ Закрыть", callback_data="rating_close")
-    builder.adjust(2, 1)
+
+    if page > 0 and page < total_pages - 1:
+        builder.adjust(2, 1, 1)
+    else:
+        builder.adjust(1, 1, 1)
 
     await message.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
+
+
+async def show_rating_page_from_callback(callback: types.CallbackQuery, page: int, rating: list):
+    """Показывает страницу рейтинга (Редактирование сообщения по кнопке)"""
+    page_size = 10
+    total_players = len(rating)
+    total_pages = (total_players + page_size - 1) // page_size
+    start_idx = page * page_size
+    end_idx = min(start_idx + page_size, total_players)
+    current_page_players = rating[start_idx:end_idx]
+
+    mvp_data = await get_mvp() if page == 0 else (None, 0)
+    roles_data = {}
+    if page == 0:
+        for role_name in ["Мирный", "Шериф", "Мафия", "Дон"]:
+            best_name, best_bonus = await get_best_by_role(role_name)
+            if best_name and best_bonus > 0:
+                # Теперь мы сохраняем и имя, и баллы!
+                roles_data[role_name] = (best_name, best_bonus)
+
+    text = build_compact_rating_page(
+        players=current_page_players,
+        page=page + 1,
+        total_pages=total_pages,
+        total_players=total_players,
+        mvp_data=mvp_data,
+        roles_data=roles_data
+    )
+
+    builder = InlineKeyboardBuilder()
+    if page > 0:
+        builder.button(text="◀️ Назад", callback_data=f"rating_page:{page - 1}")
+    if page < total_pages - 1:
+        builder.button(text="Вперед ▶️", callback_data=f"rating_page:{page + 1}")
+
+    builder.button(text="ℹ️ Как считается рейтинг?", callback_data="rating_rules")
+    builder.button(text="❌ Закрыть", callback_data="rating_close")
+
+    if page > 0 and page < total_pages - 1:
+        builder.adjust(2, 1, 1)
+    else:
+        builder.adjust(1, 1, 1)
+
+    await callback.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("rating_page:"))
@@ -790,22 +861,16 @@ async def rating_page_callback(callback: types.CallbackQuery):
     """Обработчик переключения страниц рейтинга"""
     page = int(callback.data.split(":")[1])
 
-    # Получаем рейтинг из кэша бота
     if not hasattr(callback.bot, "rating_cache") or callback.message.chat.id not in callback.bot.rating_cache:
         await callback.answer("Данные устарели, нажмите '🏆 Рейтинг' заново", show_alert=True)
         return
 
     rating = callback.bot.rating_cache[callback.message.chat.id]
-
-    # Обновляем сообщение
-    await callback.message.edit_text("🔄 Загрузка...")
     await show_rating_page_from_callback(callback, page, rating)
-    await callback.answer()
 
 
 async def show_rating_page_from_callback(callback: types.CallbackQuery, page: int, rating: list):
-    """Показывает страницу рейтинга из callback"""
-
+    """Показывает страницу рейтинга (Редактирование сообщения по кнопке)"""
     page_size = 10
     total_players = len(rating)
     total_pages = (total_players + page_size - 1) // page_size
@@ -813,70 +878,52 @@ async def show_rating_page_from_callback(callback: types.CallbackQuery, page: in
     end_idx = min(start_idx + page_size, total_players)
     current_page_players = rating[start_idx:end_idx]
 
-    # Формируем текст
-    text = "🏆 **РЕЙТИНГ ЭЛО**\n\n"
-    text += "Рейтинг рассчитывается по формуле:\n"
-    text += "• Победа над сильным соперником даёт больше очков\n"
-    text += "• Доп. баллы (ЛХ, ПР, МН) влияют на рейтинг\n"
-    text += "• Учитывается сила команды (carry-эффект)\n\n"
+    mvp_data = await get_mvp() if page == 0 else (None, 0)
+    roles_data = {}
+    if page == 0:
+        for role_name in ["Мирный", "Шериф", "Мафия", "Дон"]:
+            best_name, best_bonus = await get_best_by_role(role_name)
+            if best_name and best_bonus > 0:
+                roles_data[role_name] = best_name
 
-    text += f"📊 **Страница {page + 1} из {total_pages}** (всего игроков: {total_players})\n\n"
+    text = build_compact_rating_page(
+        players=current_page_players,
+        page=page + 1,
+        total_pages=total_pages,
+        total_players=total_players,
+        mvp_data=mvp_data,
+        roles_data=roles_data
+    )
 
-    for p in current_page_players:
-        place = p["place"]
-        if place == 1:
-            medal = "🥇"
-        elif place == 2:
-            medal = "🥈"
-        elif place == 3:
-            medal = "🥉"
-        else:
-            medal = f"{place}."
-
-        name = p["nickname"] or "Неизвестный"
-        winrate = round(p["games_won"] / p["games_played"] * 100, 1) if p["games_played"] > 0 else 0
-
-        text += f"{medal} **{name}** — **{p['elo']}** очков\n"
-        text += f"   🎮 Игр: {p['games_played']} | 🏆 Побед: {p['games_won']} ({winrate}%)\n\n"
-
-    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    text += "🏅 **MVP (лучший по доп. баллам)**\n\n"
-
-    mvp_name, mvp_bonus = await get_mvp()
-    if mvp_name and mvp_bonus > 0:
-        text += f"🏆 **{mvp_name}** — **{mvp_bonus:.1f}** доп. баллов\n\n"
-    else:
-        text += "📊 Нет данных для MVP\n\n"
-
-    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    text += "🎭 **Лучшие по ролям (Доп)**\n\n"
-
-    roles = [
-        ("Мирный", "👤"),
-        ("Шериф", "🕵️"),
-        ("Мафия", "🔪"),
-        ("Дон", "👑"),
-    ]
-
-    for role_name, icon in roles:
-        best_name, best_bonus = await get_best_by_role(role_name)
-        if best_name and best_bonus > 0:
-            text += f"{icon} **{role_name}**: {best_name} — **{best_bonus:.1f}** доп.\n"
-        else:
-            text += f"{icon} **{role_name}**: нет данных\n"
-
-    # Формируем клавиатуру
     builder = InlineKeyboardBuilder()
-
     if page > 0:
-        builder.button(text="◀️ Предыдущие", callback_data=f"rating_page:{page - 1}")
+        builder.button(text="◀️ Назад", callback_data=f"rating_page:{page - 1}")
     if page < total_pages - 1:
-        builder.button(text="Следующие ▶️", callback_data=f"rating_page:{page + 1}")
+        builder.button(text="Вперед ▶️", callback_data=f"rating_page:{page + 1}")
 
+    builder.button(text="ℹ️ Как считается рейтинг?", callback_data="rating_rules")
     builder.button(text="❌ Закрыть", callback_data="rating_close")
-    builder.adjust(2, 1)
+
+    if page > 0 and page < total_pages - 1:
+        builder.adjust(2, 1, 1)
+    else:
+        builder.adjust(1, 1, 1)
 
     await callback.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rating_rules")
+async def rating_rules_callback(callback: types.CallbackQuery):
+    """Показывает всплывающее окно с правилами рейтинга"""
+    rules = (
+        "🏆 ФОРМУЛА ЭЛО:\n"
+        "1. За сильных соперников дают больше.\n"
+        "2. Баланс: Красным сложнее (получают больше, теряют меньше).\n"
+        "3. Допы: дают плюс к Эло.\n"
+        "4. Carry: если 'тащил', теряешь меньше."
+    )
+    await callback.answer(rules, show_alert=True)
 
 
 @router.callback_query(F.data == "rating_close")

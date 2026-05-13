@@ -1,12 +1,14 @@
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
+import re
 
 from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.enums import ParseMode
 
 import config
 import database
@@ -16,13 +18,10 @@ from handlers.booking import build_stats_text, get_next_friday
 router = Router()
 bot: Bot | None = None
 
-import asyncio
-from collections import defaultdict
-
 # Константы для Эло
 STARTING_ELO = 1500
 
-# Категории ачивок (скопируй из achievements.py или добавь здесь)
+# Категории ачивок
 ACHIEVEMENTS = {
     # ========== ИГРОВЫЕ (games) ==========
     "first_game": {"name": "Первая игра", "description": "Сыграть первую игру", "icon": "🎭", "type": "games",
@@ -102,16 +101,8 @@ ACHIEVEMENTS = {
 }
 
 
-async def check_and_award_achievements(bot, user_id: int = None):
-    """
-    Проверяет и выдаёт ачивки.
-    Если user_id указан — только для одного игрока.
-    Если нет — для всех.
-    Возвращает список выданных ачивок.
-    """
+async def check_and_award_achievements(bot_instance: Bot, user_id: int = None):
     async with database.get_db() as conn:
-
-        # Получаем игроков
         if user_id:
             players = [(user_id,)]
         else:
@@ -119,109 +110,75 @@ async def check_and_award_achievements(bot, user_id: int = None):
                 players = await cur.fetchall()
 
         all_new_achievements = []
-
-        for (user_id,) in players:
-            # Получаем данные игрока
+        for (u_id,) in players:
             async with conn.execute("SELECT nickname, games_played, games_won, elo FROM users WHERE user_id = ?",
-                                    (user_id,)) as cur:
+                                    (u_id,)) as cur:
                 player_data = await cur.fetchone()
-                if not player_data:
-                    continue
+                if not player_data: continue
                 nickname, games_played, games_won, elo = player_data
 
-            # Получаем уже имеющиеся ачивки
-            async with conn.execute("SELECT achievement_id FROM user_achievements WHERE user_id = ?",
-                                    (user_id,)) as cur:
+            async with conn.execute("SELECT achievement_id FROM user_achievements WHERE user_id = ?", (u_id,)) as cur:
                 earned = {row[0] for row in await cur.fetchall()}
 
-            # Получаем статистику по ролям (победы)
             async with conn.execute("""
-                                    SELECT role, COUNT(*) as wins
+                                    SELECT s.role, COUNT(*) as wins
                                     FROM game_slots_history s
                                              JOIN game_history g
                                                   ON g.game_date = s.game_date AND g.game_number = s.game_number
                                     WHERE s.user_id = ?
-                                      AND s.base_points = 1
+                                      AND s.base_points >= 1
                                     GROUP BY s.role
-                                    """, (user_id,)) as cur:
+                                    """, (u_id,)) as cur:
                 role_wins = {row[0]: row[1] for row in await cur.fetchall()}
 
-            # Получаем количество ПУ
             async with conn.execute("SELECT COUNT(*) FROM game_slots_history WHERE user_id = ? AND pu = 1",
-                                    (user_id,)) as cur:
+                                    (u_id,)) as cur:
                 pu_count = (await cur.fetchone())[0] or 0
 
-            # Получаем количество отсуженных игр
-            async with conn.execute("SELECT COUNT(*) FROM game_history WHERE judge_id = ?", (user_id,)) as cur:
+            async with conn.execute("SELECT COUNT(*) FROM game_history WHERE judge_id = ?", (u_id,)) as cur:
                 judged_games = (await cur.fetchone())[0] or 0
 
-            # Проверяем каждую ачивку
             for ach_id, ach in ACHIEVEMENTS.items():
-                if ach_id in earned:
-                    continue
-
+                if ach_id in earned: continue
                 earned_ach = False
-
                 if ach["type"] == "games":
-                    if games_played >= ach["value"]:
-                        earned_ach = True
-
+                    earned_ach = games_played >= ach["value"]
                 elif ach["type"] == "wins":
-                    if games_won >= ach["value"]:
-                        earned_ach = True
-
+                    earned_ach = games_won >= ach["value"]
                 elif ach["type"] == "rating":
-                    if elo and elo >= ach["value"]:
-                        earned_ach = True
-
+                    earned_ach = (elo or 0) >= ach["value"]
                 elif ach["type"] == "judged":
-                    if judged_games >= ach["value"]:
-                        earned_ach = True
-
+                    earned_ach = judged_games >= ach["value"]
                 elif ach["type"] == "role":
-                    role_name = ach["value"]
-                    if role_wins.get(role_name, 0) >= 1:
-                        earned_ach = True
-
+                    earned_ach = role_wins.get(ach["value"], 0) >= 1
                 elif ach["type"] == "special":
-                    if ach_id == "pu_once" and pu_count >= 1:
-                        earned_ach = True
-                    elif ach_id == "pu_three" and pu_count >= 3:
-                        earned_ach = True
-                    elif ach_id == "pu_master" and pu_count >= 5:
-                        earned_ach = True
-                    elif ach_id == "pu_ten" and pu_count >= 10:
-                        earned_ach = True
+                    if ach_id == "pu_once":
+                        earned_ach = pu_count >= 1
+                    elif ach_id == "pu_three":
+                        earned_ach = pu_count >= 3
+                    elif ach_id == "pu_master":
+                        earned_ach = pu_count >= 5
+                    elif ach_id == "pu_ten":
+                        earned_ach = pu_count >= 10
 
                 if earned_ach:
-                    await conn.execute("""
-                                       INSERT INTO user_achievements (user_id, achievement_id, earned_at)
-                                       VALUES (?, ?, datetime('now'))
-                                       """, (user_id, ach_id))
-                    all_new_achievements.append((user_id, nickname, ach_id, ach))
+                    await conn.execute(
+                        "INSERT INTO user_achievements (user_id, achievement_id, earned_at) VALUES (?, ?, datetime('now'))",
+                        (u_id, ach_id))
+                    all_new_achievements.append((u_id, nickname, ach_id, ach))
+        await conn.commit()
 
-            await conn.commit()
-
-            # Отправляем уведомление о новых ачивках
-            for user_id, nickname, ach_id, ach in all_new_achievements:
-                if user_id == user_id:
-                    try:
-                        await bot.send_message(
-                            user_id,
-                            f"🏆 **НОВАЯ АЧИВКА!**\n\n"
-                            f"{ach['icon']} **{ach['name']}**\n"
-                            f"_{ach['description']}_\n\n"
-                            f"Поздравляем! 🎉",
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                    except Exception as e:
-                        print(f"[ACHIEVEMENT] Failed to notify {nickname}: {e}")
-
+        for u_id, nick, ach_id, ach in all_new_achievements:
+            try:
+                await bot_instance.send_message(
+                    u_id,
+                    f"🏆 **НОВАЯ АЧИВКА!**\n\n{ach['icon']} **{ach['name']}**\n_{ach['description']}_\n\nПоздравляем! 🎉",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                print(f"[ACHIEVEMENT] Failed to notify {nick}: {e}")
         return all_new_achievements
 
-# =========================================================
-# 1. ОБЩИЕ ВСПОМОГАТЕЛЬНЫЕ ШТУКИ
-# =========================================================
 
 class DebtEditState(StatesGroup):
     waiting_for_amount = State()
@@ -237,76 +194,52 @@ def _is_admin(user_id: int) -> bool:
 
 
 async def _is_judge(user_id: int) -> bool:
-    if _is_admin(user_id):
-        return True
+    if _is_admin(user_id): return True
     judges = await database.get_game_judges()
     return user_id in judges
 
 
 async def get_player_games_count_for_evening(user_id: int, game_date: str) -> int:
-    """
-    Возвращает количество игр, которые игрок сыграл в указанную дату
-    """
+    # Обязательно конвертируем дату в формат базы (2026-05-13), иначе найдет 0 игр
+    search_date = database._ensure_iso_date(game_date)
+
     async with database.get_db() as conn:
         async with conn.execute("""
-            SELECT COUNT(DISTINCT game_number)
-            FROM game_slots_history
-            WHERE user_id = ? AND game_date = ?
-        """, (user_id, game_date)) as cur:
+                                SELECT COUNT(DISTINCT game_number)
+                                FROM game_slots_history
+                                WHERE user_id = ?
+                                  AND game_date = ?
+                                """, (user_id, search_date)) as cur:
             row = await cur.fetchone()
             return row[0] if row else 0
 
 
 def calculate_evening_cost(games_count: int) -> int:
-    """
-    Рассчитывает стоимость вечера:
-    - 100₽ за игру
-    - Максимум 400₽
-    """
     return min(games_count * 100, 400)
 
 
-# =========================================================
-# 2. ВХОД В АДМИН-ПАНЕЛЬ
-# =========================================================
-
 @router.message(Command("admin"), F.chat.type == "private")
 async def admin_panel(message: types.Message):
-    if not _is_admin(message.from_user.id):
-        return
-    await message.answer(
-        "🛠 Панель администратора.\nВыбери действие на клавиатуре ниже 👇",
-        reply_markup=keyboards.admin_menu(),
-    )
+    if not _is_admin(message.from_user.id): return
+    await message.answer("🛠 Панель администратора.\nВыбери действие на клавиатуре ниже 👇",
+                         reply_markup=keyboards.admin_menu())
 
 
 @router.message(F.text.in_(["🛠 Админ-панель", "🛠 Перейти в админ-панель"]), F.chat.type == "private")
 async def admin_panel_unified(message: types.Message):
     if not _is_admin(message.from_user.id):
-        await message.answer(
-            "⛔ Эта кнопка доступна только администраторам.",
-            reply_markup=keyboards.main_menu_judge()
-            if await _is_judge(message.from_user.id)
-            else keyboards.main_menu()
-        )
+        kb = keyboards.main_menu_judge() if await _is_judge(message.from_user.id) else keyboards.main_menu()
+        await message.answer("⛔ Эта кнопка доступна только администраторам.", reply_markup=kb)
         return
-    await message.answer(
-        "🛠 Панель администратора.\nВыбери действие на клавиатуре ниже 👇",
-        reply_markup=keyboards.admin_menu(),
-    )
+    await message.answer("🛠 Панель администратора.\nВыбери действие на клавиатуре ниже 👇",
+                         reply_markup=keyboards.admin_menu())
 
-
-# =========================================================
-# 3. МЕНЮ СПИСКОВ
-# =========================================================
 
 @router.message(F.text == "📋 Игроки", F.chat.type == "private")
 async def show_players_btn(message: types.Message):
     user_id = message.from_user.id
-    is_admin = _is_admin(user_id)
-    is_judge = await _is_judge(user_id)
-    if not is_admin and not is_judge:
-        return
+    is_admin, is_judge = _is_admin(user_id), await _is_judge(user_id)
+    if not is_admin and not is_judge: return
     date_str = get_next_friday()
     text = await build_stats_text(date_str)
     if "всего 0" in text:
@@ -316,477 +249,251 @@ async def show_players_btn(message: types.Message):
     await message.answer(text, reply_markup=reply_kb)
 
 
-@router.message(F.text == "👥 Все пользователи", F.chat.type == "private")
+@router.message(F.text == "👥 Все пользователи")
 async def admin_all_users_btn(message: types.Message):
-    if not _is_admin(message.from_user.id):
-        return
-    users = await database.get_all_users_stat()
+    if not _is_admin(message.from_user.id): return
+    users = await database.get_all_users()
     if not users:
-        await message.answer("База пользователей пуста")
+        await message.answer("📭 База пользователей пуста.")
         return
-    text = "👥 **База игроков:**\n\n"
-    for name, nick, visit, debt, total_paid, *_ in users:
-        if not visit or visit == "-":
-            visit_text = "Ещё не был на вечерах"
-        else:
-            visit_text = visit
-        total_paid = total_paid or 0
-        text += f"▪️ {name} ({nick})\n   Визит: {visit_text} | Долг: {debt}₽ | Всего оплачено: {total_paid}₽\n\n"
-    top_players = await database.get_top_players_by_visits(limit=10)
-    if top_players:
-        text += "🏆 **Топ по посещениям:**\n"
-        for i, (full_name, nickname, visits_count) in enumerate(top_players, 1):
-            nick_part = nickname if nickname not in (None, "", "Не установлен") else "ник не указан"
-            text += f"{i}. {full_name} ({nick_part}) — {visits_count} вечеров\n"
-        text += "\n"
-    inactive_raw = await database.get_inactive_players()
-    threshold_days = 30
-    now = datetime.utcnow()
-    inactive_players = []
-    for full_name, nickname, last_visit in inactive_raw:
-        if not last_visit or last_visit == "-":
-            inactive_players.append((full_name, nickname, "Ещё ни разу не был"))
-            continue
-        try:
-            last_dt = datetime.strptime(last_visit, "%d.%m.%Y %H:%M")
-        except ValueError:
-            inactive_players.append((full_name, nickname, last_visit))
-            continue
-        diff_days = (now - last_dt).days
-        if diff_days >= threshold_days:
-            inactive_players.append((full_name, nickname, last_visit))
-    if inactive_players:
-        text += f"🕰 **Кто давно не был (>{threshold_days} дней):**\n"
-        for full_name, nickname, visit_text in inactive_players:
-            nick_part = nickname if nickname not in (None, "", "Не установлен") else "ник не указан"
-            text += f"• {full_name} ({nick_part}) — последний визит: {visit_text}\n"
-    await message.answer(text, reply_markup=keyboards.admin_menu(), parse_mode="Markdown")
+    header = f"👥 **Список игроков (всего: {len(users)})**\nПотеря данных? `ID` кликабелен.\n\n"
+    lines = []
+    for i, u in enumerate(users, 1):
+        uid = u.get('user_id')
+        nick = u.get('nickname') or "Без ника"
+        full = u.get('full_name') or ""
+        name_part = nick if not full else f"{nick} ({full})"
+        lines.append(f"{i}. {name_part} — `{uid}`")
 
+    full_text = header + "\n".join(lines)
+    if len(full_text) <= 4096:
+        await message.answer(full_text, parse_mode="Markdown")
+    else:
+        for x in range(0, len(full_text), 4000):
+            await message.answer(full_text[x:x + 4000], parse_mode="Markdown")
 
-# =========================================================
-# 4. ФИНАЛ ВЕЧЕРА: СЧЕТА / ОТМЕНА / АНОНСЫ
-# =========================================================
 
 @router.message(F.text == "💸 Разослать счета", F.chat.type == "private")
 async def admin_send_bills_btn(message: types.Message):
-    if not _is_admin(message.from_user.id):
-        return
-
+    if not _is_admin(message.from_user.id): return
     assert bot is not None
 
     date_str = get_next_friday()
+    search_date = database._ensure_iso_date(date_str)
+    display_date = database.format_date_to_user(date_str)
 
-    # Получаем ТОЛЬКО пришедших игроков
+    # 1. АВТО-РЕГИСТРАЦИЯ "ЗАЙЦЕВ"
+    # Ищем всех, кто есть в играх за сегодня, но забыл нажать кнопку "Записаться"
+    async with database.get_db() as conn:
+        await conn.execute("""
+                           INSERT OR IGNORE INTO evening_booking (user_id, status, date)
+                           SELECT DISTINCT user_id, 'Позже', ?
+                           FROM game_slots_history
+                           WHERE game_date = ?
+                             AND user_id IS NOT NULL
+                             AND user_id != 0
+                           """, (date_str, search_date))
+        await conn.commit()
+
+    # 2. Получаем полный список игроков (записанные + найденные "зайцы")
     players = await database.get_booked_players_for_game()
-
     if not players:
         await message.answer("Нет игроков, которые пришли на игру.")
         return
 
     kb = keyboards.user_pay_now_kb()
-    count = 0
-    failed_users = []
-    bills_info = []
+    count, bills_info, failed_users = 0, [], []
 
-    # Рассылаем счета и начисляем жетоны за игры
+    # 3. Рассылка счетов
     for player in players:
         try:
-            p_id = player[0]
-            nickname = player[3]
-            status = player[4]
+            p_id, nickname = player[0], player[3]
+            if await database.has_unpaid_session(p_id): continue
 
-            if await database.has_unpaid_session(p_id):
-                continue
+            # Считаем количество сыгранных игр
+            games = await get_player_games_count_for_evening(p_id, search_date)
 
-            # 1. Жетоны за запись (начисляются при архивации)
-            tokens_for_booking = 500 if status == "Вовремя" else 400 if status == "Позже" else 0
-            if tokens_for_booking > 0:
-                await database.add_tokens(p_id, tokens_for_booking)
-                print(f"[TOKENS] {nickname}: +{tokens_for_booking} жетонов за запись ({status})")
+            # --- НОВАЯ ЛОГИКА ЖЕТОНОВ ---
+            # 400 жетонов, если сыграл хотя бы 1 игру (никаких начислений за статус записи)
+            tokens = 400 if games >= 1 else 0
+            if tokens > 0:
+                await database.add_tokens(p_id, tokens, f"За участие в вечере {display_date}")
 
-            # 2. Сумма к оплате за игры
-            games_played = await get_player_games_count_for_evening(p_id, date_str)
-            cost = calculate_evening_cost(games_played)
+            # Считаем сумму к оплате
+            cost = calculate_evening_cost(games)
+            if cost == 0: continue
 
-            if cost == 0:
-                continue
-
+            # Списываем долг и ставим сессию неоплаченной
             await database.change_user_debt(p_id, -cost)
+            await database.log_transaction(p_id, -cost, 'charge', f"Игры {display_date} ({games} шт.)")
             await database.set_unpaid_session(p_id, 1)
 
-            # Получаем имя игрока для отчёта
-            user_info = await database.get_user_by_id(p_id)
-            name = user_info[3] or user_info[1] if user_info else str(p_id)
-            bills_info.append(f"• {name}: {games_played} игр → {cost}₽")
+            u_info = await database.get_user_by_id(p_id)
+            name = u_info[3] or u_info[1] if u_info else str(p_id)
+            bills_info.append(f"• {name}: {games} игр → {cost}₽")
 
-            await bot.send_message(
-                p_id,
-                f"🎭 Игры окончены!\n\n"
-                f"✅ Жетоны за запись: +{tokens_for_booking}\n"
-                f"🎮 Вы сыграли {games_played} игр.\n"
-                f"💰 Сумма к оплате: {cost}₽ (100₽ за игру, максимум 400₽)",
-                reply_markup=kb,
-            )
+            # Формируем текст для юзера
+            msg_text = f"🎭 Игры окончены!\n\n"
+            if tokens > 0:
+                msg_text += f"✅ Бонус за вечер: +{tokens} жетонов\n"
+            msg_text += f"🎮 Игр сыграно: {games}\n💰 К оплате: {cost}₽"
+
+            await bot.send_message(p_id, msg_text, reply_markup=kb)
             count += 1
         except Exception as e:
-            print(f"[BILLS] Error for user {player}: {e}")
+            print(f"[BILLS ERROR] {e}")
             failed_users.append(player[0])
             continue
 
-    # ========== АРХИВАЦИЯ ВЕЧЕРА И УСТАНОВКА ФЛАГА ==========
+    # 4. АРХИВАЦИЯ ВЕЧЕРА
     try:
         await database.archive_current_evening()
         await database.set_setting("evening_archived", "1")
         await database.mark_evening_bills_sent(date_str)
 
-        # Отправляем отчёт админу
-        report = f"✅ Счета разосланы {count} игрокам.\n\n"
-        if bills_info:
-            report += "📊 **Детали:**\n" + "\n".join(bills_info) + "\n\n"
-        report += f"🗄 Вечер сохранён в истории.\n"
-        report += f"🗑 Текущий список записей очищен.\n"
-        report += f"📅 Следующий вечер будет на {get_next_friday()}"
+        report = f"✅ Счета разосланы {count} игрокам за {display_date}.\n\n"
+        if bills_info: report += "📊 **Детали:**\n" + "\n".join(bills_info) + "\n"
+        await message.answer(report + f"\n🏆 Проверяю ачивки...")
 
-        await message.answer(report)
-    except Exception as e:
-        await message.answer(f"❌ Ошибка при архивации вечера: {e}")
-        return
-    # ========================================================
-
-    # ========== ВЫДАЧА АЧИВОК ВСЕМ ИГРОКАМ ==========
-    try:
-        # Импортируем функцию проверки ачивок
+        # 5. ВЫДАЧА АЧИВОК
         from achievements import check_and_award_achievements
-
-        # Проверяем и выдаём ачивки для всех игроков, у которых есть игры
-        new_achievements = await check_and_award_achievements(bot)
-
-        if new_achievements:
-            print(f"[ACHIEVEMENTS] Выдано {len(new_achievements)} новых ачивок")
-
-            # Отправляем админу отчёт о новых ачивках
-            achievements_report = "\n🏆 **Новые ачивки:**\n"
-            for user_id, nickname, ach_id, ach in new_achievements:
-                achievements_report += f"   • {nickname}: {ach['icon']} {ach['name']}\n"
-            await message.answer(achievements_report, parse_mode=ParseMode.MARKDOWN)
+        new_achs = await check_and_award_achievements(bot)
+        if new_achs:
+            ach_rep = "\n🏆 **Новые ачивки:**\n" + "\n".join(
+                [f"• {a[1]}: {a[3]['icon']} {a[3]['name']}" for a in new_achs])
+            await message.answer(ach_rep, parse_mode="Markdown")
     except Exception as e:
-        print(f"[ACHIEVEMENTS] Error: {e}")
-    # ==================================================
+        await message.answer(f"❌ Ошибка архивации: {e}")
 
-    if failed_users:
-        await message.answer(f"⚠️ Не удалось отправить счёт пользователям: {failed_users}")
-
-    await message.answer(
-        "🛠 Панель администратора.",
-        reply_markup=keyboards.admin_menu(),
-    )
-
-    # ========== АРХИВАЦИЯ ВЕЧЕРА И УСТАНОВКА ФЛАГА ==========
-    try:
-        await database.archive_current_evening()
-        await database.set_setting("evening_archived", "1")
-        await database.mark_evening_bills_sent(date_str)
-
-        # Отправляем отчёт админу
-        report = f"✅ Счета разосланы {count} игрокам.\n\n"
-        if bills_info:
-            report += "📊 **Детали:**\n" + "\n".join(bills_info) + "\n\n"
-        report += f"🗄 Вечер сохранён в истории.\n"
-        report += f"🗑 Текущий список записей очищен.\n"
-        report += f"📅 Следующий вечер будет на {get_next_friday()}"
-
-        await message.answer(report)
-    except Exception as e:
-        await message.answer(f"❌ Ошибка при архивации вечера: {e}")
-        return
-    # ========================================================
-
-    if failed_users:
-        await message.answer(f"⚠️ Не удалось отправить счёт пользователям: {failed_users}")
-
-    await message.answer(
-        "🛠 Панель администратора.",
-        reply_markup=keyboards.admin_menu(),
-    )
+    if failed_users: await message.answer(f"⚠️ Ошибки отправки у: {failed_users}")
+    await message.answer("🛠 Панель администратора.", reply_markup=keyboards.admin_menu())
 
 
 @router.message(F.text == "❌ Отменить вечер", F.chat.type == "private")
 async def admin_cancel_evening(message: types.Message):
-    if not _is_admin(message.from_user.id):
-        return
+    if not _is_admin(message.from_user.id): return
     assert bot is not None
     players = await database.get_all_players()
-    if not players:
-        await message.answer("Список игроков пуст — никто не записан.")
-        return
-    text = (
-        "❌ Вечер мафии отменен.\n"
-        "Приносим извинения за неудобства.\n"
-        "Следите за анонсами — пригласим вас на следующий вечер!"
-    )
+    if not players: return await message.answer("Список игроков пуст.")
+    text = "❌ Вечер мафии отменен. Приносим извинения!"
     sent = 0
     for (p_id,) in players:
         try:
             await bot.send_message(p_id, text)
             sent += 1
-        except Exception:
+        except:
             continue
     try:
-        await bot.send_message(
-            config.GROUP_ID,
-            text,
-            message_thread_id=config.ANNOUNCE_TOPIC_ID,
-        )
-    except Exception:
+        await bot.send_message(config.GROUP_ID, text, message_thread_id=config.ANNOUNCE_TOPIC_ID)
+    except:
         pass
     await database.clear_bookings()
-    await message.answer(
-        f"Вечер отменен.\nУведомление отправлено {sent} игрокам.\nЗаписи на вечер очищены.",
-        reply_markup=keyboards.admin_menu(),
-    )
+    await message.answer(f"Отменено. Уведомлено {sent} чел.", reply_markup=keyboards.admin_menu())
 
 
 @router.message(F.text == "📣 Сделать анонс", F.chat.type == "private")
 async def admin_announce_evening(message: types.Message, bot: Bot):
-    if not _is_admin(message.from_user.id):
-        return
+    if not _is_admin(message.from_user.id): return
     users = await database.get_all_user_ids()
-    if not users:
-        await message.answer("В базе пока нет пользователей.")
-        return
+    if not users: return await message.answer("База пуста.")
     date_str = get_next_friday()
     me = await bot.get_me()
-    bot_username = me.username
-    players_link = f"https://t.me/{bot_username}?start=players"
-    text = (
-        f"📣 Анонс вечера мафии!\n\n"
-        f"Приглашаем тебя поиграть в мафию в пятницу {date_str} в 20:00.\n"
-        f"Выбери, придёшь ли ты на игру:\n\n"
-        f"📋 Список записавшихся игроков: {players_link}"
-    )
+    text = f"📣 Анонс мафии!\nЖдем в пятницу {date_str} в 20:00.\nПридёшь?\n\n📋 Список: https://t.me/{me.username}?start=players"
     sent = 0
     for (u_id,) in users:
         try:
             await bot.send_message(u_id, text, reply_markup=keyboards.booking_kb())
             sent += 1
-        except Exception:
+        except:
             continue
     try:
-        stats_info = await database.get_stats_message(date_str)
-        if stats_info:
-            chat_id, msg_id = stats_info
-            try:
-                await bot.delete_message(chat_id, msg_id)
-            except Exception:
-                pass
-            await database.set_stats_message(date_str, 0, 0)
-        await bot.send_message(
-            config.GROUP_ID,
-            text,
-            reply_markup=keyboards.booking_kb(),
-            message_thread_id=config.ANNOUNCE_TOPIC_ID,
-        )
-        stats_text = await build_stats_text(date_str)
-        stats_msg = await bot.send_message(
-            config.GROUP_ID,
-            stats_text,
-            message_thread_id=config.ANNOUNCE_TOPIC_ID,
-        )
-        await database.set_stats_message(date_str, config.GROUP_ID, stats_msg.message_id)
+        await bot.send_message(config.GROUP_ID, text, reply_markup=keyboards.booking_kb(),
+                               message_thread_id=config.ANNOUNCE_TOPIC_ID)
+        s_text = await build_stats_text(date_str)
+        s_msg = await bot.send_message(config.GROUP_ID, s_text, message_thread_id=config.ANNOUNCE_TOPIC_ID)
+        await database.set_stats_message(date_str, config.GROUP_ID, s_msg.message_id)
     except Exception as e:
-        print(f"[ANNOUNCE] Failed to send to group: {e}")
-    if message.chat.type == "private":
-        await message.answer(
-            f"Анонс отправлен {sent} игрокам и в чат.",
-            reply_markup=keyboards.admin_menu(),
-        )
+        print(f"Announce error: {e}")
+    await message.answer(f"Анонс отправлен {sent} игрокам.", reply_markup=keyboards.admin_menu())
 
-
-# =========================================================
-# 5. ДОЛЖНИКИ И РЕДАКТИРОВАНИЕ СУММЫ ДОЛГА
-# =========================================================
 
 @router.message(F.text == "💰 Должники", F.chat.type == "private")
 async def admin_debtors_btn(message: types.Message):
-    if not _is_admin(message.from_user.id):
-        return
+    if not _is_admin(message.from_user.id): return
     debtors = await database.get_debtors()
-    if not debtors:
-        await message.answer("Сейчас нет должников 🎉")
-        return
-    import re
-    def escape_md(text):
-        if not text:
-            return ""
-        special_chars = r'([_*\[\]()~`>#+\-=|{}.!])'
-        return re.sub(special_chars, r'\\\1', str(text))
-    for full_name, nickname, username, debt, user_id in debtors:
-        user_link = f"@{username}" if username else "нет ника"
-        nick_part = nickname if nickname not in (None, "", "Не установлен") else "ник не указан"
-        safe_full_name = escape_md(full_name)
-        safe_nick_part = escape_md(nick_part)
-        safe_user_link = escape_md(user_link)
-        text = f"👤 {safe_full_name} ({safe_user_link})\nНик: {safe_nick_part}\nТекущий долг: {abs(debt)}₽"
+    if not debtors: return await message.answer("Должников нет 🎉")
+    for full, nick, user_n, debt, u_id in debtors:
+        u_link = f"@{user_n}" if user_n else "нет ника"
+        n_part = nick if nick not in (None, "", "Не установлен") else "не указан"
+        text = f"👤 {full} ({u_link})\nНик: {n_part}\nДолг: {abs(debt)}₽"
         kb = InlineKeyboardBuilder()
-        kb.button(text="✏️ Изменить сумму", callback_data=f"editdebt_{user_id}")
-        kb.adjust(1)
-        await message.answer(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+        kb.button(text="✏️ Изменить", callback_data=f"editdebt_{u_id}")
+        await message.answer(text, reply_markup=kb.as_markup())
 
 
 @router.callback_query(F.data.startswith("editdebt_"))
 async def admin_edit_debt_start(call: CallbackQuery, state: FSMContext):
-    if not _is_admin(call.from_user.id):
-        await call.answer("Недостаточно прав.", show_alert=True)
-        return
-    user_id_str = call.data.replace("editdebt_", "")
-    try:
-        user_id = int(user_id_str)
-    except ValueError:
-        await call.answer("Некорректный ID пользователя.", show_alert=True)
-        return
-    await state.update_data(edit_debt_user_id=user_id)
+    u_id = int(call.data.split("_")[1])
+    await state.update_data(edit_debt_user_id=u_id)
     await state.set_state(DebtEditState.waiting_for_amount)
-    await call.message.answer(
-        f"Введи новую сумму долга для пользователя {user_id} (в рублях).\n"
-        f"Например: 200 или 0, чтобы закрыть долг."
-    )
+    await call.message.answer(f"Введи новую сумму долга для {u_id} (в рублях).\n0 — закрыть долг.")
     await call.answer()
 
 
 @router.message(DebtEditState.waiting_for_amount)
 async def admin_edit_debt_set_amount(message: types.Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
-        return
     data = await state.get_data()
-    user_id = data.get("edit_debt_user_id")
-    if not user_id:
-        await message.answer("❌ Не найден пользователь для изменения долга. Попробуйте снова.")
-        await state.clear()
-        return
+    u_id = data.get("edit_debt_user_id")
     try:
-        amount = int((message.text or "").strip())
-    except ValueError:
-        await message.answer("❌ Нужно ввести целое число (например, 200 или 0). Попробуй ещё раз.")
-        return
-    user_exists = await database.get_user_by_id(user_id)
-    if not user_exists:
-        await message.answer(f"❌ Пользователь с ID {user_id} не найден в базе.")
-        await state.clear()
-        return
-    new_debt = -amount
-    await database.set_user_debt(user_id, new_debt)
-    if amount == 0:
-        await database.set_unpaid_session(user_id, 0)
-    user_info = await database.get_user_by_id(user_id)
-    name = user_info[3] or user_info[1] if user_info else str(user_id)
-    await message.answer(
-        f"✅ Долг для пользователя {name} обновлён.\nНовая сумма: {amount}₽.",
-        reply_markup=keyboards.admin_menu(),
-    )
+        amt = int(message.text.strip())
+        await database.log_transaction(u_id, amt, 'debt_correction', "Ручная правка админом")
+        await database.set_user_debt(u_id, -amt)
+        if amt == 0: await database.set_unpaid_session(u_id, 0)
+        await message.answer(f"✅ Долг обновлен: {amt}₽.", reply_markup=keyboards.admin_menu())
+    except:
+        await message.answer("Введите целое число.")
     await state.clear()
 
 
-# =========================================================
-# 6. ИСТОРИЯ ВЕЧЕРОВ
-# =========================================================
-
 @router.message(F.text == "📚 История вечеров", F.chat.type == "private")
 async def admin_history_menu(message: types.Message):
-    if not _is_admin(message.from_user.id):
-        return
-    evenings = await database.get_evenings_list(limit=10)
-    if not evenings:
-        await message.answer("История вечеров пока пуста.")
-        return
-    kb = keyboards.evenings_history_kb(evenings)
-    await message.answer("📚 Выберите вечер, чтобы посмотреть список игроков:", reply_markup=kb)
+    if not _is_admin(message.from_user.id): return
+    evs = await database.get_evenings_list(limit=15)
+    if not evs: return await message.answer("История пуста.")
+    await message.answer("📚 Выберите вечер:", reply_markup=keyboards.evenings_history_kb(evs))
 
 
-# --- 1. Обработчик кнопки "Назад" (возвращает к списку вечеров) ---
 @router.callback_query(F.data == "admin_evenings_history")
-async def back_to_evenings_list(call: types.CallbackQuery):
-    evenings = await database.get_evenings_list(limit=10)
-    if not evenings:
-        await call.answer("История вечеров пуста.")
-        return
-    # Используем клавиатуру из твоего файла keyboards.py
-    kb = keyboards.evenings_history_kb(evenings)
-    await call.message.edit_text("📚 Выберите вечер, чтобы посмотреть список игроков:", reply_markup=kb)
-    await call.answer()
+async def back_to_evenings_list(call: CallbackQuery):
+    evs = await database.get_evenings_list(limit=15)
+    await call.message.edit_text("📚 Выберите вечер:", reply_markup=keyboards.evenings_history_kb(evs))
 
 
-# --- 2. Сам отчет по конкретному вечеру ---
 @router.callback_query(F.data.startswith("hist_"))
-async def admin_history_detail(call: types.CallbackQuery):
-    if not _is_admin(call.from_user.id):
-        await call.answer("Недостаточно прав.", show_alert=True)
-        return
-
-    date_str = call.data.replace("hist_", "")
+async def admin_history_detail(call: CallbackQuery):
+    date_str = call.data.split("_")[1]
+    display_date = database.format_date_to_user(date_str)
     players = await database.get_evening_players(date_str)
+    if not players: return await call.answer("Нет данных.")
 
-    if not players:
-        await call.answer(f"Данных за {date_str} нет.", show_alert=True)
-        return
-
-    # Список для исключения
     EXCLUDED = ["Чагин", "Матроскина", "Стаут", "Гриня", "Evgeniy Chagin", "Екатерина", "Di D", "Григорий Подколзин"]
-
-    # Достаем протоколы
-    all_protocols = []
-    async with database.get_db() as conn:
-        async with conn.execute(
-                "SELECT protocol_text FROM game_history WHERE game_date LIKE ?",
-                (f"%{date_str}%",)
-        ) as cur:
-            rows = await cur.fetchall()
-            all_protocols = [r[0] for r in rows if r[0]]
-
-    text = f"📅 *Финансовый отчет за {date_str}*\n\n"
-    total_evening_sum = 0
-    count_index = 1
+    text = f"📅 *Отчет за {display_date}*\n\n"
+    total, idx = 0, 1
 
     for p in players:
-        full_name = p[1]
-        nickname = p[2]
-        status = p[3]
+        p_id, full, nick, status, games = p[0], p[1], p[2], p[3], p[4]
+        if status == "Не идёт" or nick in EXCLUDED or full in EXCLUDED: continue
 
-        # УСЛОВИЕ ИСКЛЮЧЕНИЯ: если человек в списке оргов или нажал "Не идёт" — пропускаем
-        if status == "Не идёт" or nickname in EXCLUDED or full_name in EXCLUDED:
-            continue
+        display_name = nick if nick and str(nick).strip() not in ["", "None", "Не установлен"] else "Гость"
+        if games == 0 and status in ["Вовремя", "Позже"]: games = 1
 
-        # Определяем никнейм для вывода
-        display_name = nickname if nickname and str(nickname).strip() not in ["", "None", "Не установлен"] else "Гость"
+        cost = 400 if games >= 4 else (games * 100)
+        total += cost
+        text += f"{idx}. {display_name} — {games} игр — {cost}₽\n"
+        idx += 1
 
-        # Считаем игры
-        games_count = 0
-        for proto in all_protocols:
-            if (full_name and str(full_name) in proto) or (nickname and str(nickname) in proto):
-                games_count += 1
-
-        if games_count == 0 and status in ["Вовремя", "Позже"]:
-            games_count = 1
-
-        cost = 400 if games_count >= 4 else (games_count * 100)
-        total_evening_sum += cost
-
-        text += f"{count_index}. {display_name} — {games_count} игр — {cost}₽\n"
-        count_index += 1
-
-    text += f"\n💰 *ИТОГО К ОПЛАТЕ: {total_evening_sum}₽*"
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=f"📊 Итого со всех: {total_evening_sum}₽", callback_data="none")
-    builder.button(text="🔙 Назад", callback_data="admin_evenings_history")
-    builder.adjust(1)
-
-    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+    text += f"\n💰 *ИТОГО: {total}₽*"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔙 Назад", callback_data="admin_evenings_history")
+    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=kb.as_markup())
     await call.answer()
-
-
-def stats_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔍 Найти игрока", callback_data="search_player")
-    builder.button(text="📖 Книга ачивок", callback_data="achievements_menu")
-    builder.adjust(1)
-    return builder.as_markup()

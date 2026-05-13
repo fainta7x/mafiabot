@@ -200,13 +200,12 @@ def build_game_state(
 ) -> str:
     """
     Отображение текущего состояния игры:
-      - слот, имя, роль;
+      - слот, имя, роль (СКАРЫТА ПОД СПОЙЛЕРОМ);
       - фолы;
       - статус (жив / причина вылета);
       - отметка «ВЫСТАВЛЕН»;
       - количество голосов.
     Если alive_only=True — показываются только живые игроки.
-    ДОБАВЛЕНО: в шапке выводится Судья, если judge_name не пуст.
     """
     sorted_slots = dict(sorted(slots.items(), key=lambda x: x[0]))
 
@@ -232,16 +231,24 @@ def build_game_state(
         votes = info.get("votes", 0)
 
         status_text = "Жив" if alive else status_reason
-        nom_text = " | ВЫСТАВЛЕН" if nominated else ""
+        nom_text = " | ВЫСТ" if nominated else ""
         votes_text = f" | Голоса: {votes}" if votes > 0 else ""
 
         tech_fouls_count = _safe_get_tech_fouls_count(info)
-        tech_text = f" | Техфолы: {tech_fouls_count}" if tech_fouls_count > 0 else ""
+        tech_text = f" | Тех: {tech_fouls_count}" if tech_fouls_count > 0 else ""
 
-        lines.append(
-            f"{slot}. {name} — {role} | Фолы: {fouls}{tech_text} | "
-            f"Статус: {status_text}{nom_text}{votes_text}"
-        )
+        # Выравниваем колонки для идеальной сетки
+        slot_pad = f"{slot:2}"
+        name_pad = name[:12].ljust(12)
+        role_pad = role.ljust(9) # "Не задана" = 9 символов, остальные меньше
+
+        # Собираем строку через HTML-теги:
+        # <code> для ровного шрифта и <tg-spoiler> для скрытия роли
+        left_part = f"<code>{slot_pad}. {name_pad} — </code>"
+        role_part = f"<tg-spoiler><code>{role_pad}</code></tg-spoiler>"
+        right_part = f"<code> | Ф: {fouls}{tech_text} | {status_text}{nom_text}{votes_text}</code>"
+
+        lines.append(left_part + role_part + right_part)
 
     return "\n".join(lines)
 
@@ -281,23 +288,17 @@ async def build_protocol_text(
         winner_label: str | None = None,
 ) -> str:
     """
-    Собирает ТОЛЬКО ТЕЛО протокола игры из slots (без шапки и судьи).
+    Тело протокола: Супер-компактная и идеально ровная таблица в одну строку.
     """
     lines: list[str] = []
 
-    # Убираем добавление судьи и результата — теперь это в show_game_protocol
-    # (удали строки с judge_name и winner_label)
-
-    # Вытаскиваем служебный ключ порядка убийств, если он есть
     night_kills_order: list[int] = []
     if "_night_kills_order" in slots:
         nk = slots.get("_night_kills_order") or []
         if isinstance(nk, list):
             night_kills_order = [int(x) for x in nk if isinstance(x, int)]
 
-    # ========== НОВАЯ ФУНКЦИЯ: определение команды по роли ==========
     def get_team_from_role(role: str) -> str | None:
-        """Определяет команду по роли, если team не задана"""
         role_lower = role.lower() if role else ""
         if "мирный" in role_lower or "шериф" in role_lower:
             return "Красные"
@@ -305,21 +306,12 @@ async def build_protocol_text(
             return "Чёрные"
         return None
 
-    # Разделяем слоты по командам
-    red_slots: list[Tuple[int, dict]] = []
-    black_slots: list[Tuple[int, dict]] = []
-    other_slots: list[Tuple[int, dict]] = []
-
+    red_slots, black_slots, other_slots = [], [], []
     for slot_num, info in slots.items():
-        if isinstance(slot_num, str) and slot_num.startswith("_"):
-            continue
-        if not isinstance(slot_num, int):
-            continue
+        if isinstance(slot_num, str) and slot_num.startswith("_"): continue
+        if not isinstance(slot_num, int): continue
 
-        team = info.get("team")
-        if not team:
-            team = get_team_from_role(info.get("role", ""))
-
+        team = info.get("team") or get_team_from_role(info.get("role", ""))
         if team == "Красные":
             red_slots.append((slot_num, info))
         elif team == "Чёрные":
@@ -332,98 +324,71 @@ async def build_protocol_text(
     other_slots.sort(key=lambda x: x[0])
 
     def _append_group(title: str, items: list[Tuple[int, dict]]):
-        if not items:
-            return
+        if not items: return
+
         lines.append(f"<b>{title}</b>")
+        # Идеально подогнанная по пикселям шапка
+        lines.append("<code> №  Игрок     Эло     | И | Д | Л | П | М | Ц | Σ </code>")
+
         for slot_num, info in items:
             raw_name = info.get("nickname") or info.get("full_name") or "Без имени"
-            name = _trim_name(raw_name)
+            name = _trim_name(raw_name, max_len=8).ljust(8)  # Ограничиваем имя до 8 символов
 
-            elo_display = _get_elo_display(info)
+            # --- ЭЛО (всегда 5 символов) ---
+            elo_change = info.get("elo_change")
+            if elo_change is None:
+                elo_str = "     "
+            elif elo_change > 0:
+                elo_str = f"(+{elo_change})"
+            elif elo_change < 0:
+                elo_str = f"({elo_change})"
+            else:
+                elo_str = "(0)"
+            elo_pad = elo_str.center(5)
 
-            role = info.get("role", "Не задана")
+            # --- РОЛЬ (только пометки для Шерифа и Дона) ---
+            r = info.get("role", "").lower()
+            role_mark = "Ш" if "шер" in r else "Д" if "дон" in r else " "
+
+            # --- СТАТУС ---
             alive = info.get("alive", True)
             status_reason = info.get("status_reason", "Жив")
-            kicked = info.get("kicked", False)
-            ppk = info.get("ppk", False)
-            fouls = info.get("fouls", 0)
+            s_icon = "✅" if alive else (
+                "⚖️" if "Заголосован" in status_reason else "💀" if "Убит" in status_reason else "🚫")
 
-            tech_fouls_count = _safe_get_tech_fouls_count(info)
+            # --- ЖЕСТКОЕ ФОРМАТИРОВАНИЕ ЧИСЕЛ (всегда 3 символа) ---
+            def fv(val):
+                v = float(val or 0.0)
+                if v == 0: return "  0"
+                if v == 1: return "  1"
+                if v == -1: return " -1"
+                s = f"{v:.1f}"
+                if s.startswith("0."): return f" .{s[2]}"  # ".2" (3 символа)
+                if s.startswith("-0."): return f"-.{s[3]}"  # "-.2" (3 символа)
+                return f"{s:>3}"  # На всякий случай
 
-            if not alive:
-                if kicked:
-                    status_icon = "🚫"
-                    status_text = f"{status_icon} {status_reason}"
-                elif "Заголосован" in status_reason:
-                    status_icon = "⚖️"
-                    status_text = f"{status_icon} Заголосован"
-                elif "Убит" in status_reason:
-                    status_icon = "💀"
-                    status_text = f"{status_icon} Убит ночью"
-                else:
-                    status_icon = "💀"
-                    status_text = f"{status_icon} {status_reason}"
-            else:
-                if ppk:
-                    status_icon = "⚠️"
-                    status_text = f"{status_icon} Удалён (ППК)"
-                else:
-                    status_icon = "✅"
-                    status_text = f"{status_icon} Жив"
+            b = fv(info.get('base_points'))
+            bo = fv(info.get('bonus_points'))
+            lh = fv(info.get('lh_points'))
+            pr = fv(info.get('will_protocol_points'))
+            mn = fv(info.get('will_opinion_points'))
+            dc = fv(info.get('dc_points'))
 
-            is_pu = bool(info.get("pu_mark"))
+            tot_val = sum([float(info.get(k) or 0) for k in
+                           ['base_points', 'bonus_points', 'lh_points', 'will_protocol_points', 'will_opinion_points',
+                            'dc_points']])
+            tot = f"{tot_val:>4.1f}" if tot_val < 0 else f" {tot_val:>3.1f}"
 
-            prefix_parts = []
-            if is_pu:
-                prefix_parts.append("👑 ПУ")
-            if fouls > 0:
-                prefix_parts.append(f"⚠️ Фолы: {fouls}")
-            if tech_fouls_count > 0:
-                tech_display = _safe_get_tech_fouls_display(info)
-                if tech_display:
-                    prefix_parts.append(f"⚠️ Тех: {tech_display}")
-                else:
-                    prefix_parts.append(f"⚠️ Тех: {tech_fouls_count}")
+            # Сборка строки в единый моноблок
+            res = f"<code>{slot_num:2}. {name} </code><tg-spoiler><code>{elo_pad}</code></tg-spoiler><code>{role_mark}{s_icon}|{b}|{bo}|{lh}|{pr}|{mn}|{dc}|{tot}</code>"
+            lines.append(res)
 
-            prefix = " | ".join(prefix_parts)
-            if prefix:
-                prefix = f"{prefix} | "
+            # Завещания выносим отдельно, чтобы не растягивать экран
+            wp = (info.get("will_protocol_raw") or "").strip()
+            wo = (info.get("will_opinion") or "").strip()
+            if wp and wp not in ["⏹️", "❌"]: lines.append(f"   <i>└ ПР: {wp[:40]}</i>")
+            if wo and wo not in ["⏹️", "❌"]: lines.append(f"   <i>└ МН: {wo[:40]}</i>")
 
-            base_pts = float(info.get("base_points", 0.0) or 0.0)
-            bonus_pts = float(info.get("bonus_points", 0.0) or 0.0)
-            lh_pts = float(info.get("lh_points", 0.0) or 0.0)
-            pr_pts = float(info.get("will_protocol_points", 0.0) or 0.0)
-            mn_pts = float(info.get("will_opinion_points", 0.0) or 0.0)
-            dc_pts = float(info.get("dc_points", 0.0) or 0.0)
-
-            total_pts = round(base_pts + bonus_pts + lh_pts + pr_pts + mn_pts + dc_pts, 1)
-
-            will_protocol = (info.get("will_protocol_raw") or "").strip()
-            will_opinion = (info.get("will_opinion") or "").strip()
-
-            trash_words = ["⏹️ Остановить", "⏹️", "❌ Отмена", "✅ Подтвердить"]
-            if will_protocol in trash_words:
-                will_protocol = ""
-            if will_opinion in trash_words:
-                will_opinion = ""
-
-            name_line = f"{slot_num}. <b>{name}</b>{elo_display} — <i>{role}</i> {status_text}"
-            lines.append(name_line)
-            lines.append(
-                f"   {prefix}"
-                f"Игра: {base_pts} | "
-                f"Доп: {bonus_pts} | "
-                f"ЛХ: {lh_pts} | "
-                f"ПР: {pr_pts} | "
-                f"МН: {mn_pts} | "
-                f"ДЦ: {dc_pts} | "
-                f"Итого: <b>{total_pts}</b>"
-            )
-
-            if will_protocol:
-                lines.append(f"   Протокол: {will_protocol[:100]}")
-            if will_opinion:
-                lines.append(f"   Мнение: {will_opinion[:100]}")
         lines.append("")
 
     _append_group("🔴 ГОРОД (КРАСНЫЕ):", red_slots)
@@ -431,28 +396,12 @@ async def build_protocol_text(
     _append_group("❓ БЕЗ КОМАНДЫ:", other_slots)
 
     if night_kills_order:
-        while lines and lines[-1] == "":
-            lines.pop()
-
-        lines.append("___________________________________________")
-        lines.append("<b>💀 Убийства (ночные завещания):</b>")
-
-        for killed_slot in night_kills_order:
-            info = slots.get(killed_slot) or {}
-            proto_text = (info.get("will_protocol_raw") or "").strip()
-            proto_pts = float(info.get("will_protocol_points", 0.0) or 0.0)
-            op_text = (info.get("will_opinion") or "").strip()
-            op_pts = float(info.get("will_opinion_points", 0.0) or 0.0)
-
-            if proto_text in ["⏹️ Остановить", "⏹️"]:
-                proto_text = "нет"
-            if op_text in ["⏹️ Остановить", "⏹️"]:
-                op_text = "нет"
-
-            lines.append(f"💀 Убийство №{killed_slot}:")
-            lines.append(f"   📋 Протокол — {proto_text if proto_text else 'нет'} ({proto_pts:+.1f})")
-            lines.append(f"   💬 Мнение — {op_text if op_text else 'нет'} ({op_pts:+.1f})")
-            lines.append("")
+        lines.append("<b>💀 Ночные убийства:</b>")
+        for nk_slot in night_kills_order:
+            info = slots.get(nk_slot, {})
+            p_pts = float(info.get("will_protocol_points", 0.0) or 0.0)
+            o_pts = float(info.get("will_opinion_points", 0.0) or 0.0)
+            lines.append(f"<code>Слот {nk_slot:2} | ПР: {p_pts:>+4.1f} | МН: {o_pts:>+4.1f}</code>")
 
     while lines and lines[-1] == "":
         lines.pop()
