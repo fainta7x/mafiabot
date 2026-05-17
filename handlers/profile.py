@@ -35,6 +35,76 @@ router = Router()
 TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+from aiogram import BaseMiddleware
+from aiogram.types import TelegramObject
+from typing import Callable, Awaitable
+
+
+# --- ЗАЩИТА РЕДАКТОРА ---
+async def check_is_editor(user_id: int) -> bool:
+    """Проверяет права на редактирование (админ/судья)"""
+
+    # 1. Проверяем через твою базу данных, назначен ли человек судьей
+    is_judge = await database.is_game_judge(user_id)
+    if is_judge:
+        return True
+
+    # 2. Главные админы (создатель бота).
+    # Впиши сюда свой Telegram ID, чтобы у тебя всегда был доступ,
+    # даже если ты забыл назначить себя судьей через меню бота.
+    admin_ids = [123456789]  # <-- Удали 123456789 и впиши свои цифры!
+
+    if user_id in admin_ids:
+        return True
+
+    return False
+
+
+class EditorProtectionMiddleware(BaseMiddleware):
+    """Мидлварь, которая блокирует ВСЕ действия редактора для обычных игроков"""
+
+    async def __call__(
+            self,
+            handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+            event: TelegramObject,
+            data: Dict[str, Any]
+    ) -> Any:
+        user_id = None
+        is_edit_action = False
+
+        # Перехватываем нажатия на инлайн-кнопки редактора
+        if isinstance(event, types.CallbackQuery) and event.data and event.data.startswith("editgame_"):
+            user_id = event.from_user.id
+            is_edit_action = True
+
+        # Перехватываем текстовый ввод (когда бот просит ввести очки или фолы)
+        elif isinstance(event, types.Message):
+            state = data.get("state")
+            if state:
+                curr_state = await state.get_state()
+                if curr_state and curr_state.startswith("EditGame"):
+                    user_id = event.from_user.id
+                    is_edit_action = True
+
+        # Если это действие редактора — проверяем права
+        if is_edit_action and user_id:
+            if not await check_is_editor(user_id):
+                if isinstance(event, types.CallbackQuery):
+                    await event.answer("⛔ Доступ запрещен. Только администраторы и судьи могут редактировать игры.",
+                                       show_alert=True)
+                elif isinstance(event, types.Message):
+                    await event.answer("⛔ У вас нет прав для редактирования.")
+                return  # Жёстко прерываем выполнение!
+
+        return await handler(event, data)
+
+
+# Подключаем охранника к роутеру
+router.callback_query.middleware(EditorProtectionMiddleware())
+router.message.middleware(EditorProtectionMiddleware())
+
+
+# -------------------------
 
 # ======================= ВСПОМОГАТЕЛЬНОЕ =======================
 
@@ -345,7 +415,6 @@ async def show_game_by_id(callback: types.CallbackQuery):
     global_game_number = game.get("global_game_number") or 0
     judge_id = game.get("judge_id")
 
-    # Получаем имя судьи
     judge_name = None
     if judge_id:
         user_info = await get_user_by_id(judge_id)
@@ -353,7 +422,6 @@ async def show_game_by_id(callback: types.CallbackQuery):
             _, full_name, username, nickname = user_info
             judge_name = nickname or full_name or username
 
-    # Получаем слоты
     slots = await get_game_slots_by_date(date_str, game_number=game_number)
     if not slots:
         await callback.answer("Нет слотов игры", show_alert=True)
@@ -371,7 +439,6 @@ async def show_game_by_id(callback: types.CallbackQuery):
     from game.text import build_protocol_text
     protocol_body = await build_protocol_text(slots, winner_label=winner_label)
 
-    # Строим шапку
     header = f"📑 Протокол игры №{game_number} ({date_str}): {winner_label}"
     if global_game_number:
         header += f" — №{global_game_number} по общей истории"
@@ -381,11 +448,19 @@ async def show_game_by_id(callback: types.CallbackQuery):
     else:
         full_text = f"{header}\n\n{protocol_body}"
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Редактировать игру", callback_data=f"editgame_menu:{game_id}")],
-        [InlineKeyboardButton(text="◀️ Назад к дате", callback_data=f"allgames_date:{date_str}")],
-        [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_games")]
-    ])
+    # --- ПРАВИЛЬНАЯ ПРОВЕРКА ПРАВ И СБОРКА КНОПОК ---
+    is_editor = await check_is_editor(callback.from_user.id)
+    kb_buttons = []
+
+    if is_editor:
+        kb_buttons.append(
+            [InlineKeyboardButton(text="✏️ Редактировать игру", callback_data=f"editgame_menu:{game_id}")])
+
+    kb_buttons.append([InlineKeyboardButton(text="◀️ Назад к дате", callback_data=f"allgames_date:{date_str}")])
+    kb_buttons.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="close_games")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+    # -------------------------------------------------
 
     timestamp = int(time.time())
 
@@ -399,7 +474,6 @@ async def show_game_by_id(callback: types.CallbackQuery):
         )
         doc = FSInputFile(img_path)
 
-        # Отправляем новое сообщение (не редактируем старое)
         await callback.message.answer_document(document=doc, caption=None)
         await callback.message.answer(
             f"{full_text}\n\n🕐 Обновлено: {timestamp}",
@@ -528,10 +602,19 @@ async def show_my_game_by_id(callback: types.CallbackQuery):
     else:
         full_text = f"{header}\n\n{protocol_body}"
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад к дате", callback_data=f"mygames_date:{date_str}")],
-        [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_games")]
-    ])
+    # --- ПРАВИЛЬНАЯ ПРОВЕРКА ПРАВ И СБОРКА КНОПОК ---
+    is_editor = await check_is_editor(callback.from_user.id)
+    kb_buttons = []
+
+    if is_editor:
+        kb_buttons.append(
+            [InlineKeyboardButton(text="✏️ Редактировать игру", callback_data=f"editgame_menu:{game_id}")])
+
+    kb_buttons.append([InlineKeyboardButton(text="◀️ Назад к дате", callback_data=f"mygames_date:{date_str}")])
+    kb_buttons.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="close_games")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+    # -------------------------------------------------
 
     timestamp = int(time.time())
 
@@ -1053,7 +1136,6 @@ async def show_game_protocol(callback: types.CallbackQuery, state: FSMContext):
     global_game_number = game.get("global_game_number") or 0
     judge_id = game.get("judge_id")
 
-    # Получаем имя судьи
     judge_name = None
     if judge_id:
         user_info = await get_user_by_id(judge_id)
@@ -1061,7 +1143,6 @@ async def show_game_protocol(callback: types.CallbackQuery, state: FSMContext):
             _, full_name, username, nickname = user_info
             judge_name = nickname or full_name or username
 
-    # Получаем слоты и строим тело протокола (без шапки)
     slots = await get_game_slots_by_date(date_str, game_number=game_number)
     if not slots:
         await callback.answer("Нет слотов игры.", show_alert=True)
@@ -1079,20 +1160,27 @@ async def show_game_protocol(callback: types.CallbackQuery, state: FSMContext):
     from game.text import build_protocol_text
     protocol_body = await build_protocol_text(slots, winner_label=winner_label)
 
-    # Строим шапку сами
     header = f"📑 Протокол игры №{game_number} ({date_str}): {winner_label}"
     if global_game_number:
         header += f" — №{global_game_number} по общей истории"
 
-    # Добавляем судью в шапку (только один раз)
     if judge_name:
         full_text = f"{header}\n\n<b>Судья:</b> {judge_name}\n\n{protocol_body}"
     else:
         full_text = f"{header}\n\n{protocol_body}"
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Редактировать игру", callback_data=f"editgame_menu:{game_id}")]
-    ])
+    # --- ПРАВИЛЬНАЯ ПРОВЕРКА ПРАВ И СБОРКА КНОПОК ---
+    is_editor = await check_is_editor(callback.from_user.id)
+    kb_buttons = []
+
+    if is_editor:
+        kb_buttons.append(
+            [InlineKeyboardButton(text="✏️ Редактировать игру", callback_data=f"editgame_menu:{game_id}")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons) if kb_buttons else None
+    # -------------------------------------------------
+
+    timestamp = int(time.time())
 
     try:
         img_path = create_endgame_pic_summary(
@@ -1103,7 +1191,6 @@ async def show_game_protocol(callback: types.CallbackQuery, state: FSMContext):
             judge_name=judge_name,
         )
         doc = FSInputFile(img_path)
-        timestamp = int(time.time())
 
         await callback.message.answer_document(document=doc, caption=None)
         await callback.message.answer(f"{full_text}\n\n🕐 Обновлено: {timestamp}", parse_mode=ParseMode.HTML,
@@ -1111,7 +1198,8 @@ async def show_game_protocol(callback: types.CallbackQuery, state: FSMContext):
         _cleanup_old_files("endgame_summary_", keep=10)
     except Exception as e:
         print(f"[GAME_PROTOCOL][ERROR] {e}")
-        await callback.message.answer(f"{full_text}\n\n🕐 Обновлено: {timestamp}", parse_mode=ParseMode.HTML, reply_markup=kb)
+        await callback.message.answer(f"{full_text}\n\n🕐 Обновлено: {timestamp}", parse_mode=ParseMode.HTML,
+                                      reply_markup=kb)
 
     await callback.answer()
 
