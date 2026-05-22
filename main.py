@@ -10,6 +10,7 @@ from database import init_db
 from handlers import start_profile, payment, booking, profile, admin_judges
 from handlers import achievements
 from handlers import shop
+from handlers import bets  # <--- ДОБАВЛЕНО
 import admin
 from game import router as game_router  # игровой роутер
 from commands import setup_bot_commands
@@ -48,7 +49,7 @@ async def main():
     payment.setup_payment_handlers(bot)
     admin.setup_admin_handlers(bot)
 
-    # ========== РЕГИСТРАЦИЯ РОУТЕРОВ (ВАЖНЫЙ ПОРЯДОК!) ==========
+    # ========== РЕГИСТРАЦИЯ РОУТЕРОВ ==========
 
     # 1. Сначала самые специфичные хендлеры с фильтрами
     dp.include_router(admin_judges.router)  # управление судьями
@@ -63,10 +64,13 @@ async def main():
     # 3. Игровые роутеры
     dp.include_router(game_router)  # игровая логика
 
-    #5. Ачивки
+    # 4. Ставки (ФИКС)
+    dp.include_router(bets.router)
+
+    # 5. Ачивки
     dp.include_router(achievements.router)
 
-    #6. Магазин
+    # 6. Магазин
     dp.include_router(shop.router)
 
     # Команды меню

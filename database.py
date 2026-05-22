@@ -1398,3 +1398,19 @@ async def recalc_all_stats():
                 (games, wins, user_id, user_id))
         await conn.commit()
         print(f"[STATS] Пересчет завершен. Синхронизировано игроков: {len(stats)}")
+
+
+async def refund_bets_for_game(game_id: int):
+    async with get_db() as conn:
+        # 1. Получаем все ставки на эту игру
+        async with conn.execute("SELECT user_id, amount FROM bets WHERE game_id = ?", (game_id,)) as cur:
+            bets = await cur.fetchall()
+
+        for user_id, amount in bets:
+            # 2. Возвращаем жетоны
+            await conn.execute("UPDATE users SET tokens = tokens + ? WHERE user_id = ?", (amount, user_id))
+
+        # 3. Удаляем записи о ставках
+        await conn.execute("DELETE FROM bets WHERE game_id = ?", (game_id,))
+        await conn.commit()
+

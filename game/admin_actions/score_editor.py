@@ -330,8 +330,16 @@ async def handle_game_finish(callback: CallbackQuery, state: FSMContext):
     action = callback.data.split(":", 1)[1]
 
     if action == "cancel":
+        # Получаем ID игры из данных
+        game_id = data.get("current_game_id")
+
+        # Если игра была создана и ставки были — возвращаем жетоны
+        if game_id:
+            await database.refund_bets_for_game(game_id)
+            print(f"[BETS] Игра #{game_id} отменена, жетоны возвращены.")
+
         await clear_game_state(state)
-        await callback.message.edit_text("❌ **Игра отменена**\n\nИгра полностью удалена без сохранения.")
+        await callback.message.edit_text("❌ **Игра отменена**\n\nИгра полностью удалена, жетоны возвращены игрокам.")
         await callback.message.answer("🛠 Админ-панель", reply_markup=keyboards.admin_menu())
         await callback.answer()
         return
