@@ -185,18 +185,17 @@ def profile_kb(debt: int):
 # ========== INLINE КЛАВИАТУРЫ ==========
 def evenings_history_kb(evenings: list):
     builder = InlineKeyboardBuilder()
-    for date_str, count in evenings:
-        # Проверяем, похоже ли значение на дату (есть ли там точки или дефисы)
-        if "." in date_str or "-" in date_str:
-            display_text = f"📅 {date_str} ({count} чел.)"
-        # Если это просто число (тот самый ID), называем его "Вечер №"
-        elif date_str.isdigit():
-            display_text = f"📅 Вечер №{date_str} ({count} чел.)"
-        # На всякий случай для других случаев
-        else:
-            display_text = f"📅 {date_str} ({count} чел.)"
+    for date_str, count, total_sum in evenings:
+        # Форматируем дату
+        try:
+            display_date = datetime.strptime(date_str, "%Y-%m-%d").strftime("%d.%m")
+        except:
+            display_date = date_str
 
+        # total_sum уже придет из базы как число (например 3100)
+        display_text = f"📅 {display_date} | {count} чел. | {total_sum}₽"
         builder.button(text=display_text, callback_data=f"hist_{date_str}")
+
     builder.adjust(1)
     return builder.as_markup()
 
@@ -753,5 +752,35 @@ def stats_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔍 Найти игрока", callback_data="search_player")
     builder.button(text="📖 Книга ачивок", callback_data="achievements_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+# Клава выбора года
+def years_kb(years: list):
+    builder = InlineKeyboardBuilder()
+    for year in years:
+        builder.button(text=f"📅 {year} год", callback_data=f"yr_{year}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+# Клава выбора месяца (с суммой)
+def months_kb(year: str, months_data: list):
+    builder = InlineKeyboardBuilder()
+    month_names = {"01":"Январь", "02":"Февраль", "03":"Март", "04":"Апрель", "05":"Май", "06":"Июнь",
+                   "07":"Июль", "08":"Август", "09":"Сентябрь", "10":"Октябрь", "11":"Ноябрь", "12":"Декабрь"}
+    for month, total_sum in months_data:
+        builder.button(text=f"{month_names.get(month, month)} — {total_sum}₽", callback_data=f"mo_{year}_{month}")
+    builder.button(text="⬅️ Назад к годам", callback_data="back_years")
+    builder.adjust(1)
+    return builder.as_markup()
+
+# Клава конкретных вечеров (твой запрос)
+def evenings_kb(year: str, month: str, evenings: list):
+    builder = InlineKeyboardBuilder()
+    for date_str, count, total_sum in evenings:
+        display_date = date_str.split('-')[-1] # берем день (22)
+        builder.button(text=f"{display_date}.{month} | {count} чел. | {total_sum}₽", callback_data=f"hist_{date_str}")
+    builder.button(text="⬅️ Назад к месяцам", callback_data=f"back_months_{year}")
     builder.adjust(1)
     return builder.as_markup()

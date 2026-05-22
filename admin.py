@@ -458,9 +458,11 @@ async def admin_edit_debt_set_amount(message: types.Message, state: FSMContext):
 @router.message(F.text == "📚 История вечеров", F.chat.type == "private")
 async def admin_history_menu(message: types.Message):
     if not _is_admin(message.from_user.id): return
-    evs = await database.get_evenings_list(limit=15)
-    if not evs: return await message.answer("История пуста.")
-    await message.answer("📚 Выберите вечер:", reply_markup=keyboards.evenings_history_kb(evs))
+    years = await database.get_history_years()
+    if not years:
+        await message.answer("История пуста.")
+        return
+    await message.answer("📚 Выберите год:", reply_markup=keyboards.years_kb(years))
 
 
 @router.callback_query(F.data == "admin_evenings_history")
@@ -474,11 +476,9 @@ async def admin_history_detail(call: CallbackQuery):
     date_str = call.data.split("_")[1]
 
     # --- ИСПРАВЛЕННАЯ ЛОГИКА ЗАГОЛОВКА ---
-    # Если в строке есть точки или тире — это дата, форматируем её
     if "." in date_str or "-" in date_str:
         display_date = database.format_date_to_user(date_str)
     else:
-        # Если это просто ID (как у тебя в базе), называем это "Вечер №"
         display_date = f"Вечер №{date_str}"
     # ------------------------------------
 
@@ -487,7 +487,6 @@ async def admin_history_detail(call: CallbackQuery):
 
     EXCLUDED = ["Чагин", "Матроскина", "Стаут", "Гриня", "Evgeniy Chagin", "Екатерина", "Di D", "Григорий Подколзин"]
 
-    # Используем наш display_date в тексте
     text = f"📅 *Отчет за {display_date}*\n\n"
     total, idx = 0, 1
 
@@ -504,7 +503,64 @@ async def admin_history_detail(call: CallbackQuery):
         idx += 1
 
     text += f"\n💰 *ИТОГО: {total}₽*"
+
+    # --- ДИНАМИЧЕСКАЯ КНОПКА НАЗАД ---
+    # Извлекаем год и месяц из даты (ожидаем формат ГГГГ-ММ-ДД)
+    # Если дата в другом формате, этот сплит может сломаться, убедись что формат даты стабильный
+    year, month = date_str.split("-")[:2]
+
     kb = InlineKeyboardBuilder()
-    kb.button(text="🔙 Назад", callback_data="admin_evenings_history")
+    # Теперь при нажатии бот будет знать, в какой месяц вернуться
+    kb.button(text="⬅️ Назад", callback_data=f"back_to_month_{year}_{month}")
+    # --------------------------------
+
     await call.message.edit_text(text, parse_mode="Markdown", reply_markup=kb.as_markup())
+    await call.answer()
+
+# Выбор месяца
+@router.callback_query(F.data.startswith("yr_"))
+async def admin_history_months(call: CallbackQuery):
+    year = call.data.split("_")[1]
+    months = await database.get_history_months(year)
+    await call.message.edit_text(f"📚 Выберите месяц ({year} год):", reply_markup=keyboards.months_kb(year, months))
+    await call.answer()
+
+# Выбор конкретного вечера
+@router.callback_query(F.data.startswith("mo_"))
+async def admin_history_evenings(call: CallbackQuery):
+    _, year, month = call.data.split("_")
+    evenings = await database.get_history_evenings(year, month)
+    await call.message.edit_text(f"📅 Вечера за {month}.{year}:", reply_markup=keyboards.evenings_kb(year, month, evenings))
+    await call.answer()
+
+# Навигация "Назад"
+@router.callback_query(F.data == "back_years")
+async def back_to_years(call: CallbackQuery):
+    years = await database.get_history_years()
+    await call.message.edit_text("📚 Выберите год:", reply_markup=keyboards.years_kb(years))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("back_months_"))
+async def back_to_months(call: CallbackQuery):
+    year = call.data.split("_")[2]
+    months = await database.get_history_months(year)
+    await call.message.edit_text(f"📚 Выберите месяц ({year} год):", reply_markup=keyboards.months_kb(year, months))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("back_to_month_"))
+async def back_to_specific_month(call: CallbackQuery):
+    # Разбиваем строку по нижнему подчеркиванию
+    parts = call.data.split("_")
+
+    # Берем два последних элемента — это всегда год и месяц
+    year = parts[-2]
+    month = parts[-1]
+
+    evenings = await database.get_history_evenings(year, month)
+
+    await call.message.edit_text(
+        f"📅 Вечера за {month}.{year}:",
+        reply_markup=keyboards.evenings_kb(year, month, evenings)
+    )
     await call.answer()

@@ -596,10 +596,13 @@ async def archive_current_evening():
             # Четко указываем поля и значения в правильном порядке
             # ВНИМАНИЕ: Если твоя таблица создана как (date, user_id...),
             # то порядок должен быть именно таким:
-            data_to_insert = [
-                (date_to_archive, r['user_id'], r['status'], r['full_name'], r['nickname'], 0)
-                for r in rows
-            ]
+            data_to_insert = []
+            for r in rows:
+                # Здесь мы предполагаем, что за "Вовремя/Позже" берем 100₽
+                money = 100
+                data_to_insert.append(
+                    (date_to_archive, r['user_id'], r['status'], r['full_name'], r['nickname'], money))
+
 
             # Добавляем названия столбцов в запрос, чтобы SQLite не перепутал их
             await conn.executemany(
@@ -643,10 +646,31 @@ async def get_evening_players(date_str: str) -> list:
 
 async def get_evenings_list(limit: int = 10) -> list:
     orgs = ("Чагин", "Матроскина", "Стаут", "Гриня", "Evgeniy Chagin", "Екатерина", "Di D", "Григорий Подколзин")
+
+    # Мы используем вложенный запрос для расчета игр (games_count) и сразу считаем стоимость
+    # Логика: если игр >= 4, то 400. Если игр < 4 (или 0), то игры * 100 (минимум 1 игра).
+    query = f"""
+        SELECT 
+            h.date, 
+            COUNT(DISTINCT h.user_id),
+            SUM(
+                CASE 
+                    WHEN (SELECT MAX(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) >= 4 
+                    THEN 400 
+                    ELSE (SELECT MAX(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) * 100 
+                END
+            ) as total_sum
+        FROM evening_history h 
+        WHERE h.status IN ('Вовремя', 'Позже') 
+          AND h.nickname NOT IN {orgs} 
+          AND h.full_name NOT IN {orgs} 
+        GROUP BY h.date 
+        ORDER BY h.date DESC 
+        LIMIT ?
+    """
+
     async with get_db() as conn:
-        async with conn.execute(
-                f"SELECT date, COUNT(*) FROM evening_history WHERE status IN ('Вовремя', 'Позже') AND nickname NOT IN {orgs} AND full_name NOT IN {orgs} GROUP BY date ORDER BY id DESC LIMIT ?",
-                (limit,)) as cur:
+        async with conn.execute(query, (limit,)) as cur:
             return await cur.fetchall()
 
 
@@ -678,6 +702,77 @@ async def is_evening_bills_sent(date_str: str) -> bool:
             row = await cur.fetchone()
             return bool(row and row[0])
 
+# 1. Получаем список годов
+async def get_history_years():
+    async with get_db() as conn:
+        async with conn.execute("SELECT DISTINCT strftime('%Y', date) as year FROM evening_history ORDER BY year DESC") as cur:
+            return [row[0] for row in await cur.fetchall()]
+
+# 2. Получаем месяцы для конкретного года + считаем сумму за месяц
+async def get_history_months(year: str):
+    orgs = ("Чагин", "Матроскина", "Стаут", "Гриня", "Evgeniy Chagin", "Екатерина", "Di D", "Григорий Подколзин")
+    orgs_formatted = ", ".join([f"'{o}'" for o in orgs])
+
+    async with get_db() as conn:
+        # Добавляем LEFT JOIN и фильтр NOT IN, как в списке вечеров
+        query = f"""
+            SELECT 
+                strftime('%m', h.date) as month,
+                SUM(
+                    CASE 
+                        WHEN (SELECT MAX(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) >= 4 
+                        THEN 400 
+                        ELSE (SELECT MAX(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) * 100 
+                    END
+                ) as total_sum
+            FROM evening_history h
+            LEFT JOIN users u ON h.user_id = u.user_id
+            WHERE strftime('%Y', h.date) = ? 
+              AND h.status IN ('Вовремя', 'Позже')
+              AND COALESCE(u.nickname, h.nickname) NOT IN ({orgs_formatted})
+              AND COALESCE(u.full_name, h.full_name) NOT IN ({orgs_formatted})
+            GROUP BY month 
+            ORDER BY month DESC
+        """
+        async with conn.execute(query, (year,)) as cur:
+            return await cur.fetchall()
+
+# 3. Получаем вечера для конкретного месяца (твой текущий запрос, фильтруем по году и месяцу)
+async def get_history_evenings(year: str, month: str):
+    # Список исключений (должен совпадать с тем, что в admin.py)
+    orgs = ("Чагин", "Матроскина", "Стаут", "Гриня", "Evgeniy Chagin", "Екатерина", "Di D", "Григорий Подколзин")
+
+    # Форматируем список для SQL (в кавычках через запятую)
+    orgs_formatted = ", ".join([f"'{o}'" for o in orgs])
+
+    async with get_db() as conn:
+        # Используем логику:
+        # 1. Считаем игры: MAX(1, кол-во записей)
+        # 2. Считаем деньги: если >= 4 игры, то 400, иначе игры * 100
+        # 3. Фильтруем организаторов (NOT IN)
+        query = f"""
+            SELECT 
+                h.date, 
+                COUNT(DISTINCT h.user_id),
+                SUM(
+                    CASE 
+                        WHEN (SELECT MAX(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) >= 4 
+                        THEN 400 
+                        ELSE (SELECT MAX(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) * 100 
+                    END
+                ) as total_sum
+            FROM evening_history h
+            LEFT JOIN users u ON h.user_id = u.user_id
+            WHERE strftime('%Y', h.date) = ? 
+              AND strftime('%m', h.date) = ? 
+              AND h.status IN ('Вовремя', 'Позже')
+              AND COALESCE(u.nickname, h.nickname) NOT IN ({orgs_formatted})
+              AND COALESCE(u.full_name, h.full_name) NOT IN ({orgs_formatted})
+            GROUP BY h.date 
+            ORDER BY h.date DESC
+        """
+        async with conn.execute(query, (year, month)) as cur:
+            return await cur.fetchall()
 
 # ========== 7. РЕЗУЛЬТАТЫ ИГР ==========
 async def apply_game_result_to_users(slots: Dict[int, dict], winning_team: str):
