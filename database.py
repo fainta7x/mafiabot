@@ -580,17 +580,39 @@ async def set_last_evening_amount_for_user(user_id: int, amount: int):
 
 # ========== 6. ИСТОРИЯ ВЕЧЕРОВ ==========
 async def archive_current_evening():
+    # 1. Сначала узнаем правильную дату текущего игрового вечера из настроек
+    # Это гарантирует, что мы запишем именно дату, а не ID или мусор
+    date_to_archive = await get_setting("current_game_date")
+    if not date_to_archive:
+        date_to_archive = datetime.now().strftime("%Y-%m-%d")
+
     async with get_db() as conn:
+        # 2. Выбираем только то, что нужно (без даты из booking, она нам не нужна)
         async with conn.execute(
-                "SELECT e.user_id, e.date, e.status, u.full_name, u.nickname FROM evening_booking e LEFT JOIN users u ON e.user_id = u.user_id") as cur:
+                "SELECT e.user_id, e.status, u.full_name, u.nickname FROM evening_booking e LEFT JOIN users u ON e.user_id = u.user_id") as cur:
             rows = await cur.fetchall()
+
         if rows:
+            # Четко указываем поля и значения в правильном порядке
+            # ВНИМАНИЕ: Если твоя таблица создана как (date, user_id...),
+            # то порядок должен быть именно таким:
+            data_to_insert = [
+                (date_to_archive, r['user_id'], r['status'], r['full_name'], r['nickname'], 0)
+                for r in rows
+            ]
+
+            # Добавляем названия столбцов в запрос, чтобы SQLite не перепутал их
             await conn.executemany(
-                "INSERT INTO evening_history (date, user_id, status, full_name, nickname, amount) VALUES (?, ?, ?, ?, ?, 0)",
-                rows)
-            for row in rows:
-                if row[2] in ("Вовремя", "Позже"):
-                    await conn.execute("UPDATE users SET last_visit = ? WHERE user_id = ?", (f"{row[1]} 20:00", row[0]))
+                "INSERT INTO evening_history (date, user_id, status, full_name, nickname, amount) VALUES (?, ?, ?, ?, ?, ?)",
+                data_to_insert)
+
+            # 4. Обновляем время последнего визита
+            for r in rows:
+                if r['status'] in ("Вовремя", "Позже"):
+                    await conn.execute("UPDATE users SET last_visit = ? WHERE user_id = ?",
+                                       (f"{date_to_archive} 20:00", r['user_id']))
+
+        # 5. Очищаем текущую запись
         await conn.execute("DELETE FROM evening_booking")
         await conn.commit()
 

@@ -1,6 +1,6 @@
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton, ReplyKeyboardMarkup
-
+from datetime import datetime
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def _mobile_adjust(*sizes: int, max_per_row: int = 3):
@@ -186,7 +186,17 @@ def profile_kb(debt: int):
 def evenings_history_kb(evenings: list):
     builder = InlineKeyboardBuilder()
     for date_str, count in evenings:
-        builder.button(text=f"📅 {date_str} ({count} чел.)", callback_data=f"hist_{date_str}")
+        # Проверяем, похоже ли значение на дату (есть ли там точки или дефисы)
+        if "." in date_str or "-" in date_str:
+            display_text = f"📅 {date_str} ({count} чел.)"
+        # Если это просто число (тот самый ID), называем его "Вечер №"
+        elif date_str.isdigit():
+            display_text = f"📅 Вечер №{date_str} ({count} чел.)"
+        # На всякий случай для других случаев
+        else:
+            display_text = f"📅 {date_str} ({count} чел.)"
+
+        builder.button(text=display_text, callback_data=f"hist_{date_str}")
     builder.adjust(1)
     return builder.as_markup()
 

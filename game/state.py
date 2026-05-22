@@ -12,6 +12,7 @@ class GameCreateState(StatesGroup):
     waiting_fouls = State()  # ожидание номеров для фолов
     waiting_nominees = State()  # ожидание выставленных игроков
     waiting_votes = State()  # ожидание голосов
+    waiting_for_judge = State()
 
     # ========== РАЗДАЧА РОЛЕЙ ==========
     choosing_mafia = State()  # выбор двух мафий

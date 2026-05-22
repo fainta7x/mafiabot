@@ -472,11 +472,22 @@ async def back_to_evenings_list(call: CallbackQuery):
 @router.callback_query(F.data.startswith("hist_"))
 async def admin_history_detail(call: CallbackQuery):
     date_str = call.data.split("_")[1]
-    display_date = database.format_date_to_user(date_str)
+
+    # --- ИСПРАВЛЕННАЯ ЛОГИКА ЗАГОЛОВКА ---
+    # Если в строке есть точки или тире — это дата, форматируем её
+    if "." in date_str or "-" in date_str:
+        display_date = database.format_date_to_user(date_str)
+    else:
+        # Если это просто ID (как у тебя в базе), называем это "Вечер №"
+        display_date = f"Вечер №{date_str}"
+    # ------------------------------------
+
     players = await database.get_evening_players(date_str)
     if not players: return await call.answer("Нет данных.")
 
     EXCLUDED = ["Чагин", "Матроскина", "Стаут", "Гриня", "Evgeniy Chagin", "Екатерина", "Di D", "Григорий Подколзин"]
+
+    # Используем наш display_date в тексте
     text = f"📅 *Отчет за {display_date}*\n\n"
     total, idx = 0, 1
 

@@ -172,25 +172,23 @@ def _build_slot_menu_kb(game_id: int, slot_num: int) -> InlineKeyboardMarkup:
     kb = [
         [
             InlineKeyboardButton(text="🎭 Роль", callback_data=f"editgame_field:role:{game_id}:{slot_num}"),
-            InlineKeyboardButton(text="🏳 Команда", callback_data=f"editgame_field:team:{game_id}:{slot_num}"),
+            InlineKeyboardButton(text="📊 Статус", callback_data=f"editgame_field:status:{game_id}:{slot_num}"),
         ],
         [
-            InlineKeyboardButton(text="📊 Статус", callback_data=f"editgame_field:status:{game_id}:{slot_num}"),
             InlineKeyboardButton(text="🎲 Очки", callback_data=f"editgame_field:points:{game_id}:{slot_num}"),
+            InlineKeyboardButton(text="⚠️ Фолы/Техфолы", callback_data=f"editgame_field:fouls:{game_id}:{slot_num}"),
         ],
         [
             InlineKeyboardButton(text="📋 ПР (баллы)", callback_data=f"editgame_field:protocol:{game_id}:{slot_num}"),
-            InlineKeyboardButton(text="📋 ПР (текст)",
-                                 callback_data=f"editgame_field:protocol_text:{game_id}:{slot_num}"),
+            InlineKeyboardButton(text="📋 ПР (текст)", callback_data=f"editgame_field:protocol_text:{game_id}:{slot_num}"),
         ],
         [
             InlineKeyboardButton(text="💬 МН (баллы)", callback_data=f"editgame_field:opinion:{game_id}:{slot_num}"),
-            InlineKeyboardButton(text="💬 МН (текст)",
-                                 callback_data=f"editgame_field:opinion_text:{game_id}:{slot_num}"),
+            InlineKeyboardButton(text="💬 МН (текст)", callback_data=f"editgame_field:opinion_text:{game_id}:{slot_num}"),
         ],
         [
             InlineKeyboardButton(text="👑 ПУ (вкл/выкл)", callback_data=f"editgame_field:pu:{game_id}:{slot_num}"),
-            InlineKeyboardButton(text="⚠️ Фолы/Техфолы", callback_data=f"editgame_field:fouls:{game_id}:{slot_num}"),
+            InlineKeyboardButton(text="👤 Заменить игрока", callback_data=f"editgame_replace_init:{game_id}:{slot_num}")
         ],
         [
             InlineKeyboardButton(text="◀️ Назад к списку", callback_data=f"editgame_players:{game_id}"),
@@ -268,6 +266,7 @@ def _build_cancel_confirm_kb(game_id: int) -> InlineKeyboardMarkup:
 
 class EditGameState(StatesGroup):
     waiting_for_value = State()
+    waiting_for_replacement = State()  # Состояние для замены игрока
 
 class EditGameMetadataState(StatesGroup):
     waiting_for_new_number = State()
@@ -1521,99 +1520,78 @@ async def editgame_regenerate(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Игра не найдена.", show_alert=True)
         return
 
-    date_str = game.get("game_date") or "-"
-    game_number = game.get("game_number") or 0
+    date_str = game.get("game_date")
+    game_number = game.get("game_number")
 
     data = await state.get_data()
     temp_slots = data.get("temp_slots", {})
-    temp_winner = data.get("temp_winner")
+    temp_winner = data.get("temp_winner") or game.get("winner_label")
 
     slots = await get_game_slots_by_date(date_str, game_number=game_number)
     if not slots:
         await callback.answer("Нет слотов игры.", show_alert=True)
         return
 
-    for slot_num, changes in temp_slots.items():
-        if slot_num in slots:
-            update_params = {}
-            for key, value in changes.items():
-                if key == "alive":
-                    update_params["alive"] = 1 if value else 0
-                elif key == "status_reason":
-                    update_params["status_reason"] = value
-                elif key == "kicked":
-                    update_params["kick"] = 1 if value else 0
-                elif key == "ppk":
-                    update_params["ppk"] = 1 if value else 0
-                elif key == "pu_mark":
-                    update_params["pu"] = 1 if value else 0
-                elif key == "will_protocol_raw":
-                    update_params["will_protocol_raw"] = value
-                elif key == "will_opinion":
-                    update_params["will_opinion"] = value
-                elif key == "role":
-                    update_params["role"] = value
-                elif key == "team":
-                    update_params["team"] = value
-                elif key == "base_points":
-                    update_params["base_points"] = value
-                elif key == "bonus_points":
-                    update_params["bonus_points"] = value
-                elif key == "lh_points":
-                    update_params["lh_points"] = value
-                elif key == "dc_points":
-                    update_params["dc_points"] = value
-                elif key == "will_protocol_points":
-                    update_params["will_protocol_points"] = value
-                elif key == "will_opinion_points":
-                    update_params["will_opinion_points"] = value
-                elif key == "fouls":
-                    update_params["fouls"] = value
-                elif key == "technical_fouls":
-                    tech_list = value
-                    if isinstance(tech_list, list):
-                        update_params["technical_fouls"] = len(tech_list)
-                    else:
-                        update_params["technical_fouls"] = tech_list
-                else:
-                    update_params[key] = value
+    # --- ЛОГИКА ПЕРЕСЧЕТА БАЛЛОВ ЗА ПОБЕДУ ---
+    winning_team = "Красные" if "город" in temp_winner.lower() else "Чёрные" if "мафи" in temp_winner.lower() else None
 
-            if update_params:
-                # ========== ИСПРАВЛЕНИЕ: передаём game_number ==========
-                await update_game_slot(date_str, slot_num, game_number=game_number, **update_params)
-                print(f"[DEBUG] Saved slot {slot_num}: {update_params}")
+    # Применяем изменения из temp_slots и сразу пересчитываем base_points
+    for slot_num, info in slots.items():
+        # Применяем правки из редактора
+        if slot_num in temp_slots:
+            info.update(temp_slots[slot_num])
 
-    if temp_winner:
-        await update_game_outcome(game_id, temp_winner)
+        # Пересчет base_points за победу
+        if winning_team and info.get("team") == winning_team:
+            info["base_points"] = 1.0
+        else:
+            info["base_points"] = 0.0
 
-    for slot_num, changes in temp_slots.items():
-        if slot_num in slots:
-            for key, value in changes.items():
-                slots[slot_num][key] = value
+        # Сохраняем слот в БД
+        update_params = {
+            "alive": 1 if info.get("alive") else 0,
+            "status_reason": info.get("status_reason"),
+            "kick": 1 if info.get("kicked") else 0,
+            "ppk": 1 if info.get("ppk") else 0,
+            "pu": 1 if info.get("pu_mark") else 0,
+            "role": info.get("role"),
+            "team": info.get("team"),
+            "base_points": info["base_points"],
+            "bonus_points": float(info.get("bonus_points", 0)),
+            "lh_points": float(info.get("lh_points", 0)),
+            "dc_points": float(info.get("dc_points", 0)),
+            "will_protocol_points": float(info.get("will_protocol_points", 0)),
+            "will_opinion_points": float(info.get("will_opinion_points", 0)),
+            "fouls": info.get("fouls", 0)
+        }
+        await update_game_slot(date_str, game_number, slot_num, **update_params)
 
+    # Обновляем исход игры
+    await update_game_outcome(game_id, temp_winner)
+
+    # Пересчитываем ночные убийства
     night_kills_order = []
     for slot_num, info in slots.items():
         if isinstance(slot_num, int):
-            status_reason = info.get("status_reason", "")
-            if "убит" in status_reason.lower() and "заголосован" not in status_reason.lower():
+            if "убит" in info.get("status_reason", "").lower():
                 night_kills_order.append(slot_num)
-    night_kills_order.sort()
-    if night_kills_order:
-        slots["_night_kills_order"] = night_kills_order
-        await save_night_kills_order(date_str, game_number, night_kills_order)
+    await save_night_kills_order(date_str, game_number, night_kills_order)
+    slots["_night_kills_order"] = night_kills_order
 
+    # Обновляем протокол текстом
     from game.text import build_protocol_text
-    final_winner = temp_winner if temp_winner else game.get("winner_label", "Результат не указан")
-    new_protocol_text = await build_protocol_text(slots, winner_label=final_winner)
+    new_protocol_text = await build_protocol_text(slots, winner_label=temp_winner)
 
-    import aiosqlite
-    async with aiosqlite.connect("mafia_crm.db") as conn:
+    async with database.get_db() as conn:
         await conn.execute("UPDATE game_history SET protocol_text = ? WHERE id = ?", (new_protocol_text, game_id))
         await conn.commit()
 
+    # Пересчет общей статистики игроков (чтобы рейтинг обновился с учетом новых очков)
+    await database.recalc_all_stats()
+
     await state.update_data(temp_slots={}, temp_winner=None, has_changes=False)
-    await callback.answer("✅ Изменения сохранены! Протокол обновлён.")
-    await _send_protocol(callback, game_id, final_winner)
+    await callback.answer("✅ Изменения сохранены! Баллы пересчитаны.")
+    await _send_protocol(callback, game_id, temp_winner)
 
 
 @router.callback_query(F.data.startswith("editgame_cancel_confirm:"))
@@ -1701,8 +1679,7 @@ async def editgame_field_entry(callback: types.CallbackQuery, state: FSMContext)
     await state.update_data(has_changes=True, current_field=field, current_slot=slot_num, current_game_id=game_id)
 
     msgs = {
-        "role": "Введи новую роль (строкой), например: Мирный, Шериф, Мафия, Дон.",
-        "team": "Введи новую команду (строкой), например: Красные или Чёрные.",
+        "role": "🎭 Введи новую роль (например: Мирный, Шериф, Мафия, Дон).\n🏳 Команда (Красные/Чёрные) установится автоматически.",
         "points": "Введи очки через пробел: Игра Доп ЛХ ДЦ\nНапример: 1 0.5 0 -0.5",
         "protocol": "Введи новое значение ПР (число, можно с знаком: +0.5, -1):",
         "protocol_text": "📋 Введи текст протокола (ПР):\nПример: 3 6 7 красные, 1 4 чёрные\nИли 'нет' для очистки",
@@ -1833,11 +1810,26 @@ async def editgame_field_apply(message: types.Message, state: FSMContext):
 
     try:
         if field == "role":
-            changes["role"] = text
-            await message.answer("✅ Роль обновлена (будет сохранена после нажатия 'Сохранить').")
-        elif field == "team":
-            changes["team"] = text
-            await message.answer("✅ Команда обновлена (будет сохранена после нажатия 'Сохранить').")
+            role_lower = text.lower()
+
+            # Умное определение команды по роли
+            if "мир" in role_lower or "шер" in role_lower:
+                team = "Красные"
+            elif "маф" in role_lower or "дон" in role_lower:
+                team = "Чёрные"
+            else:
+                team = "Без команды"
+
+            # Делаем первую букву заглавной, если это стандартная роль
+            if role_lower in ["мирный", "шериф", "мафия", "дон"]:
+                changes["role"] = text.capitalize()
+            else:
+                changes["role"] = text
+
+            changes["team"] = team
+            await message.answer(
+                f"✅ Роль обновлена на **{changes['role']}**.\n🏳 Команда автоматически изменена на **{team}** (сохранится после нажатия 'Сохранить').")
+
         elif field == "points":
             parts = text.replace(",", ".").split()
             if len(parts) != 4:
@@ -2489,3 +2481,89 @@ async def editgame_delete_yes(callback: types.CallbackQuery, state: FSMContext):
         parse_mode=ParseMode.MARKDOWN
     )
     await callback.answer()
+
+# ======================= ЗАМЕНА ИГРОКА В СЛОТЕ =======================
+
+@router.callback_query(F.data.startswith("editgame_replace_init:"))
+async def editgame_replace_init(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        _, game_id_str, slot_str = callback.data.split(":")
+        game_id = int(game_id_str)
+        slot_num = int(slot_str)
+    except Exception:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+
+    await state.set_state(EditGameState.waiting_for_replacement)
+    await state.update_data(replace_game_id=game_id, replace_slot=slot_num, has_changes=True)
+
+    await callback.message.answer(
+        f"👤 **Замена игрока в слоте {slot_num}**\n\n"
+        f"Введите **никнейм** игрока, которого нужно посадить на этот слот.\n\n"
+        f"*(Если игрока нет в базе, он будет записан как 'Гость' без сохранения статистики)*",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
+
+@router.message(EditGameState.waiting_for_replacement)
+async def editgame_replace_apply(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    game_id = data.get("replace_game_id")
+    slot_num = data.get("replace_slot")
+
+    if not game_id or not slot_num:
+        await message.answer("Ошибка состояния. Попробуйте снова.")
+        await state.clear()
+        return
+
+    new_player_name = message.text.strip()
+    new_user = await database.get_user_by_nickname(new_player_name)
+
+    # Проверка на наличие профиля
+    if not new_user:
+        new_user_id = None
+        display_name = "Гость (без профиля)"
+    else:
+        new_user_id = new_user[0]
+        display_name = new_user[3] or new_user[1]
+
+    game = await get_game_by_id(game_id)
+    if not game:
+        await message.answer("❌ Игра не найдена.")
+        await state.set_state(None)
+        return
+
+    date_str = game.get("game_date")
+    game_number = game.get("game_number")
+
+    # 1. Меняем ID пользователя в истории слотов (Если Гость - пишем NULL)
+    async with database.get_db() as conn:
+        await conn.execute(
+            "UPDATE game_slots_history SET user_id = ?, updated_by_editor = 1 WHERE game_date = ? AND game_number = ? AND slot_num = ?",
+            (new_user_id, date_str, game_number, slot_num)
+        )
+        await conn.commit()
+
+    # 2. Глобально пересчитываем статистику
+    await database.recalc_all_stats()
+
+    # 3. Очищаем временные изменения для этого слота в редакторе, чтобы подтянулось новое имя
+    temp_slots = data.get("temp_slots", {})
+    if slot_num in temp_slots:
+        del temp_slots[slot_num]
+        await state.update_data(temp_slots=temp_slots)
+
+    await state.set_state(None)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Вернуться к списку игроков", callback_data=f"editgame_players:{game_id}")]
+    ])
+
+    await message.answer(
+        f"✅ Слот **{slot_num}** успешно обновлен!\n"
+        f"Теперь на нем играет: **{display_name}**.\n\n"
+        f"Статистика пересчитана автоматически.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb
+    )

@@ -105,6 +105,11 @@ async def choose_judge_start(callback: CallbackQuery, state: FSMContext):
     for user_id, name in players:
         name_short = name[:20] + ".." if len(name) > 20 else name
         builder.button(text=f"👨‍⚖️ {name_short}", callback_data=f"game_set_judge:{user_id}")
+
+    # --- НОВАЯ КНОПКА ---
+    builder.button(text="👤 Ввести ник судьи вручную", callback_data="game_ask_judge_manual")
+    # -------------------
+
     builder.button(text="❌ Отмена", callback_data="game_cancel_judge")
     builder.adjust(1)
 
@@ -156,6 +161,49 @@ async def cancel_choose_judge(callback: CallbackQuery, state: FSMContext):
     await show_players_list_for_game(callback.message, state, booked)
     await callback.answer()
 
+
+@router.callback_query(F.data == "game_ask_judge_manual")
+async def ask_judge_manual(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(GameCreateState.waiting_for_judge)
+    await callback.message.edit_text(
+        "Введите никнейм или полное имя судьи (игрок должен быть в базе):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="game_cancel_judge")]
+        ])
+    )
+    await callback.answer()
+
+
+@router.message(GameCreateState.waiting_for_judge)
+async def process_judge_nickname(message: types.Message, state: FSMContext):
+    nickname = message.text.strip()
+
+    # Ищем игрока в базе
+    user = await database.get_user_by_nickname(nickname)
+
+    if not user:
+        await message.answer("❌ Игрок не найден в базе. Введите точный ник или имя.")
+        return
+
+    # Данные пользователя (user[0] — id, user[3] — ник, user[1] — имя)
+    user_id = user[0]
+    user_name = user[3] or user[1]
+
+    # Сохраняем судью
+    await database.set_current_game_judge_id(user_id)
+    await database.set_current_game_judge_name(user_name)
+
+    # Проверяем, был ли этот игрок в списке игроков за столом, если да — убираем его
+    data = await state.get_data()
+    booked = data.get("booked_players", []) or []
+    new_booked = [p for p in booked if p and p[0] != user_id]
+    await state.update_data(booked_players=new_booked)
+
+    await state.set_state(None)  # Сбрасываем состояние
+    await message.answer(f"✅ Судья выбран: **{user_name}**", parse_mode=ParseMode.MARKDOWN)
+
+    # Возвращаемся к списку
+    await show_players_list_for_game(message, state, new_booked)
 
 @router.message(F.text == "🎲 Новая игра")
 async def start_new_game(message: types.Message, state: FSMContext):
