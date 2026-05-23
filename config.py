@@ -11,5 +11,5 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql://postgres:Test1TestMafia@db.udhsmhlhzdkzsrwrhalp.supabase.co:5432/postgres"
 )
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://mafiabot-ge13.onrender.com")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://mafiabot-qfv1.onrender.com")
 USE_WEBHOOK = os.environ.get("USE_WEBHOOK", "False").lower() == "true"
