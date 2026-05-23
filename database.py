@@ -2,30 +2,17 @@ import json
 import datetime
 from typing import Optional, Tuple, List, Dict, Any, Union
 from contextlib import asynccontextmanager
-import asyncpg
-import asyncio
-import socket
-import config
+import aiosqlite
 
-# ========== ПУЛ СОЕДИНЕНИЙ ==========
-_db_pool = None
+DB_NAME = "mafia_crm.db"
 
-async def get_db_pool():
-    global _db_pool
-    if _db_pool is None:
-        _db_pool = await asyncpg.create_pool(
-            config.DATABASE_URL,
-            min_size=1,
-            max_size=10,
-            command_timeout=60
-        )
-        print("✅ Пул соединений с Neon создан")
-    return _db_pool
 
+# ========== УТИЛИТЫ ДЛЯ РАБОТЫ С БД ==========
 @asynccontextmanager
 async def get_db():
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
+    """Контекстный менеджер для соединения с БД."""
+    async with aiosqlite.connect(DB_NAME) as conn:
+        conn.row_factory = aiosqlite.Row
         yield conn
 
 
@@ -84,77 +71,76 @@ async def _ensure_columns():
             ("game_slots_history", "updated_by_editor", "INTEGER DEFAULT 0"),
         ]
         for table, col, col_type in alters:
-            try:
-                await conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
-            except Exception:
-                pass
+            for col_name in col if isinstance(col, list) else [col]:
+                try:
+                    await conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
+                except Exception:
+                    pass
+        await conn.commit()
 
 
 # ========== 1. ИНИЦИАЛИЗАЦИЯ ==========
 async def init_db():
     """Инициализация всех таблиц."""
     async with get_db() as conn:
-        # Таблица game_slots_history
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS game_slots_history (
-                id SERIAL PRIMARY KEY,
-                game_date TEXT,
-                game_number INTEGER DEFAULT 0,
-                user_id INTEGER,
-                slot_num INTEGER,
-                role TEXT,
-                team TEXT,
-                base_points REAL DEFAULT 0,
-                bonus_points REAL DEFAULT 0,
-                lh_points REAL DEFAULT 0,
-                will_protocol_points REAL DEFAULT 0,
-                will_opinion_points REAL DEFAULT 0,
-                dc_points REAL DEFAULT 0,
-                kick INTEGER DEFAULT 0,
-                ppk INTEGER DEFAULT 0,
-                technical_fouls INTEGER DEFAULT 0,
-                pu INTEGER DEFAULT 0,
-                will_protocol_raw TEXT DEFAULT '',
-                will_opinion TEXT DEFAULT '',
-                alive INTEGER DEFAULT 1,
-                status_reason TEXT DEFAULT 'Жив',
-                updated_by_editor INTEGER DEFAULT 0,
-                fouls INTEGER DEFAULT 0,
-                elo_change INTEGER DEFAULT 0,
-                new_elo INTEGER DEFAULT 1500
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_date            TEXT,
+                game_number          INTEGER DEFAULT 0,
+                user_id              INTEGER,
+                slot_num             INTEGER,
+                role                 TEXT,
+                team                 TEXT,
+                base_points          REAL    DEFAULT 0,
+                bonus_points         REAL    DEFAULT 0,
+                lh_points            REAL    DEFAULT 0,
+                will_protocol_points REAL    DEFAULT 0,
+                will_opinion_points  REAL    DEFAULT 0,
+                dc_points            REAL    DEFAULT 0,
+                kick                 INTEGER DEFAULT 0,
+                ppk                  INTEGER DEFAULT 0,
+                technical_fouls      INTEGER DEFAULT 0,
+                pu                   INTEGER DEFAULT 0,
+                will_protocol_raw    TEXT    DEFAULT '',
+                will_opinion         TEXT    DEFAULT '',
+                alive                INTEGER DEFAULT 1,
+                status_reason        TEXT    DEFAULT 'Жив',
+                updated_by_editor    INTEGER DEFAULT 0,
+                fouls                INTEGER DEFAULT 0,
+                elo_change           INTEGER DEFAULT 0,
+                new_elo              INTEGER DEFAULT 1500
             )
         """)
         
-        # Таблица users
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                full_name TEXT,
-                username TEXT,
-                nickname TEXT UNIQUE,
-                debt INTEGER DEFAULT 0,
-                last_visit TEXT,
-                total_paid INTEGER DEFAULT 0,
-                kicks INTEGER DEFAULT 0,
-                ppk_causes INTEGER DEFAULT 0,
-                games_played INTEGER DEFAULT 0,
-                games_won INTEGER DEFAULT 0,
-                points INTEGER DEFAULT 0,
-                games_red INTEGER DEFAULT 0,
-                wins_red INTEGER DEFAULT 0,
-                games_black INTEGER DEFAULT 0,
-                wins_black INTEGER DEFAULT 0,
-                exp_level TEXT,
-                skill_level TEXT,
-                winrate_red REAL DEFAULT 0,
-                winrate_black REAL DEFAULT 0,
+                user_id          INTEGER PRIMARY KEY,
+                full_name        TEXT,
+                username         TEXT,
+                nickname         TEXT UNIQUE,
+                debt             INTEGER DEFAULT 0,
+                last_visit       TEXT,
+                total_paid       INTEGER DEFAULT 0,
+                kicks            INTEGER DEFAULT 0,
+                ppk_causes       INTEGER DEFAULT 0,
+                games_played     INTEGER DEFAULT 0,
+                games_won        INTEGER DEFAULT 0,
+                points           INTEGER DEFAULT 0,
+                games_red        INTEGER DEFAULT 0,
+                wins_red         INTEGER DEFAULT 0,
+                games_black      INTEGER DEFAULT 0,
+                wins_black       INTEGER DEFAULT 0,
+                exp_level        TEXT,
+                skill_level      TEXT,
+                winrate_red      REAL DEFAULT 0,
+                winrate_black    REAL DEFAULT 0,
                 has_unpaid_session INTEGER DEFAULT 0,
-                tokens INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT NOW()
+                tokens           INTEGER DEFAULT 0,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
-        # Таблица evening_booking
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS evening_booking (
                 user_id INTEGER PRIMARY KEY,
@@ -163,20 +149,18 @@ async def init_db():
             )
         """)
         
-        # Таблица evening_history
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS evening_history (
-                id SERIAL PRIMARY KEY,
-                date TEXT,
-                user_id INTEGER,
-                status TEXT,
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                date      TEXT,
+                user_id   INTEGER,
+                status    TEXT,
                 full_name TEXT,
-                nickname TEXT,
-                amount INTEGER DEFAULT 0
+                nickname  TEXT,
+                amount    INTEGER DEFAULT 0
             )
         """)
         
-        # Таблица evening_stats_messages
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS evening_stats_messages (
                 date TEXT PRIMARY KEY,
@@ -185,7 +169,6 @@ async def init_db():
             )
         """)
         
-        # Таблица evening_status
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS evening_status (
                 date TEXT PRIMARY KEY,
@@ -193,7 +176,6 @@ async def init_db():
             )
         """)
         
-        # Таблица settings
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -201,20 +183,18 @@ async def init_db():
             )
         """)
         
-        # Таблица game_history
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS game_history (
-                id SERIAL PRIMARY KEY,
-                game_date TEXT,
-                winner_label TEXT,
-                protocol_text TEXT,
-                game_number INTEGER,
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_date          TEXT,
+                winner_label       TEXT,
+                protocol_text      TEXT,
+                game_number        INTEGER,
                 global_game_number INTEGER,
-                judge_id INTEGER DEFAULT 0
+                judge_id           INTEGER DEFAULT 0
             )
         """)
         
-        # Таблица night_kills_order
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS night_kills_order (
                 game_date TEXT,
@@ -224,56 +204,56 @@ async def init_db():
             )
         """)
         
-        # Таблица user_achievements
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_achievements (
-                user_id INTEGER,
+                user_id        INTEGER,
                 achievement_id TEXT,
-                earned_at TIMESTAMP DEFAULT NOW(),
-                PRIMARY KEY (user_id, achievement_id)
+                earned_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, achievement_id),
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         """)
         
-        # Таблица bets_active
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS bets_active (
-                id SERIAL PRIMARY KEY,
-                game_id INTEGER NOT NULL,
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id     INTEGER NOT NULL,
                 game_number INTEGER NOT NULL,
-                game_date TEXT NOT NULL,
-                created_by INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW(),
-                closed BOOLEAN DEFAULT FALSE,
-                resolved BOOLEAN DEFAULT FALSE,
-                winner_team TEXT
+                game_date   TEXT    NOT NULL,
+                created_by  INTEGER NOT NULL,
+                created_at  TEXT    DEFAULT CURRENT_TIMESTAMP,
+                closed      BOOLEAN DEFAULT 0,
+                resolved    BOOLEAN DEFAULT 0,
+                winner_team TEXT,
+                FOREIGN KEY (game_id) REFERENCES game_history (id)
             )
         """)
         
-        # Таблица user_bets
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_bets (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                bet_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
-                predicted_winner TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW()
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id          INTEGER NOT NULL,
+                bet_id           INTEGER NOT NULL,
+                amount           INTEGER NOT NULL,
+                predicted_winner TEXT    NOT NULL,
+                created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id),
+                FOREIGN KEY (bet_id) REFERENCES bets_active (id)
             )
         """)
         
-        # Таблица transactions
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER,
-                amount REAL,
-                type TEXT,
-                comment TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER,
+                amount     REAL,
+                type       TEXT,
+                comment    TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         """)
         
-        # Таблица game_dates
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS game_dates (
                 date TEXT PRIMARY KEY,
@@ -281,17 +261,19 @@ async def init_db():
             )
         """)
         
-        # Таблица elo_ratings
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS elo_ratings (
                 user_id INTEGER PRIMARY KEY,
                 elo INTEGER DEFAULT 1500,
                 games_played INTEGER DEFAULT 0,
                 games_won INTEGER DEFAULT 0,
-                updated_at TIMESTAMP DEFAULT NOW()
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         """)
-    
+        
+        await conn.commit()
+
     await _ensure_columns()
     await add_fouls_column()
     await create_elo_table()
@@ -301,18 +283,20 @@ async def init_db():
 # ========== 2. SETTINGS ==========
 async def get_setting(key: str) -> Optional[str]:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT value FROM settings WHERE key = $1", key)
-        return row[0] if row else None
+        async with conn.execute("SELECT value FROM settings WHERE key = ?", (key,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
 
 
 async def set_setting(key: str, value: Optional[str]):
     async with get_db() as conn:
         if value is None:
-            await conn.execute("DELETE FROM settings WHERE key = $1", key)
+            await conn.execute("DELETE FROM settings WHERE key = ?", (key,))
         else:
             await conn.execute(
-                "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value",
-                key, value)
+                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value))
+        await conn.commit()
 
 
 def _make_setting_funcs(key_prefix: str):
@@ -405,227 +389,259 @@ async def load_current_game_metadata() -> Optional[dict]:
 async def add_or_update_user(user_id: int, username: Optional[str], full_name: str):
     async with get_db() as conn:
         await conn.execute(
-            "INSERT INTO users (user_id, username, full_name) VALUES ($1, $2, $3) ON CONFLICT(user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name",
-            user_id, username, full_name)
+            "INSERT INTO users (user_id, username, full_name) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, full_name = excluded.full_name",
+            (user_id, username, full_name))
+        await conn.commit()
 
 
 async def get_user_profile(user_id: int) -> Optional[Tuple]:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT full_name, nickname, debt, last_visit FROM users WHERE user_id = $1", user_id)
-        return tuple(row) if row else None
+        async with conn.execute("SELECT full_name, nickname, debt, last_visit FROM users WHERE user_id = ?",
+                                (user_id,)) as cur:
+            return await cur.fetchone()
 
 
 async def update_nickname(user_id: int, nickname: str):
     async with get_db() as conn:
-        await conn.execute("UPDATE users SET nickname = $1 WHERE user_id = $2", nickname, user_id)
+        await conn.execute("UPDATE users SET nickname = ? WHERE user_id = ?", (nickname, user_id))
+        await conn.commit()
 
 
 async def get_all_users_stat() -> list:
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT full_name, nickname, last_visit, debt, total_paid, kicks, ppk_causes FROM users")
-        return [tuple(row) for row in rows]
+        async with conn.execute(
+                "SELECT full_name, nickname, last_visit, debt, total_paid, kicks, ppk_causes FROM users") as cur:
+            return await cur.fetchall()
 
 
 async def get_user_brief(user_id: int) -> Optional[Tuple[str, str, str]]:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT full_name, nickname, username FROM users WHERE user_id = $1", user_id)
-        return tuple(row) if row else None
+        async with conn.execute("SELECT full_name, nickname, username FROM users WHERE user_id = ?", (user_id,)) as cur:
+            return await cur.fetchone()
 
 
 async def get_all_user_ids() -> list:
     async with get_db() as conn:
-        rows = await conn.fetch("SELECT user_id FROM users")
-        return [tuple(row) for row in rows]
+        async with conn.execute("SELECT user_id FROM users") as cur:
+            return await cur.fetchall()
 
 
 async def increment_user_kicks(user_id: int):
     async with get_db() as conn:
-        await conn.execute("UPDATE users SET kicks = kicks + 1 WHERE user_id = $1", user_id)
+        await conn.execute("UPDATE users SET kicks = kicks + 1 WHERE user_id = ?", (user_id,))
+        await conn.commit()
 
 
 async def increment_user_ppk_causes(user_id: int):
     async with get_db() as conn:
-        await conn.execute("UPDATE users SET ppk_causes = ppk_causes + 1 WHERE user_id = $1", user_id)
+        await conn.execute("UPDATE users SET ppk_causes = ppk_causes + 1 WHERE user_id = ?", (user_id,))
+        await conn.commit()
 
 
 async def get_user_kicks(user_id: int) -> int:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT kicks FROM users WHERE user_id = $1", user_id)
-        return row[0] if row else 0
+        async with conn.execute("SELECT kicks FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
 
 async def get_user_ppk_causes(user_id: int) -> int:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT ppk_causes FROM users WHERE user_id = $1", user_id)
-        return row[0] if row else 0
+        async with conn.execute("SELECT ppk_causes FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
 
 async def get_user_by_id(user_id: int) -> Optional[Tuple[int, str, str, str]]:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT user_id, full_name, username, nickname FROM users WHERE user_id = $1", user_id)
-        return tuple(row) if row else None
+        async with conn.execute("SELECT user_id, full_name, username, nickname FROM users WHERE user_id = ?",
+                                (user_id,)) as cur:
+            return await cur.fetchone()
 
 
 async def get_user_by_nickname(nickname: str) -> Optional[Tuple[int, str, str, str]]:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT user_id, full_name, username, nickname FROM users WHERE nickname = $1", nickname)
-        if row: return tuple(row)
-        row = await conn.fetchrow("SELECT user_id, full_name, username, nickname FROM users WHERE full_name = $1", nickname)
-        if row: return tuple(row)
-        row = await conn.fetchrow("SELECT user_id, full_name, username, nickname FROM users WHERE nickname LIKE $1", f"%{nickname}%")
-        return tuple(row) if row else None
+        async with conn.execute("SELECT user_id, full_name, username, nickname FROM users WHERE nickname = ?",
+                                (nickname,)) as cur:
+            row = await cur.fetchone()
+            if row: return row
+        async with conn.execute("SELECT user_id, full_name, username, nickname FROM users WHERE full_name = ?",
+                                (nickname,)) as cur:
+            row = await cur.fetchone()
+            if row: return row
+        async with conn.execute("SELECT user_id, full_name, username, nickname FROM users WHERE nickname LIKE ?",
+                                (f"%{nickname}%",)) as cur:
+            row = await cur.fetchone()
+            if row: return row
+        return None
 
 
 async def get_all_users() -> list:
     async with get_db() as conn:
-        rows = await conn.fetch("SELECT user_id, nickname, full_name FROM users")
-        return [{"user_id": r[0], "nickname": r[1], "full_name": r[2]} for r in rows]
+        async with conn.execute("SELECT user_id, nickname, full_name FROM users") as cur:
+            rows = await cur.fetchall()
+    return [{"user_id": r[0], "nickname": r[1], "full_name": r[2]} for r in rows]
 
 
 # ========== 4. ЗАПИСЬ НА ВЕЧЕР ==========
 async def add_booking(user_id: int, status: str, date: str):
     async with get_db() as conn:
-        await conn.execute(
-            "INSERT INTO evening_booking (user_id, status, date) VALUES ($1, $2, $3) ON CONFLICT(user_id) DO UPDATE SET status = EXCLUDED.status, date = EXCLUDED.date",
-            user_id, status, date)
+        await conn.execute("INSERT OR REPLACE INTO evening_booking (user_id, status, date) VALUES (?, ?, ?)",
+                           (user_id, status, date))
+        await conn.commit()
 
 
 async def get_all_players() -> List[Tuple[int]]:
     async with get_db() as conn:
-        rows = await conn.fetch("SELECT user_id FROM evening_booking")
-        return [tuple(row) for row in rows]
+        async with conn.execute("SELECT user_id FROM evening_booking") as cur:
+            return await cur.fetchall()
 
 
 async def clear_bookings():
     async with get_db() as conn:
         await conn.execute("DELETE FROM evening_booking")
+        await conn.commit()
 
 
 async def get_booked_players_detailed() -> list:
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT COALESCE(users.full_name, 'ID: ' || evening_booking.user_id) AS full_name, users.username, users.nickname, evening_booking.status FROM evening_booking LEFT JOIN users ON evening_booking.user_id = users.user_id")
-        return [tuple(row) for row in rows]
+        async with conn.execute(
+                "SELECT COALESCE(users.full_name, 'ID: ' || evening_booking.user_id) AS full_name, users.username, users.nickname, evening_booking.status FROM evening_booking LEFT JOIN users ON evening_booking.user_id = users.user_id") as cur:
+            return await cur.fetchall()
 
 
 async def get_booked_players_for_game() -> list:
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT e.user_id, COALESCE(u.full_name, 'Неизвестный') AS full_name, u.username, u.nickname, e.status FROM evening_booking e LEFT JOIN users u ON e.user_id = u.user_id WHERE e.status IN ('Вовремя', 'Позже')")
-        return [tuple(row) for row in rows]
+        async with conn.execute(
+                "SELECT e.user_id, COALESCE(u.full_name, 'Неизвестный') AS full_name, u.username, u.nickname, e.status FROM evening_booking e LEFT JOIN users u ON e.user_id = u.user_id WHERE e.status IN ('Вовремя', 'Позже')") as cur:
+            return await cur.fetchall()
 
 
 async def remove_booking(user_id: int):
     async with get_db() as conn:
-        await conn.execute("DELETE FROM evening_booking WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM evening_booking WHERE user_id = ?", (user_id,))
+        await conn.commit()
 
 
 async def has_booking(user_id: int) -> bool:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM evening_booking WHERE user_id = $1 LIMIT 1", user_id)
-        return row is not None
+        async with conn.execute("SELECT 1 FROM evening_booking WHERE user_id = ? LIMIT 1", (user_id,)) as cur:
+            return await cur.fetchone() is not None
 
 
 async def count_ontime_players_for_date(date_str: str) -> int:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT COUNT(*) FROM evening_booking WHERE date = $1 AND status = 'Вовремя'", date_str)
-        return row[0] if row else 0
+        async with conn.execute("SELECT COUNT(*) FROM evening_booking WHERE date = ? AND status = 'Вовремя'",
+                                (date_str,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
 
 async def count_all_attending_for_date(date_str: str) -> int:
     async with get_db() as conn:
-        row = await conn.fetchrow(
-            "SELECT COUNT(*) FROM evening_booking WHERE date = $1 AND status IN ('Вовремя', 'Позже')", date_str)
-        return row[0] if row else 0
+        async with conn.execute(
+                "SELECT COUNT(*) FROM evening_booking WHERE date = ? AND status IN ('Вовремя', 'Позже')",
+                (date_str,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
 
 async def get_players_by_status_for_date(date_str: str, status: str) -> list:
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT COALESCE(u.nickname, u.full_name, 'Без имени') AS name FROM evening_booking e LEFT JOIN users u ON e.user_id = u.user_id WHERE e.date = $1 AND e.status = $2 ORDER BY name",
-            date_str, status)
-        return [row[0] for row in rows]
+        async with conn.execute(
+                "SELECT COALESCE(u.nickname, u.full_name, 'Без имени') AS name FROM evening_booking e LEFT JOIN users u ON e.user_id = u.user_id WHERE e.date = ? AND e.status = ? ORDER BY name",
+                (date_str, status)) as cur:
+            return [row[0] for row in await cur.fetchall()]
 
 
 async def get_all_bookings_for_date_ordered(date_str: str) -> List[Tuple[str, str]]:
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT COALESCE(u.nickname, u.full_name, 'Без имени'), e.status FROM evening_booking e LEFT JOIN users u ON e.user_id = u.user_id WHERE e.date = $1 ORDER BY CASE e.status WHEN 'Вовремя' THEN 1 WHEN 'Позже' THEN 2 WHEN 'Не идёт' THEN 3 ELSE 4 END, name",
-            date_str)
-        return [tuple(row) for row in rows]
+        async with conn.execute(
+                "SELECT COALESCE(u.nickname, u.full_name, 'Без имени'), e.status FROM evening_booking e LEFT JOIN users u ON e.user_id = u.user_id WHERE e.date = ? ORDER BY CASE e.status WHEN 'Вовремя' THEN 1 WHEN 'Позже' THEN 2 WHEN 'Не идёт' THEN 3 ELSE 4 END, name",
+                (date_str,)) as cur:
+            return await cur.fetchall()
 
 
 async def set_stats_message(date_str: str, chat_id: int, message_id: int):
     async with get_db() as conn:
-        await conn.execute(
-            "INSERT INTO evening_stats_messages (date, chat_id, message_id) VALUES ($1, $2, $3) ON CONFLICT(date) DO UPDATE SET chat_id = EXCLUDED.chat_id, message_id = EXCLUDED.message_id",
-            date_str, chat_id, message_id)
+        await conn.execute("INSERT OR REPLACE INTO evening_stats_messages (date, chat_id, message_id) VALUES (?, ?, ?)",
+                           (date_str, chat_id, message_id))
+        await conn.commit()
 
 
 async def get_stats_message(date_str: str) -> Optional[Tuple[int, int]]:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT chat_id, message_id FROM evening_stats_messages WHERE date = $1", date_str)
-        return tuple(row) if row else None
+        async with conn.execute("SELECT chat_id, message_id FROM evening_stats_messages WHERE date = ?",
+                                (date_str,)) as cur:
+            return await cur.fetchone()
 
 
 # ========== 5. ФИНАНСЫ ==========
 async def log_transaction(user_id: int, amount: float, t_type: str, comment: str = ""):
     async with get_db() as conn:
-        await conn.execute(
-            "INSERT INTO transactions (user_id, amount, type, comment) VALUES ($1, $2, $3, $4)",
-            user_id, amount, t_type, comment)
+        await conn.execute("INSERT INTO transactions (user_id, amount, type, comment) VALUES (?, ?, ?, ?)",
+                           (user_id, amount, t_type, comment))
+        await conn.commit()
 
 
 async def change_user_debt(user_id: int, delta: int):
     async with get_db() as conn:
-        await conn.execute("UPDATE users SET debt = debt + $1 WHERE user_id = $2", delta, user_id)
+        await conn.execute("UPDATE users SET debt = debt + ? WHERE user_id = ?", (delta, user_id))
+        await conn.commit()
 
 
 async def set_user_debt(user_id: int, value: int):
     async with get_db() as conn:
-        await conn.execute("UPDATE users SET debt = $1 WHERE user_id = $2", value, user_id)
+        await conn.execute("UPDATE users SET debt = ? WHERE user_id = ?", (value, user_id))
+        await conn.commit()
 
 
 async def get_user_debt(user_id: int) -> int:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT debt FROM users WHERE user_id = $1", user_id)
-        return row[0] if row and row[0] else 0
+        async with conn.execute("SELECT debt FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row and row[0] else 0
 
 
 async def set_last_visit(user_id: int, date_str: str):
     async with get_db() as conn:
-        await conn.execute("UPDATE users SET last_visit = $1 WHERE user_id = $2", date_str, user_id)
+        await conn.execute("UPDATE users SET last_visit = ? WHERE user_id = ?", (date_str, user_id))
+        await conn.commit()
 
 
 async def add_user_payment(user_id: int, amount: int):
     async with get_db() as conn:
-        await conn.execute("UPDATE users SET total_paid = COALESCE(total_paid, 0) + $1 WHERE user_id = $2", amount, user_id)
+        await conn.execute("UPDATE users SET total_paid = COALESCE(total_paid, 0) + ? WHERE user_id = ?",
+                           (amount, user_id))
+        await conn.commit()
 
 
 async def get_debtors() -> list:
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT full_name, nickname, username, debt, user_id FROM users WHERE debt < 0 ORDER BY debt ASC")
-        return [tuple(row) for row in rows]
+        async with conn.execute(
+                "SELECT full_name, nickname, username, debt, user_id FROM users WHERE debt < 0 ORDER BY debt ASC") as cur:
+            return await cur.fetchall()
 
 
 async def set_unpaid_session(user_id: int, value: int):
     async with get_db() as conn:
-        await conn.execute("UPDATE users SET has_unpaid_session = $1 WHERE user_id = $2", value, user_id)
+        await conn.execute("UPDATE users SET has_unpaid_session = ? WHERE user_id = ?", (value, user_id))
+        await conn.commit()
 
 
 async def has_unpaid_session(user_id: int) -> bool:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT has_unpaid_session FROM users WHERE user_id = $1", user_id)
-        return bool(row and row[0])
+        async with conn.execute("SELECT has_unpaid_session FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return bool(row and row[0])
 
 
 async def set_last_evening_amount_for_user(user_id: int, amount: int):
     async with get_db() as conn:
         await conn.execute(
-            "UPDATE evening_history SET amount = $1 WHERE id = (SELECT id FROM evening_history WHERE user_id = $2 ORDER BY id DESC LIMIT 1)",
-            amount, user_id)
+            "UPDATE evening_history SET amount = ? WHERE id = (SELECT id FROM evening_history WHERE user_id = ? ORDER BY id DESC LIMIT 1)",
+            (amount, user_id))
+        await conn.commit()
 
 
 # ========== 6. ИСТОРИЯ ВЕЧЕРОВ ==========
@@ -635,138 +651,145 @@ async def archive_current_evening():
         date_to_archive = datetime.datetime.now().strftime("%Y-%m-%d")
 
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT e.user_id, e.status, u.full_name, u.nickname FROM evening_booking e LEFT JOIN users u ON e.user_id = u.user_id")
+        async with conn.execute(
+                "SELECT e.user_id, e.status, u.full_name, u.nickname FROM evening_booking e LEFT JOIN users u ON e.user_id = u.user_id") as cur:
+            rows = await cur.fetchall()
 
         if rows:
-            data_to_insert = []
             for r in rows:
                 money = 100
                 await conn.execute(
-                    "INSERT INTO evening_history (date, user_id, status, full_name, nickname, amount) VALUES ($1, $2, $3, $4, $5, $6)",
-                    date_to_archive, r['user_id'], r['status'], r['full_name'], r['nickname'], money)
+                    "INSERT INTO evening_history (date, user_id, status, full_name, nickname, amount) VALUES (?, ?, ?, ?, ?, ?)",
+                    (date_to_archive, r['user_id'], r['status'], r['full_name'], r['nickname'], money))
 
                 if r['status'] in ("Вовремя", "Позже"):
-                    await conn.execute("UPDATE users SET last_visit = $1 WHERE user_id = $2",
-                                       f"{date_to_archive} 20:00", r['user_id'])
+                    await conn.execute("UPDATE users SET last_visit = ? WHERE user_id = ?",
+                                       (f"{date_to_archive} 20:00", r['user_id']))
 
         await conn.execute("DELETE FROM evening_booking")
+        await conn.commit()
 
 
 async def get_evening_financial_report(date_str: str) -> List[Dict]:
     search_date = _ensure_iso_date(date_str)
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT u.nickname, u.full_name, (SELECT COUNT(*) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) as real_games_count, h.user_id FROM evening_history h JOIN users u ON h.user_id = u.user_id WHERE h.date = $1 AND h.status IN ('Вовремя', 'Позже') ORDER BY u.nickname ASC",
-            search_date)
-        result = []
-        for nickname, full_name, games, user_id in rows:
-            result.append({"name": nickname or full_name or f"ID: {user_id}", "games": games if games > 0 else 1,
-                           "amount": (games * 100) if games > 0 else 100})
-        return result
+        async with conn.execute(
+                "SELECT u.nickname, u.full_name, (SELECT COUNT(*) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) as real_games_count, h.user_id FROM evening_history h JOIN users u ON h.user_id = u.user_id WHERE h.date = ? AND h.status IN ('Вовремя', 'Позже') ORDER BY u.nickname ASC",
+                (search_date,)) as cur:
+            rows = await cur.fetchall()
+            result = []
+            for nickname, full_name, games, user_id in rows:
+                result.append({"name": nickname or full_name or f"ID: {user_id}", "games": games if games > 0 else 1,
+                               "amount": (games * 100) if games > 0 else 100})
+            return result
 
 
 async def get_evening_players(date_str: str) -> list:
     search_date = _ensure_iso_date(date_str)
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT h.user_id, COALESCE(u.full_name, h.full_name), COALESCE(u.nickname, h.nickname), h.status, (SELECT COUNT(*) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) as games_count FROM evening_history h LEFT JOIN users u ON h.user_id = u.user_id WHERE h.date = $1",
-            search_date)
-        return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+        async with conn.execute(
+                "SELECT h.user_id, COALESCE(u.full_name, h.full_name), COALESCE(u.nickname, h.nickname), h.status, (SELECT COUNT(*) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) as games_count FROM evening_history h LEFT JOIN users u ON h.user_id = u.user_id WHERE h.date = ?",
+                (search_date,)) as cur:
+            rows = await cur.fetchall()
+            return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
 
 async def get_evenings_list(limit: int = 10) -> list:
     orgs = ("Чагин", "Матроскина", "Стаут", "Гриня", "Evgeniy Chagin", "Екатерина", "Di D", "Григорий Подколзин")
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT date, COUNT(*) FROM evening_history WHERE status IN ('Вовремя', 'Позже') AND nickname NOT IN $1 AND full_name NOT IN $1 GROUP BY date ORDER BY id DESC LIMIT $2",
-            orgs, limit)
-        return [tuple(row) for row in rows]
+        async with conn.execute(
+            f"SELECT date, COUNT(*) FROM evening_history WHERE status IN ('Вовремя', 'Позже') AND nickname NOT IN {orgs} AND full_name NOT IN {orgs} GROUP BY date ORDER BY id DESC LIMIT ?",
+            (limit,)) as cur:
+            return await cur.fetchall()
 
 
 async def get_top_players_by_visits(limit: int = 10) -> list:
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT u.full_name, u.nickname, COUNT(h.id) FROM evening_history h LEFT JOIN users u ON h.user_id = u.user_id WHERE h.status IN ('Вовремя', 'Позже') GROUP BY h.user_id, u.full_name, u.nickname ORDER BY COUNT(h.id) DESC LIMIT $1",
-            limit)
-        return [tuple(row) for row in rows]
+        async with conn.execute(
+                "SELECT u.full_name, u.nickname, COUNT(h.id) FROM evening_history h LEFT JOIN users u ON h.user_id = u.user_id WHERE h.status IN ('Вовремя', 'Позже') GROUP BY h.user_id ORDER BY COUNT(h.id) DESC LIMIT ?",
+                (limit,)) as cur:
+            return await cur.fetchall()
 
 
 async def get_inactive_players(days: int = 30) -> list:
     async with get_db() as conn:
-        rows = await conn.fetch("SELECT full_name, nickname, last_visit FROM users ORDER BY last_visit")
-        return [tuple(row) for row in rows]
+        async with conn.execute("SELECT full_name, nickname, last_visit FROM users ORDER BY last_visit") as cur:
+            return await cur.fetchall()
 
 
 async def mark_evening_bills_sent(date_str: str):
     async with get_db() as conn:
         await conn.execute(
-            "INSERT INTO evening_status (date, bills_sent) VALUES ($1, 1) ON CONFLICT(date) DO UPDATE SET bills_sent = EXCLUDED.bills_sent",
-            date_str)
+            "INSERT INTO evening_status (date, bills_sent) VALUES (?, 1) ON CONFLICT(date) DO UPDATE SET bills_sent = 1",
+            (date_str,))
+        await conn.commit()
 
 
 async def is_evening_bills_sent(date_str: str) -> bool:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT bills_sent FROM evening_status WHERE date = $1", date_str)
-        return bool(row and row[0])
+        async with conn.execute("SELECT bills_sent FROM evening_status WHERE date = ?", (date_str,)) as cur:
+            row = await cur.fetchone()
+            return bool(row and row[0])
 
 
 async def get_history_years():
     async with get_db() as conn:
-        rows = await conn.fetch("SELECT DISTINCT TO_CHAR(date, 'YYYY') as year FROM evening_history ORDER BY year DESC")
-        return [row[0] for row in rows]
+        async with conn.execute("SELECT DISTINCT strftime('%Y', date) as year FROM evening_history ORDER BY year DESC") as cur:
+            return [row[0] for row in await cur.fetchall()]
 
 
 async def get_history_months(year: str):
     orgs = ("Чагин", "Матроскина", "Стаут", "Гриня", "Evgeniy Chagin", "Екатерина", "Di D", "Григорий Подколзин")
+    orgs_formatted = ", ".join([f"'{o}'" for o in orgs])
     async with get_db() as conn:
-        rows = await conn.fetch("""
+        async with conn.execute(f"""
             SELECT 
-                TO_CHAR(h.date, 'MM') as month,
+                strftime('%m', h.date) as month,
                 SUM(
                     CASE 
-                        WHEN (SELECT GREATEST(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) >= 4 
+                        WHEN (SELECT MAX(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) >= 4 
                         THEN 400 
-                        ELSE (SELECT GREATEST(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) * 100 
+                        ELSE (SELECT MAX(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) * 100 
                     END
                 ) as total_sum
             FROM evening_history h
             LEFT JOIN users u ON h.user_id = u.user_id
-            WHERE TO_CHAR(h.date, 'YYYY') = $1
+            WHERE strftime('%Y', h.date) = ? 
               AND h.status IN ('Вовремя', 'Позже')
-              AND COALESCE(u.nickname, h.nickname) NOT IN $2
-              AND COALESCE(u.full_name, h.full_name) NOT IN $2
+              AND COALESCE(u.nickname, h.nickname) NOT IN ({orgs_formatted})
+              AND COALESCE(u.full_name, h.full_name) NOT IN ({orgs_formatted})
             GROUP BY month 
             ORDER BY month DESC
-        """, year, orgs)
-        return [tuple(row) for row in rows]
+        """, (year,)) as cur:
+            return await cur.fetchall()
 
 
 async def get_history_evenings(year: str, month: str):
     orgs = ("Чагин", "Матроскина", "Стаут", "Гриня", "Evgeniy Chagin", "Екатерина", "Di D", "Григорий Подколзин")
+    orgs_formatted = ", ".join([f"'{o}'" for o in orgs])
     async with get_db() as conn:
-        rows = await conn.fetch("""
+        async with conn.execute(f"""
             SELECT 
                 h.date, 
                 COUNT(DISTINCT h.user_id),
                 SUM(
                     CASE 
-                        WHEN (SELECT GREATEST(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) >= 4 
+                        WHEN (SELECT MAX(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) >= 4 
                         THEN 400 
-                        ELSE (SELECT GREATEST(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) * 100 
+                        ELSE (SELECT MAX(1, COUNT(*)) FROM game_slots_history s WHERE s.user_id = h.user_id AND s.game_date = h.date) * 100 
                     END
                 ) as total_sum
             FROM evening_history h
             LEFT JOIN users u ON h.user_id = u.user_id
-            WHERE TO_CHAR(h.date, 'YYYY') = $1
-              AND TO_CHAR(h.date, 'MM') = $2
+            WHERE strftime('%Y', h.date) = ? 
+              AND strftime('%m', h.date) = ? 
               AND h.status IN ('Вовремя', 'Позже')
-              AND COALESCE(u.nickname, h.nickname) NOT IN $3
-              AND COALESCE(u.full_name, h.full_name) NOT IN $3
+              AND COALESCE(u.nickname, h.nickname) NOT IN ({orgs_formatted})
+              AND COALESCE(u.full_name, h.full_name) NOT IN ({orgs_formatted})
             GROUP BY h.date 
             ORDER BY h.date DESC
-        """, year, month, orgs)
-        return [tuple(row) for row in rows]
+        """, (year, month)) as cur:
+            return await cur.fetchall()
 
 
 # ========== 7. РЕЗУЛЬТАТЫ ИГР ==========
@@ -776,27 +799,29 @@ async def apply_game_result_to_users(slots: Dict[int, dict], winning_team: str):
             uid, team = slot.get("user_id"), slot.get("team")
             if not uid or not team: 
                 continue
-            await conn.execute("UPDATE users SET games_played = COALESCE(games_played, 0) + 1 WHERE user_id = $1", uid)
+            await conn.execute("UPDATE users SET games_played = COALESCE(games_played, 0) + 1 WHERE user_id = ?", (uid,))
             if team == winning_team:
                 await conn.execute(
-                    "UPDATE users SET games_won = COALESCE(games_won, 0) + 1, points = COALESCE(points, 0) + 1 WHERE user_id = $1",
-                    uid)
+                    "UPDATE users SET games_won = COALESCE(games_won, 0) + 1, points = COALESCE(points, 0) + 1 WHERE user_id = ?",
+                    (uid,))
+        await conn.commit()
 
 
 async def get_user_game_counters(user_id: int) -> Optional[Dict[str, int]]:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM users WHERE user_id = $1", user_id)
-        if not row: 
-            return None
-        row2 = await conn.fetchrow(
-            "SELECT COUNT(*) AS played, SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END) AS won, SUM(base_points) AS points FROM game_slots_history WHERE user_id = $1",
-            user_id)
-        return {"games_played": row2[0] or 0, "games_won": row2[1] or 0, "points": row2[2] or 0}
+        async with conn.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)) as cur:
+            if not await cur.fetchone(): 
+                return None
+        async with conn.execute(
+                "SELECT COUNT(*) AS played, SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END) AS won, SUM(base_points) AS points FROM game_slots_history WHERE user_id = ?",
+                (user_id,)) as cur:
+            row = await cur.fetchone()
+            return {"games_played": row[0] or 0, "games_won": row[1] or 0, "points": row[2] or 0}
 
 
 async def get_user_roles_stats(user_id: int) -> List[Dict]:
     async with get_db() as conn:
-        rows = await conn.fetch("""
+        async with conn.execute("""
             SELECT role,
                    COUNT(*)                                                                     AS games,
                    SUM(CASE WHEN base_points = 1 THEN 1 ELSE 0 END)                             AS wins,
@@ -818,9 +843,10 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
                    SUM(kick)                                                                    AS total_kicks,
                    SUM(ppk)                                                                     AS total_ppk
             FROM game_slots_history
-            WHERE user_id = $1
+            WHERE user_id = ?
             GROUP BY role
-        """, user_id)
+        """, (user_id,)) as cur:
+            rows = await cur.fetchall()
 
     result = []
     for row in rows:
@@ -853,17 +879,19 @@ async def save_game_history(game_date: str, winner_label: str, protocol_text: st
                             global_game_number: Optional[int] = None, judge_id: Optional[int] = None) -> int:
     search_date = _ensure_iso_date(game_date)
     async with get_db() as conn:
-        row = await conn.fetchrow(
-            "INSERT INTO game_history (game_date, winner_label, protocol_text, game_number, global_game_number, judge_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-            search_date, winner_label, protocol_text, game_number, global_game_number, judge_id or 0)
-        return row[0]
+        cur = await conn.execute(
+            "INSERT INTO game_history (game_date, winner_label, protocol_text, game_number, global_game_number, judge_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (search_date, winner_label, protocol_text, game_number, global_game_number, judge_id or 0))
+        await conn.commit()
+        return cur.lastrowid
 
 
 async def get_user_extra_stats(user_id: int) -> Dict[str, float]:
     async with get_db() as conn:
-        row = await conn.fetchrow(
-            "SELECT AVG(lh_points) AS avg_lh, SUM(kick) AS removed_count, SUM(technical_fouls) AS techfouls_total, SUM(ppk) AS ppk_guilty_count, SUM(pu) AS pu_count, SUM(fouls) AS fouls_total FROM game_slots_history WHERE user_id = $1",
-            user_id)
+        async with conn.execute(
+                "SELECT AVG(lh_points) AS avg_lh, SUM(kick) AS removed_count, SUM(technical_fouls) AS techfouls_total, SUM(ppk) AS ppk_guilty_count, SUM(pu) AS pu_count, SUM(fouls) AS fouls_total FROM game_slots_history WHERE user_id = ?",
+                (user_id,)) as cur:
+            row = await cur.fetchone()
     if not row: 
         return {"avg_lh": 0.0, "removed_count": 0, "techfouls_total": 0, "ppk_guilty_count": 0, "pu_count": 0, "fouls_total": 0}
     avg_lh, removed_count, techfouls_total, ppk_guilty_count, pu_count, fouls_total = row
@@ -874,13 +902,15 @@ async def get_user_extra_stats(user_id: int) -> Dict[str, float]:
 
 async def get_total_games_count() -> int:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT COUNT(*) FROM game_history")
-        return row[0] if row else 0
+        async with conn.execute("SELECT COUNT(*) FROM game_history") as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
 
 async def _fetch_games(query: str, params: tuple = ()) -> List[Dict]:
     async with get_db() as conn:
-        rows = await conn.fetch(query, *params)
+        async with conn.execute(query, params) as cur:
+            rows = await cur.fetchall()
     return [{"id": r[0], "game_date": r[1], "winner_label": r[2], "protocol_text": r[3], "game_number": r[4],
              "global_game_number": r[5], "judge_id": r[6] if len(r) > 6 else None} for r in rows]
 
@@ -888,161 +918,184 @@ async def _fetch_games(query: str, params: tuple = ()) -> List[Dict]:
 async def get_games_by_date(game_date: str) -> List[Dict]:
     search_date = _ensure_iso_date(game_date)
     return await _fetch_games(
-        "SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number FROM game_history WHERE game_date = $1 ORDER BY id ASC",
+        "SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number FROM game_history WHERE game_date = ? ORDER BY id ASC",
         (search_date,))
 
 
 async def get_last_games(limit: int = 10) -> List[Dict]:
     return await _fetch_games(
-        "SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number FROM game_history ORDER BY id DESC LIMIT $1",
+        "SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number FROM game_history ORDER BY id DESC LIMIT ?",
         (limit,))
 
 
 async def get_user_games(user_id: int, limit: int = 10) -> List[Dict]:
     async with get_db() as conn:
-        dates_and_numbers = await conn.fetch(
-            "SELECT DISTINCT game_date, game_number FROM game_slots_history WHERE user_id = $1 ORDER BY game_date DESC LIMIT $2",
-            user_id, limit)
+        async with conn.execute(
+                "SELECT DISTINCT game_date, game_number FROM game_slots_history WHERE user_id = ? ORDER BY game_date DESC LIMIT ?",
+                (user_id, limit)) as cur:
+            dates_and_numbers = await cur.fetchall()
         if not dates_and_numbers: 
             return []
         games = []
         for game_date, game_number in dates_and_numbers:
-            row = await conn.fetchrow(
-                "SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number FROM game_history WHERE game_date = $1 AND game_number = $2",
-                game_date, game_number)
-            if row: 
-                games.append({"id": row[0], "game_date": row[1], "winner_label": row[2], "protocol_text": row[3],
-                              "game_number": row[4], "global_game_number": row[5]})
+            async with conn.execute(
+                    "SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number FROM game_history WHERE game_date = ? AND game_number = ?",
+                    (game_date, game_number)) as cur2:
+                row = await cur2.fetchone()
+                if row: 
+                    games.append({"id": row[0], "game_date": row[1], "winner_label": row[2], "protocol_text": row[3],
+                                  "game_number": row[4], "global_game_number": row[5]})
         return games
 
 
 async def get_all_game_dates() -> List[Tuple[str, int]]:
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT game_date, COUNT(*) as games_count FROM game_history GROUP BY game_date ORDER BY game_date DESC")
-        return [tuple(row) for row in rows]
+        async with conn.execute(
+                "SELECT game_date, COUNT(*) as games_count FROM game_history GROUP BY game_date ORDER BY game_date DESC") as cur:
+            return await cur.fetchall()
 
 
 # ========== 10. ДЕТАЛЬНАЯ РАБОТА С ИГРАМИ ==========
 async def get_game_by_id(game_id: int) -> Optional[Dict]:
     async with get_db() as conn:
-        row = await conn.fetchrow(
-            "SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number, judge_id FROM game_history WHERE id = $1",
-            game_id)
-        return dict(row) if row else None
+        async with conn.execute(
+                "SELECT id, game_date, winner_label, protocol_text, game_number, global_game_number, judge_id FROM game_history WHERE id = ?",
+                (game_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
 
 async def get_game_slots_by_date(game_date: str, game_number: int = None) -> Optional[Dict[int, dict]]:
     search_date = _ensure_iso_date(game_date)
-    query = "SELECT * FROM game_slots_history WHERE game_date = $1"
+    query = "SELECT * FROM game_slots_history WHERE game_date = ?"
     params = [search_date]
     if game_number is not None:
-        query += " AND game_number = $2"
+        query += " AND game_number = ?"
         params.append(game_number)
     query += " ORDER BY slot_num ASC"
 
     async with get_db() as conn:
-        rows = await conn.fetch(query, *params)
-        if not rows: 
-            return None
+        async with conn.execute(query, params) as cur:
+            rows = await cur.fetchall()
+            if not rows: 
+                return None
 
-        slots = {}
-        for r in rows:
-            u_id = r['user_id']
-            nickname = "Игрок"
-            if u_id:
-                u_row = await conn.fetchrow("SELECT nickname, full_name FROM users WHERE user_id = $1", u_id)
-                if u_row:
-                    nickname = u_row['nickname'] or u_row['full_name']
+            slots = {}
+            for r in rows:
+                u_id = r['user_id']
+                nickname = "Игрок"
+                if u_id:
+                    async with conn.execute("SELECT nickname, full_name FROM users WHERE user_id = ?",
+                                            (u_id,)) as u_cur:
+                        u_row = await u_cur.fetchone()
+                        if u_row:
+                            nickname = u_row['nickname'] or u_row['full_name']
 
-            slot_data = dict(r)
-            slot_data['nickname'] = nickname
-            slots[r['slot_num']] = slot_data
-        return slots
+                slot_data = dict(r)
+                slot_data['nickname'] = nickname
+                slots[r['slot_num']] = slot_data
+            return slots
 
 
 async def save_game_slots_history(game_date: str, slots: Dict[int, dict], game_number: int = 0):
     search_date = _ensure_iso_date(game_date)
+    rows = []
+    for slot_num, s in slots.items():
+        rows.append((
+            search_date, game_number, s.get('user_id'), slot_num, s.get('role'), s.get('team'),
+            float(s.get('base_points', 0) or 0), float(s.get('bonus_points', 0) or 0),
+            float(s.get('lh_points', 0) or 0),
+            float(s.get('will_protocol_points', 0) or 0), float(s.get('will_opinion_points', 0) or 0),
+            float(s.get('dc_points', 0) or 0),
+            1 if s.get('kicked') or s.get('kick') else 0,
+            1 if s.get('ppk') else 0,
+            s.get('fouls', 0), 1 if s.get('pu_mark') or s.get('pu') else 0,
+            s.get('will_protocol_raw', ''), s.get('will_opinion', ''),
+            1 if s.get('alive', True) else 0, s.get('status_reason', 'Жив'),
+            s.get('elo_change', 0), s.get('new_elo', 1500)
+        ))
+
     async with get_db() as conn:
-        for slot_num, s in slots.items():
-            await conn.execute("""
-                INSERT INTO game_slots_history (
-                    game_date, game_number, user_id, slot_num, role, team,
-                    base_points, bonus_points, lh_points,
-                    will_protocol_points, will_opinion_points, dc_points,
-                    kick, ppk, fouls, pu, will_protocol_raw, will_opinion,
-                    alive, status_reason, elo_change, new_elo
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
-            """,
-                search_date, game_number, s.get('user_id'), slot_num, s.get('role'), s.get('team'),
-                float(s.get('base_points', 0) or 0), float(s.get('bonus_points', 0) or 0),
-                float(s.get('lh_points', 0) or 0),
-                float(s.get('will_protocol_points', 0) or 0), float(s.get('will_opinion_points', 0) or 0),
-                float(s.get('dc_points', 0) or 0),
-                1 if s.get('kicked') or s.get('kick') else 0,
-                1 if s.get('ppk') else 0,
-                s.get('fouls', 0), 1 if s.get('pu_mark') or s.get('pu') else 0,
-                s.get('will_protocol_raw', ''), s.get('will_opinion', ''),
-                1 if s.get('alive', True) else 0, s.get('status_reason', 'Жив'),
-                s.get('elo_change', 0), s.get('new_elo', 1500)
-            )
+        await conn.executemany("""
+            INSERT INTO game_slots_history (
+                game_date, game_number, user_id, slot_num, role, team,
+                base_points, bonus_points, lh_points,
+                will_protocol_points, will_opinion_points, dc_points,
+                kick, ppk, fouls, pu, will_protocol_raw, will_opinion,
+                alive, status_reason, elo_change, new_elo
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, rows)
+        await conn.commit()
 
 
 async def update_game_outcome(game_id: int, winner_label: str):
     async with get_db() as conn:
-        await conn.execute("UPDATE game_history SET winner_label = $1 WHERE id = $2", winner_label, game_id)
+        await conn.execute("UPDATE game_history SET winner_label = ? WHERE id = ?", (winner_label, game_id))
+        await conn.commit()
 
 
 async def update_game_slot(game_date: str, game_num: int, slot_num: int, **kwargs):
     if not kwargs: 
         return
     search_date = _ensure_iso_date(game_date)
-    cols = ", ".join([f"{k} = ${i+1}" for i, k in enumerate(kwargs.keys())])
+    cols = ", ".join([f"{k} = ?" for k in kwargs.keys()])
     params = list(kwargs.values())
-    sql = f"UPDATE game_slots_history SET {cols}, updated_by_editor = 1 WHERE game_date = ${len(params)+1} AND game_number = ${len(params)+2} AND slot_num = ${len(params)+3}"
+    sql = f"UPDATE game_slots_history SET {cols}, updated_by_editor = 1 WHERE game_date = ? AND game_number = ? AND slot_num = ?"
     params.extend([search_date, game_num, slot_num])
 
     async with get_db() as conn:
-        await conn.execute(sql, *params)
+        await conn.execute(sql, params)
+        await conn.commit()
 
 
 # ========== 11. АНОНСЫ СТОЛА И УБИЙСТВА ==========
 async def get_announcement_requested(date: str) -> bool:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT announcement_requested FROM game_dates WHERE date = $1", date)
-        return bool(row and row[0]) if row else False
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS game_dates (date TEXT PRIMARY KEY, announcement_requested INTEGER DEFAULT 0)")
+        await conn.commit()
+        async with conn.execute("SELECT announcement_requested FROM game_dates WHERE date = ?", (date,)) as cur:
+            row = await cur.fetchone()
+            return bool(row and row[0]) if row else False
 
 
 async def set_announcement_requested(date: str, requested: bool):
     async with get_db() as conn:
         await conn.execute(
-            "INSERT INTO game_dates (date, announcement_requested) VALUES ($1, $2) ON CONFLICT(date) DO UPDATE SET announcement_requested = EXCLUDED.announcement_requested",
-            date, 1 if requested else 0)
+            "CREATE TABLE IF NOT EXISTS game_dates (date TEXT PRIMARY KEY, announcement_requested INTEGER DEFAULT 0)")
+        await conn.execute(
+            "INSERT INTO game_dates (date, announcement_requested) VALUES (?, ?) ON CONFLICT(date) DO UPDATE SET announcement_requested = excluded.announcement_requested",
+            (date, 1 if requested else 0))
+        await conn.commit()
 
 
 async def save_night_kills_order(game_date: str, game_number: int, night_kills_order: List[int]):
     search_date = _ensure_iso_date(game_date)
     async with get_db() as conn:
         await conn.execute(
-            "INSERT INTO night_kills_order (game_date, game_number, kill_order) VALUES ($1, $2, $3) ON CONFLICT(game_date, game_number) DO UPDATE SET kill_order = EXCLUDED.kill_order",
-            search_date, game_number, json.dumps(night_kills_order))
+            "INSERT OR REPLACE INTO night_kills_order (game_date, game_number, kill_order) VALUES (?, ?, ?)",
+            (search_date, game_number, json.dumps(night_kills_order)))
+        await conn.commit()
 
 
 async def get_night_kills_order(game_date: str, game_number: int) -> List[int]:
     search_date = _ensure_iso_date(game_date)
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT kill_order FROM night_kills_order WHERE game_date = $1 AND game_number = $2", search_date, game_number)
-        if row and row[0]: 
-            return json.loads(row[0])
+        async with conn.execute("SELECT kill_order FROM night_kills_order WHERE game_date = ? AND game_number = ?",
+                                (search_date, game_number)) as cur:
+            row = await cur.fetchone()
+            if row and row[0]: 
+                return json.loads(row[0])
     return []
 
 
 # ========== 12. РЕЙТИНГ, ФОЛЫ И ЭЛО ==========
 async def get_user_fouls_stats(user_id: int) -> Dict[str, int]:
     async with get_db() as conn:
-        row = await conn.fetchrow(
-            "SELECT SUM(fouls) AS fouls_total, SUM(technical_fouls) AS techfouls_total, SUM(kick) AS kicks_total FROM game_slots_history WHERE user_id = $1",
-            user_id)
+        async with conn.execute(
+                "SELECT SUM(fouls) AS fouls_total, SUM(technical_fouls) AS techfouls_total, SUM(kick) AS kicks_total FROM game_slots_history WHERE user_id = ?",
+                (user_id,)) as cur:
+            row = await cur.fetchone()
     if not row or not any(row): 
         return {"fouls_total": 0, "techfouls_total": 0, "kicks_total": 0}
     return {"fouls_total": row[0] or 0, "techfouls_total": row[1] or 0, "kicks_total": row[2] or 0}
@@ -1052,13 +1105,14 @@ async def add_fouls_column():
     async with get_db() as conn:
         try:
             await conn.execute("ALTER TABLE game_slots_history ADD COLUMN fouls INTEGER DEFAULT 0")
+            await conn.commit()
         except Exception:
             pass
 
 
 async def get_players_rating(limit: int = 50) -> List[Dict]:
     async with get_db() as conn:
-        rows = await conn.fetch("""
+        async with conn.execute("""
             SELECT u.user_id,
                    u.full_name,
                    u.nickname,
@@ -1078,8 +1132,9 @@ async def get_players_rating(limit: int = 50) -> List[Dict]:
             GROUP BY u.user_id, u.full_name, u.nickname
             HAVING games_played > 0
             ORDER BY total_points DESC, games_won DESC
-            LIMIT $1
-        """, limit)
+            LIMIT ?
+        """, (limit,)) as cur:
+            rows = await cur.fetchall()
     result = []
     for i, row in enumerate(rows, 1):
         result.append({"place": i, "user_id": row[0], "full_name": row[1], "nickname": row[2] or "ник не указан",
@@ -1097,28 +1152,32 @@ async def create_elo_table():
                 elo INTEGER DEFAULT 1500,
                 games_played INTEGER DEFAULT 0,
                 games_won INTEGER DEFAULT 0,
-                updated_at TIMESTAMP DEFAULT NOW()
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         """)
+        await conn.commit()
 
 
 async def get_elo(user_id: int) -> int:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT elo FROM elo_ratings WHERE user_id = $1", user_id)
-        return row[0] if row else 1500
+        async with conn.execute("SELECT elo FROM elo_ratings WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 1500
 
 
 async def get_players_elo_rating(limit: int = 50) -> List[Dict]:
     async with get_db() as conn:
-        rows = await conn.fetch("""
+        async with conn.execute("""
             SELECT u.user_id, u.nickname, u.full_name, e.elo, e.games_played, e.games_won
             FROM elo_ratings e
                      JOIN users u ON e.user_id = u.user_id
             WHERE e.games_played > 0
-              AND e.updated_at >= NOW() - INTERVAL '21 days'
+              AND e.updated_at >= date('now', '-21 days')
             ORDER BY e.elo DESC
-            LIMIT $1
-        """, limit)
+            LIMIT ?
+        """, (limit,)) as cur:
+            rows = await cur.fetchall()
     result = []
     for i, (user_id, nickname, full_name, elo, games_played, games_won) in enumerate(rows, 1):
         result.append({"place": i, "user_id": user_id, "nickname": nickname or full_name or "Неизвестный", "elo": elo,
@@ -1129,33 +1188,38 @@ async def get_players_elo_rating(limit: int = 50) -> List[Dict]:
 async def update_elo(user_id: int, delta: int):
     STARTING_ELO = 1500
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM elo_ratings WHERE user_id = $1", user_id)
-        if row:
-            await conn.execute("UPDATE elo_ratings SET elo = elo + $1, updated_at = NOW() WHERE user_id = $2", delta, user_id)
+        async with conn.execute("SELECT 1 FROM elo_ratings WHERE user_id = ?", (user_id,)) as cur:
+            exists = await cur.fetchone()
+        if exists:
+            await conn.execute("UPDATE elo_ratings SET elo = elo + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                               (delta, user_id))
         else:
-            await conn.execute("INSERT INTO elo_ratings (user_id, elo) VALUES ($1, $2)", user_id, STARTING_ELO + delta)
+            await conn.execute("INSERT INTO elo_ratings (user_id, elo) VALUES (?, ?)", (user_id, STARTING_ELO + delta))
+        await conn.commit()
 
 
 async def update_player_stats(user_id: int, team: str, won: bool):
     async with get_db() as conn:
         if team == "Красные":
             await conn.execute(
-                "UPDATE users SET games_red = COALESCE(games_red, 0) + 1, wins_red = COALESCE(wins_red, 0) + $1 WHERE user_id = $2",
-                1 if won else 0, user_id)
+                "UPDATE users SET games_red = COALESCE(games_red, 0) + 1, wins_red = COALESCE(wins_red, 0) + ? WHERE user_id = ?",
+                (1 if won else 0, user_id))
         else:
             await conn.execute(
-                "UPDATE users SET games_black = COALESCE(games_black, 0) + 1, wins_black = COALESCE(wins_black, 0) + $1 WHERE user_id = $2",
-                1 if won else 0, user_id)
+                "UPDATE users SET games_black = COALESCE(games_black, 0) + 1, wins_black = COALESCE(wins_black, 0) + ? WHERE user_id = ?",
+                (1 if won else 0, user_id))
+        await conn.commit()
 
 
 async def update_player_statuses(user_id: int):
     async with get_db() as conn:
-        row = await conn.fetchrow(
-            "SELECT games_played, games_won, games_red, wins_red, games_black, wins_black FROM users WHERE user_id = $1",
-            user_id)
-        if not row: 
-            return
-        games_played, games_won, games_red, wins_red, games_black, wins_black = (row[i] or 0 for i in range(6))
+        async with conn.execute(
+                "SELECT games_played, games_won, games_red, wins_red, games_black, wins_black FROM users WHERE user_id = ?",
+                (user_id,)) as cur:
+            row = await cur.fetchone()
+            if not row: 
+                return
+            games_played, games_won, games_red, wins_red, games_black, wins_black = (row[i] or 0 for i in range(6))
 
     if games_played < 50:
         exp_level = "🟢 Новичок"
@@ -1181,17 +1245,19 @@ async def update_player_statuses(user_id: int):
 
     async with get_db() as conn:
         await conn.execute(
-            "UPDATE users SET exp_level = $1, skill_level = $2, winrate_red = $3, winrate_black = $4 WHERE user_id = $5",
-            exp_level, skill_level, round(winrate_red, 1), round(winrate_black, 1), user_id)
+            "UPDATE users SET exp_level = ?, skill_level = ?, winrate_red = ?, winrate_black = ? WHERE user_id = ?",
+            (exp_level, skill_level, round(winrate_red, 1), round(winrate_black, 1), user_id))
+        await conn.commit()
 
 
 async def get_player_full_stats(user_id: int) -> Optional[Dict]:
     async with get_db() as conn:
-        row = await conn.fetchrow(
-            "SELECT full_name, nickname, debt, last_visit, COALESCE(elo, 1000) as elo, exp_level, skill_level, games_played, games_won, winrate_red, winrate_black, games_red, wins_red, games_black, wins_black FROM users WHERE user_id = $1",
-            user_id)
-        if not row: 
-            return None
+        async with conn.execute(
+                "SELECT full_name, nickname, debt, last_visit, COALESCE(elo, 1000) as elo, exp_level, skill_level, games_played, games_won, winrate_red, winrate_black, games_red, wins_red, games_black, wins_black FROM users WHERE user_id = ?",
+                (user_id,)) as cur:
+            row = await cur.fetchone()
+            if not row: 
+                return None
         elo = await get_elo(user_id)
         return {"full_name": row[0], "nickname": row[1], "debt": row[2], "last_visit": row[3], "elo": elo,
                 "exp_level": row[5] or "🟢 Новичок", "skill_level": row[6] or "📉 Низкий", "games_played": row[7] or 0,
@@ -1203,13 +1269,16 @@ async def get_player_full_stats(user_id: int) -> Optional[Dict]:
 # ========== 13. АЧИВКИ ==========
 async def get_user_achievements(user_id: int) -> List[str]:
     async with get_db() as conn:
-        rows = await conn.fetch("SELECT achievement_id FROM user_achievements WHERE user_id = $1", user_id)
-        return [row[0] for row in rows]
+        async with conn.execute("SELECT achievement_id FROM user_achievements WHERE user_id = ?", (user_id,)) as cur:
+            rows = await cur.fetchall()
+            return [row[0] for row in rows]
 
 
 async def add_user_achievement(user_id: int, achievement_id: str):
     async with get_db() as conn:
-        await conn.execute("INSERT INTO user_achievements (user_id, achievement_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", user_id, achievement_id)
+        await conn.execute("INSERT OR IGNORE INTO user_achievements (user_id, achievement_id) VALUES (?, ?)",
+                           (user_id, achievement_id))
+        await conn.commit()
 
 
 async def get_all_achievements() -> List[Tuple[str, str]]:
@@ -1226,58 +1295,67 @@ async def get_all_achievements() -> List[Tuple[str, str]]:
 # ========== 14. ЖЕТОНЫ ==========
 async def get_user_tokens(user_id: int) -> int:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT tokens FROM users WHERE user_id = $1", user_id)
-        return row[0] if row else 0
+        async with conn.execute("SELECT tokens FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
 
 async def add_tokens(user_id: int, amount: int, comment: str = "Игровые жетоны"):
     async with get_db() as conn:
-        await conn.execute("UPDATE users SET tokens = tokens + $1 WHERE user_id = $2", amount, user_id)
-        await conn.execute("INSERT INTO transactions (user_id, amount, type, comment) VALUES ($1, $2, 'tokens', $3)", user_id, amount, comment)
+        await conn.execute("UPDATE users SET tokens = tokens + ? WHERE user_id = ?", (amount, user_id))
+        await conn.execute("INSERT INTO transactions (user_id, amount, type, comment) VALUES (?, ?, ?, ?)",
+                           (user_id, amount, 'tokens', comment))
+        await conn.commit()
 
 
 async def set_tokens(user_id: int, amount: int):
     async with get_db() as conn:
-        await conn.execute("UPDATE users SET tokens = $1 WHERE user_id = $2", amount, user_id)
+        await conn.execute("UPDATE users SET tokens = ? WHERE user_id = ?", (amount, user_id))
+        await conn.commit()
 
 
 # ========== 15. СТАВКИ ==========
 async def create_bet(game_id: int, game_number: int, game_date: str, created_by: int) -> int:
     search_date = _ensure_iso_date(game_date)
     async with get_db() as conn:
-        row = await conn.fetchrow(
-            "INSERT INTO bets_active (game_id, game_number, game_date, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
-            game_id, game_number, search_date, created_by)
-        return row[0]
+        cur = await conn.execute(
+            "INSERT INTO bets_active (game_id, game_number, game_date, created_by) VALUES (?, ?, ?, ?)",
+            (game_id, game_number, search_date, created_by))
+        await conn.commit()
+        return cur.lastrowid
 
 
 async def get_active_bet(game_id: int) -> Optional[Dict]:
     async with get_db() as conn:
-        row = await conn.fetchrow(
-            "SELECT id, game_id, game_number, game_date, created_by, created_at, closed, resolved, winner_team FROM bets_active WHERE game_id = $1 AND closed = FALSE AND resolved = FALSE",
-            game_id)
-        if row: 
-            return {"id": row[0], "game_id": row[1], "game_number": row[2], "game_date": row[3],
-                    "created_by": row[4], "created_at": row[5], "closed": row[6], "resolved": row[7],
-                    "winner_team": row[8]}
+        async with conn.execute(
+                "SELECT id, game_id, game_number, game_date, created_by, created_at, closed, resolved, winner_team FROM bets_active WHERE game_id = ? AND closed = 0 AND resolved = 0",
+                (game_id,)) as cur:
+            row = await cur.fetchone()
+            if row: 
+                return {"id": row[0], "game_id": row[1], "game_number": row[2], "game_date": row[3],
+                        "created_by": row[4], "created_at": row[5], "closed": row[6], "resolved": row[7],
+                        "winner_team": row[8]}
     return None
 
 
 async def close_bet(bet_id: int):
     async with get_db() as conn:
-        await conn.execute("UPDATE bets_active SET closed = TRUE WHERE id = $1", bet_id)
+        await conn.execute("UPDATE bets_active SET closed = 1 WHERE id = ?", (bet_id,))
+        await conn.commit()
 
 
 async def resolve_bet(bet_id: int, winner_team: str):
     async with get_db() as conn:
-        await conn.execute("UPDATE bets_active SET winner_team = $1, resolved = TRUE WHERE id = $2", winner_team, bet_id)
+        await conn.execute("UPDATE bets_active SET winner_team = ?, resolved = 1 WHERE id = ?", (winner_team, bet_id))
+        await conn.commit()
 
 
 async def place_bet(user_id: int, bet_id: int, amount: int, predicted_winner: str) -> bool:
     try:
         async with get_db() as conn:
-            await conn.execute("INSERT INTO user_bets (user_id, bet_id, amount, predicted_winner) VALUES ($1, $2, $3, $4)",
-                               user_id, bet_id, amount, predicted_winner)
+            await conn.execute("INSERT INTO user_bets (user_id, bet_id, amount, predicted_winner) VALUES (?, ?, ?, ?)",
+                               (user_id, bet_id, amount, predicted_winner))
+            await conn.commit()
             return True
     except Exception:
         return False
@@ -1285,66 +1363,76 @@ async def place_bet(user_id: int, bet_id: int, amount: int, predicted_winner: st
 
 async def get_user_bets_for_game(bet_id: int) -> List[Dict]:
     async with get_db() as conn:
-        rows = await conn.fetch(
-            "SELECT ub.user_id, ub.amount, ub.predicted_winner, u.nickname, u.full_name FROM user_bets ub JOIN users u ON ub.user_id = u.user_id WHERE ub.bet_id = $1",
-            bet_id)
-        return [{"user_id": row[0], "amount": row[1], "predicted_winner": row[2],
-                 "nickname": row[3] or row[4] or str(row[0])} for row in rows]
+        async with conn.execute(
+                "SELECT ub.user_id, ub.amount, ub.predicted_winner, u.nickname, u.full_name FROM user_bets ub JOIN users u ON ub.user_id = u.user_id WHERE ub.bet_id = ?",
+                (bet_id,)) as cur:
+            rows = await cur.fetchall()
+            return [{"user_id": row[0], "amount": row[1], "predicted_winner": row[2],
+                     "nickname": row[3] or row[4] or str(row[0])} for row in rows]
 
 
 async def get_bet_participants(bet_id: int) -> List[int]:
     async with get_db() as conn:
-        rows = await conn.fetch("SELECT DISTINCT user_id FROM user_bets WHERE bet_id = $1", bet_id)
-        return [row[0] for row in rows]
+        async with conn.execute("SELECT DISTINCT user_id FROM user_bets WHERE bet_id = ?", (bet_id,)) as cur:
+            rows = await cur.fetchall()
+            return [row[0] for row in rows]
 
 
 async def delete_bet(bet_id: int):
     async with get_db() as conn:
-        await conn.execute("DELETE FROM user_bets WHERE bet_id = $1", bet_id)
-        await conn.execute("DELETE FROM bets_active WHERE id = $1", bet_id)
+        await conn.execute("DELETE FROM user_bets WHERE bet_id = ?", (bet_id,))
+        await conn.execute("DELETE FROM bets_active WHERE id = ?", (bet_id,))
+        await conn.commit()
 
 
 async def get_team_avg_elo(game_id: int, team: str) -> float:
     async with get_db() as conn:
-        game = await conn.fetchrow("SELECT game_date, game_number FROM game_history WHERE id = $1", game_id)
-        if not game: 
-            return 1500
-        game_date, game_number = game
-        rows = await conn.fetch(
-            "SELECT COALESCE(e.elo, 1500) FROM game_slots_history s LEFT JOIN elo_ratings e ON s.user_id = e.user_id WHERE s.game_date = $1 AND s.game_number = $2 AND s.team = $3",
-            game_date, game_number, team)
-        elos = [row[0] for row in rows if row[0]]
-        if not elos: 
-            return 1500
-        return sum(elos) / len(elos)
+        async with conn.execute("SELECT game_date, game_number FROM game_history WHERE id = ?", (game_id,)) as cur:
+            game = await cur.fetchone()
+            if not game: 
+                return 1500
+            game_date, game_number = game
+        async with conn.execute(
+                "SELECT COALESCE(e.elo, 1500) FROM game_slots_history s LEFT JOIN elo_ratings e ON s.user_id = e.user_id WHERE s.game_date = ? AND s.game_number = ? AND s.team = ?",
+                (game_date, game_number, team)) as cur:
+            rows = await cur.fetchall()
+            elos = [row[0] for row in rows if row[0]]
+            if not elos: 
+                return 1500
+            return sum(elos) / len(elos)
 
 
 # ========== 16. СУДЬИ И СИНХРОНИЗАЦИЯ ==========
 async def get_judged_games_count(user_id: int) -> int:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT COUNT(*) FROM game_history WHERE judge_id = $1", user_id)
-        return row[0] if row else 0
+        async with conn.execute("SELECT COUNT(*) FROM game_history WHERE judge_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
 
 async def recalc_all_stats():
     async with get_db() as conn:
         print("[STATS] Начало глобального пересчета...")
         await conn.execute("UPDATE users SET games_played = 0, games_won = 0, points = 0")
-        rows = await conn.fetch(
-            "SELECT user_id, COUNT(*) as games, SUM(CASE WHEN base_points >= 1 THEN 1 ELSE 0 END) as wins, SUM(base_points + bonus_points + lh_points + will_protocol_points + will_opinion_points + dc_points) as total_pts FROM game_slots_history WHERE user_id IS NOT NULL GROUP BY user_id")
-        
-        for user_id, games, wins, pts in rows:
-            await conn.execute("UPDATE users SET games_played = $1, games_won = $2, points = $3 WHERE user_id = $4",
-                               games, wins, pts, user_id)
+        async with conn.execute(
+                "SELECT user_id, COUNT(*) as games, SUM(CASE WHEN base_points >= 1 THEN 1 ELSE 0 END) as wins, SUM(base_points + bonus_points + lh_points + will_protocol_points + will_opinion_points + dc_points) as total_pts FROM game_slots_history WHERE user_id IS NOT NULL GROUP BY user_id") as cur:
+            stats = await cur.fetchall()
+
+        for user_id, games, wins, pts in stats:
+            await conn.execute("UPDATE users SET games_played = ?, games_won = ?, points = ? WHERE user_id = ?",
+                               (games, wins, pts, user_id))
             await conn.execute(
-                "UPDATE elo_ratings SET games_played = $1, games_won = $2, updated_at = (SELECT MAX(game_date) FROM game_slots_history WHERE user_id = $3) WHERE user_id = $3",
-                games, wins, user_id)
-        print(f"[STATS] Пересчет завершен. Синхронизировано игроков: {len(rows)}")
+                "UPDATE elo_ratings SET games_played = ?, games_won = ?, updated_at = (SELECT MAX(game_date) FROM game_slots_history WHERE user_id = ?) WHERE user_id = ?",
+                (games, wins, user_id, user_id))
+        await conn.commit()
+        print(f"[STATS] Пересчет завершен. Синхронизировано игроков: {len(stats)}")
 
 
 async def refund_bets_for_game(game_id: int):
     async with get_db() as conn:
-        rows = await conn.fetch("SELECT user_id, amount FROM bets WHERE game_id = $1", game_id)
-        for user_id, amount in rows:
-            await conn.execute("UPDATE users SET tokens = tokens + $1 WHERE user_id = $2", amount, user_id)
-        await conn.execute("DELETE FROM bets WHERE game_id = $1", game_id)
+        async with conn.execute("SELECT user_id, amount FROM bets WHERE game_id = ?", (game_id,)) as cur:
+            bets = await cur.fetchall()
+        for user_id, amount in bets:
+            await conn.execute("UPDATE users SET tokens = tokens + ? WHERE user_id = ?", (amount, user_id))
+        await conn.execute("DELETE FROM bets WHERE game_id = ?", (game_id,))
+        await conn.commit()
