@@ -9,12 +9,37 @@ import config
 # ========== ПРОСТЫЕ СОЕДИНЕНИЯ (без пула) ==========
 
 async def get_db_connection():
-    """Создаёт новое соединение с БД"""
+    """Создаёт новое соединение с БД через IPv4"""
     loop = asyncio.get_event_loop()
+    
+    # Принудительно получаем IPv4 адрес
+    def get_ipv4():
+        try:
+            # Разрешаем имя только в IPv4
+            addr_info = socket.getaddrinfo(
+                "db.udhsmhlhzdkzsrwrhalp.supabase.co",
+                5432,
+                socket.AF_INET,  # Только IPv4
+                socket.SOCK_STREAM
+            )
+            if addr_info:
+                return addr_info[0][4][0]
+        except Exception as e:
+            print(f"Ошибка получения IPv4: {e}")
+        return None
+    
+    ipv4 = get_ipv4()
+    if ipv4:
+        print(f"Подключаюсь к IPv4: {ipv4}")
+        host = ipv4
+    else:
+        print("Предупреждение: используем доменное имя (может не работать)")
+        host = "db.udhsmhlhzdkzsrwrhalp.supabase.co"
+    
     conn = await loop.run_in_executor(
         None,
         lambda: psycopg2.connect(
-            host="db.udhsmhlhzdkzsrwrhalp.supabase.co",
+            host=host,
             port=5432,
             user="postgres",
             password="Test1TestMafia",
