@@ -12,7 +12,7 @@ from aiogram.enums import ParseMode
 import keyboards
 import database
 import config
-from handlers import stats_utils
+from . import stats_utils
 from handlers.payment import payment_kb
 from handlers.booking import build_stats_text, get_next_friday
 from database import get_elo, get_user_by_nickname, get_user_by_id
