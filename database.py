@@ -2,32 +2,45 @@ import json
 import datetime
 from typing import Optional, Tuple, List, Dict, Any, Union
 from contextlib import asynccontextmanager
-import asyncpg
+import asyncio
+import psycopg2
 import config
 
-# ========== ПУЛ СОЕДИНЕНИЙ ==========
-_db_pool = None
+# ========== ПРОСТЫЕ СОЕДИНЕНИЯ (без пула) ==========
 
-async def get_db_pool():
-    """Создаёт пул соединений с PostgreSQL (Supabase)"""
-    global _db_pool
-    if _db_pool is None:
-        _db_pool = await asyncpg.create_pool(
-            config.DATABASE_URL,
-            min_size=1,
-            max_size=10,
-            command_timeout=60
+async def get_db_connection():
+    """Создаёт новое соединение с БД"""
+    loop = asyncio.get_event_loop()
+    conn = await loop.run_in_executor(
+        None,
+        lambda: psycopg2.connect(
+            host="db.udhsmhlhzdkzsrwrhalp.supabase.co",
+            port=5432,
+            user="postgres",
+            password="Test1TestMafia",
+            database="postgres",
+            sslmode="require"
         )
-        print("✅ Пул соединений с Supabase создан")
-    return _db_pool
+    )
+    return conn
 
+def run_sync(conn, func, *args, **kwargs):
+    """Выполняет синхронную операцию в отдельном потоке"""
+    loop = asyncio.get_event_loop()
+    return loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 @asynccontextmanager
 async def get_db():
-    """Контекстный менеджер для соединения с БД (аналог SQLite версии)."""
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
+    """Контекстный менеджер для работы с БД"""
+    conn = await get_db_connection()
+    try:
         yield conn
+        await run_sync(conn, conn.commit)
+    except Exception:
+        await run_sync(conn, conn.rollback)
+        raise
+    finally:
+        await run_sync(conn, conn.close)
 
 
 def _ensure_iso_date(date_str: str) -> str:
@@ -91,184 +104,196 @@ async def _ensure_columns():
                 pass
 
 
-# ========== 1. ИНИЦИАЛИЗАЦИЯ ==========
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+
+async def execute_query(conn, query: str, params: tuple = None):
+    """Выполняет запрос и возвращает результат"""
+    cursor = await run_sync(conn, conn.cursor)
+    try:
+        await run_sync(cursor, cursor.execute, query, params)
+        if query.strip().upper().startswith('SELECT'):
+            result = await run_sync(cursor, cursor.fetchall)
+            return result
+        return cursor.rowcount
+    finally:
+        await run_sync(cursor, cursor.close)
+
+async def fetch_one(conn, query: str, params: tuple = None):
+    """Возвращает одну строку из БД"""
+    cursor = await run_sync(conn, conn.cursor)
+    try:
+        await run_sync(cursor, cursor.execute, query, params)
+        row = await run_sync(cursor, cursor.fetchone)
+        return row
+    finally:
+        await run_sync(cursor, cursor.close)
+
+# ========== ИНИЦИАЛИЗАЦИЯ ==========
 async def init_db():
     """Инициализация всех таблиц."""
     async with get_db() as conn:
-        await conn.execute("""
+        # Выполняем CREATE TABLE запросы
+        queries = [
+            """
             CREATE TABLE IF NOT EXISTS game_slots_history (
-                id                   SERIAL PRIMARY KEY,
-                game_date            TEXT,
-                game_number          INTEGER DEFAULT 0,
-                user_id              INTEGER,
-                slot_num             INTEGER,
-                role                 TEXT,
-                team                 TEXT,
-                base_points          REAL    DEFAULT 0,
-                bonus_points         REAL    DEFAULT 0,
-                lh_points            REAL    DEFAULT 0,
-                will_protocol_points REAL    DEFAULT 0,
-                will_opinion_points  REAL    DEFAULT 0,
-                dc_points            REAL    DEFAULT 0,
-                kick                 INTEGER DEFAULT 0,
-                ppk                  INTEGER DEFAULT 0,
-                technical_fouls      INTEGER DEFAULT 0,
-                pu                   INTEGER DEFAULT 0,
-                will_protocol_raw    TEXT    DEFAULT '',
-                will_opinion         TEXT    DEFAULT '',
-                alive                INTEGER DEFAULT 1,
-                status_reason        TEXT    DEFAULT 'Жив',
-                updated_by_editor    INTEGER DEFAULT 0,
-                fouls                INTEGER DEFAULT 0,
-                elo_change           INTEGER DEFAULT 0,
-                new_elo              INTEGER DEFAULT 1500
+                id SERIAL PRIMARY KEY,
+                game_date TEXT,
+                game_number INTEGER DEFAULT 0,
+                user_id INTEGER,
+                slot_num INTEGER,
+                role TEXT,
+                team TEXT,
+                base_points REAL DEFAULT 0,
+                bonus_points REAL DEFAULT 0,
+                lh_points REAL DEFAULT 0,
+                will_protocol_points REAL DEFAULT 0,
+                will_opinion_points REAL DEFAULT 0,
+                dc_points REAL DEFAULT 0,
+                kick INTEGER DEFAULT 0,
+                ppk INTEGER DEFAULT 0,
+                technical_fouls INTEGER DEFAULT 0,
+                pu INTEGER DEFAULT 0,
+                will_protocol_raw TEXT DEFAULT '',
+                will_opinion TEXT DEFAULT '',
+                alive INTEGER DEFAULT 1,
+                status_reason TEXT DEFAULT 'Жив',
+                updated_by_editor INTEGER DEFAULT 0,
+                fouls INTEGER DEFAULT 0,
+                elo_change INTEGER DEFAULT 0,
+                new_elo INTEGER DEFAULT 1500
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS users (
-                user_id          INTEGER PRIMARY KEY,
-                full_name        TEXT,
-                username         TEXT,
-                nickname         TEXT UNIQUE,
-                debt             INTEGER DEFAULT 0,
-                last_visit       TEXT,
-                total_paid       INTEGER DEFAULT 0,
-                kicks            INTEGER DEFAULT 0,
-                ppk_causes       INTEGER DEFAULT 0,
-                games_played     INTEGER DEFAULT 0,
-                games_won        INTEGER DEFAULT 0,
-                points           INTEGER DEFAULT 0,
-                games_red        INTEGER DEFAULT 0,
-                wins_red         INTEGER DEFAULT 0,
-                games_black      INTEGER DEFAULT 0,
-                wins_black       INTEGER DEFAULT 0,
-                exp_level        TEXT,
-                skill_level      TEXT,
-                winrate_red      REAL DEFAULT 0,
-                winrate_black    REAL DEFAULT 0,
+                user_id INTEGER PRIMARY KEY,
+                full_name TEXT,
+                username TEXT,
+                nickname TEXT UNIQUE,
+                debt INTEGER DEFAULT 0,
+                last_visit TEXT,
+                total_paid INTEGER DEFAULT 0,
+                kicks INTEGER DEFAULT 0,
+                ppk_causes INTEGER DEFAULT 0,
+                games_played INTEGER DEFAULT 0,
+                games_won INTEGER DEFAULT 0,
+                points INTEGER DEFAULT 0,
+                games_red INTEGER DEFAULT 0,
+                wins_red INTEGER DEFAULT 0,
+                games_black INTEGER DEFAULT 0,
+                wins_black INTEGER DEFAULT 0,
+                exp_level TEXT,
+                skill_level TEXT,
+                winrate_red REAL DEFAULT 0,
+                winrate_black REAL DEFAULT 0,
                 has_unpaid_session INTEGER DEFAULT 0,
-                tokens           INTEGER DEFAULT 0,
-                created_at       TIMESTAMP DEFAULT NOW()
+                tokens INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW()
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS evening_booking (
                 user_id INTEGER PRIMARY KEY,
                 status TEXT,
                 date TEXT
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS evening_history (
-                id        SERIAL PRIMARY KEY,
-                date      TEXT,
-                user_id   INTEGER,
-                status    TEXT,
+                id SERIAL PRIMARY KEY,
+                date TEXT,
+                user_id INTEGER,
+                status TEXT,
                 full_name TEXT,
-                nickname  TEXT,
-                amount    INTEGER DEFAULT 0
+                nickname TEXT,
+                amount INTEGER DEFAULT 0
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS evening_stats_messages (
                 date TEXT PRIMARY KEY,
                 chat_id INTEGER,
                 message_id INTEGER
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS evening_status (
                 date TEXT PRIMARY KEY,
                 bills_sent INTEGER DEFAULT 0
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS game_history (
-                id                 SERIAL PRIMARY KEY,
-                game_date          TEXT,
-                winner_label       TEXT,
-                protocol_text      TEXT,
-                game_number        INTEGER,
+                id SERIAL PRIMARY KEY,
+                game_date TEXT,
+                winner_label TEXT,
+                protocol_text TEXT,
+                game_number INTEGER,
                 global_game_number INTEGER,
-                judge_id           INTEGER DEFAULT 0
+                judge_id INTEGER DEFAULT 0
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS night_kills_order (
                 game_date TEXT,
                 game_number INTEGER,
                 kill_order TEXT,
                 PRIMARY KEY (game_date, game_number)
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS user_achievements (
-                user_id        INTEGER,
+                user_id INTEGER,
                 achievement_id TEXT,
-                earned_at      TIMESTAMP DEFAULT NOW(),
+                earned_at TIMESTAMP DEFAULT NOW(),
                 PRIMARY KEY (user_id, achievement_id)
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS bets_active (
-                id          SERIAL PRIMARY KEY,
-                game_id     INTEGER NOT NULL,
+                id SERIAL PRIMARY KEY,
+                game_id INTEGER NOT NULL,
                 game_number INTEGER NOT NULL,
-                game_date   TEXT    NOT NULL,
-                created_by  INTEGER NOT NULL,
-                created_at  TIMESTAMP DEFAULT NOW(),
-                closed      BOOLEAN DEFAULT FALSE,
-                resolved    BOOLEAN DEFAULT FALSE,
+                game_date TEXT NOT NULL,
+                created_by INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW(),
+                closed BOOLEAN DEFAULT FALSE,
+                resolved BOOLEAN DEFAULT FALSE,
                 winner_team TEXT
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS user_bets (
-                id               SERIAL PRIMARY KEY,
-                user_id          INTEGER NOT NULL,
-                bet_id           INTEGER NOT NULL,
-                amount           INTEGER NOT NULL,
-                predicted_winner TEXT    NOT NULL,
-                created_at       TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                id         SERIAL PRIMARY KEY,
-                user_id    INTEGER,
-                amount     REAL,
-                type       TEXT,
-                comment    TEXT,
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                bet_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                predicted_winner TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT NOW()
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS transactions (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                amount REAL,
+                type TEXT,
+                comment TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS game_dates (
                 date TEXT PRIMARY KEY,
                 announcement_requested INTEGER DEFAULT 0
             )
-        """)
-        
-        await conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS elo_ratings (
                 user_id INTEGER PRIMARY KEY,
                 elo INTEGER DEFAULT 1500,
@@ -276,29 +301,26 @@ async def init_db():
                 games_won INTEGER DEFAULT 0,
                 updated_at TIMESTAMP DEFAULT NOW()
             )
-        """)
-
-    await _ensure_columns()
-    await add_fouls_column()
-    await create_elo_table()
-    print("✅ База данных Supabase инициализирована")
-
+            """
+        ]
+        
+        for query in queries:
+            await execute_query(conn, query)
+    
+    print("✅ База данных инициализирована")
 
 # ========== 2. SETTINGS ==========
 async def get_setting(key: str) -> Optional[str]:
     async with get_db() as conn:
-        row = await conn.fetchrow("SELECT value FROM settings WHERE key = $1", key)
+        row = await fetch_one(conn, "SELECT value FROM settings WHERE key = %s", (key,))
         return row[0] if row else None
-
 
 async def set_setting(key: str, value: Optional[str]):
     async with get_db() as conn:
         if value is None:
-            await conn.execute("DELETE FROM settings WHERE key = $1", key)
+            await execute_query(conn, "DELETE FROM settings WHERE key = %s", (key,))
         else:
-            await conn.execute(
-                "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                key, value)
+            await execute_query(conn, "INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value", (key, value))
 
 
 def _make_setting_funcs(key_prefix: str):
