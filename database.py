@@ -2,45 +2,51 @@ import json
 import datetime
 from typing import Optional, Tuple, List, Dict, Any, Union
 from contextlib import asynccontextmanager
+import asyncpg
 import asyncio
-import psycopg2
+import socket
 import config
 
-# ========== ПРОСТЫЕ СОЕДИНЕНИЯ (без пула) ==========
+# ========== ПУЛ СОЕДИНЕНИЙ ==========
+_db_pool = None
 
-async def get_db_connection():
-    loop = asyncio.get_event_loop()
-    conn = await loop.run_in_executor(
-        None,
-        lambda: psycopg2.connect(
-            host="87.244.0.17",  # ← прямой IPv4 адрес
+async def get_db_pool():
+    global _db_pool
+    if _db_pool is None:
+        # Получаем IPv4 адрес
+        try:
+            addr_info = socket.getaddrinfo(
+                "db.udhsmhlhzdkzsrwrhalp.supabase.co",
+                5432,
+                socket.AF_INET,
+                socket.SOCK_STREAM
+            )
+            host = addr_info[0][4][0] if addr_info else "db.udhsmhlhzdkzsrwrhalp.supabase.co"
+            print(f"Подключаюсь к {host}")
+        except:
+            host = "db.udhsmhlhzdkzsrwrhalp.supabase.co"
+        
+        _db_pool = await asyncpg.create_pool(
+            host=host,
             port=5432,
             user="postgres",
             password="Test1TestMafia",
             database="postgres",
-            sslmode="require"
+            ssl="require",
+            min_size=1,
+            max_size=10,
+            command_timeout=60
         )
-    )
-    return conn
+        print("✅ Пул соединений с Supabase создан")
+    return _db_pool
 
-
-def run_sync(conn, func, *args, **kwargs):
-    """Выполняет синхронную операцию в отдельном потоке"""
-    loop = asyncio.get_event_loop()
-    return loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 @asynccontextmanager
 async def get_db():
     """Контекстный менеджер для работы с БД"""
-    conn = await get_db_connection()
-    try:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
         yield conn
-        await run_sync(conn, conn.commit)
-    except Exception:
-        await run_sync(conn, conn.rollback)
-        raise
-    finally:
-        await run_sync(conn, conn.close)
 
 
 def _ensure_iso_date(date_str: str) -> str:
@@ -104,37 +110,12 @@ async def _ensure_columns():
                 pass
 
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-
-async def execute_query(conn, query: str, params: tuple = None):
-    """Выполняет запрос и возвращает результат"""
-    cursor = await run_sync(conn, conn.cursor)
-    try:
-        await run_sync(cursor, cursor.execute, query, params)
-        if query.strip().upper().startswith('SELECT'):
-            result = await run_sync(cursor, cursor.fetchall)
-            return result
-        return cursor.rowcount
-    finally:
-        await run_sync(cursor, cursor.close)
-
-async def fetch_one(conn, query: str, params: tuple = None):
-    """Возвращает одну строку из БД"""
-    cursor = await run_sync(conn, conn.cursor)
-    try:
-        await run_sync(cursor, cursor.execute, query, params)
-        row = await run_sync(cursor, cursor.fetchone)
-        return row
-    finally:
-        await run_sync(cursor, cursor.close)
-
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
+# ========== 1. ИНИЦИАЛИЗАЦИЯ ==========
 async def init_db():
     """Инициализация всех таблиц."""
     async with get_db() as conn:
-        # Выполняем CREATE TABLE запросы
-        queries = [
-            """
+        # Таблица game_slots_history
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS game_slots_history (
                 id SERIAL PRIMARY KEY,
                 game_date TEXT,
@@ -162,8 +143,10 @@ async def init_db():
                 elo_change INTEGER DEFAULT 0,
                 new_elo INTEGER DEFAULT 1500
             )
-            """,
-            """
+        """)
+        
+        # Таблица users
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 full_name TEXT,
@@ -189,15 +172,19 @@ async def init_db():
                 tokens INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT NOW()
             )
-            """,
-            """
+        """)
+        
+        # Таблица evening_booking
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS evening_booking (
                 user_id INTEGER PRIMARY KEY,
                 status TEXT,
                 date TEXT
             )
-            """,
-            """
+        """)
+        
+        # Таблица evening_history
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS evening_history (
                 id SERIAL PRIMARY KEY,
                 date TEXT,
@@ -207,27 +194,35 @@ async def init_db():
                 nickname TEXT,
                 amount INTEGER DEFAULT 0
             )
-            """,
-            """
+        """)
+        
+        # Таблица evening_stats_messages
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS evening_stats_messages (
                 date TEXT PRIMARY KEY,
                 chat_id INTEGER,
                 message_id INTEGER
             )
-            """,
-            """
+        """)
+        
+        # Таблица evening_status
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS evening_status (
                 date TEXT PRIMARY KEY,
                 bills_sent INTEGER DEFAULT 0
             )
-            """,
-            """
+        """)
+        
+        # Таблица settings
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
-            """,
-            """
+        """)
+        
+        # Таблица game_history
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS game_history (
                 id SERIAL PRIMARY KEY,
                 game_date TEXT,
@@ -237,24 +232,30 @@ async def init_db():
                 global_game_number INTEGER,
                 judge_id INTEGER DEFAULT 0
             )
-            """,
-            """
+        """)
+        
+        # Таблица night_kills_order
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS night_kills_order (
                 game_date TEXT,
                 game_number INTEGER,
                 kill_order TEXT,
                 PRIMARY KEY (game_date, game_number)
             )
-            """,
-            """
+        """)
+        
+        # Таблица user_achievements
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_achievements (
                 user_id INTEGER,
                 achievement_id TEXT,
                 earned_at TIMESTAMP DEFAULT NOW(),
                 PRIMARY KEY (user_id, achievement_id)
             )
-            """,
-            """
+        """)
+        
+        # Таблица bets_active
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS bets_active (
                 id SERIAL PRIMARY KEY,
                 game_id INTEGER NOT NULL,
@@ -266,8 +267,10 @@ async def init_db():
                 resolved BOOLEAN DEFAULT FALSE,
                 winner_team TEXT
             )
-            """,
-            """
+        """)
+        
+        # Таблица user_bets
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_bets (
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER NOT NULL,
@@ -276,8 +279,10 @@ async def init_db():
                 predicted_winner TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT NOW()
             )
-            """,
-            """
+        """)
+        
+        # Таблица transactions
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER,
@@ -286,14 +291,18 @@ async def init_db():
                 comment TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
             )
-            """,
-            """
+        """)
+        
+        # Таблица game_dates
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS game_dates (
                 date TEXT PRIMARY KEY,
                 announcement_requested INTEGER DEFAULT 0
             )
-            """,
-            """
+        """)
+        
+        # Таблица elo_ratings
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS elo_ratings (
                 user_id INTEGER PRIMARY KEY,
                 elo INTEGER DEFAULT 1500,
@@ -301,26 +310,29 @@ async def init_db():
                 games_won INTEGER DEFAULT 0,
                 updated_at TIMESTAMP DEFAULT NOW()
             )
-            """
-        ]
-        
-        for query in queries:
-            await execute_query(conn, query)
+        """)
     
+    await _ensure_columns()
+    await add_fouls_column()
+    await create_elo_table()
     print("✅ База данных инициализирована")
+
 
 # ========== 2. SETTINGS ==========
 async def get_setting(key: str) -> Optional[str]:
     async with get_db() as conn:
-        row = await fetch_one(conn, "SELECT value FROM settings WHERE key = %s", (key,))
+        row = await conn.fetchrow("SELECT value FROM settings WHERE key = $1", key)
         return row[0] if row else None
+
 
 async def set_setting(key: str, value: Optional[str]):
     async with get_db() as conn:
         if value is None:
-            await execute_query(conn, "DELETE FROM settings WHERE key = %s", (key,))
+            await conn.execute("DELETE FROM settings WHERE key = $1", key)
         else:
-            await execute_query(conn, "INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value", (key, value))
+            await conn.execute(
+                "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value",
+                key, value)
 
 
 def _make_setting_funcs(key_prefix: str):
@@ -413,7 +425,7 @@ async def load_current_game_metadata() -> Optional[dict]:
 async def add_or_update_user(user_id: int, username: Optional[str], full_name: str):
     async with get_db() as conn:
         await conn.execute(
-            "INSERT INTO users (user_id, username, full_name) VALUES ($1, $2, $3) ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, full_name = excluded.full_name",
+            "INSERT INTO users (user_id, username, full_name) VALUES ($1, $2, $3) ON CONFLICT(user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name",
             user_id, username, full_name)
 
 
@@ -495,7 +507,7 @@ async def get_all_users() -> list:
 async def add_booking(user_id: int, status: str, date: str):
     async with get_db() as conn:
         await conn.execute(
-            "INSERT INTO evening_booking (user_id, status, date) VALUES ($1, $2, $3) ON CONFLICT(user_id) DO UPDATE SET status = excluded.status, date = excluded.date",
+            "INSERT INTO evening_booking (user_id, status, date) VALUES ($1, $2, $3) ON CONFLICT(user_id) DO UPDATE SET status = EXCLUDED.status, date = EXCLUDED.date",
             user_id, status, date)
 
 
@@ -567,7 +579,7 @@ async def get_all_bookings_for_date_ordered(date_str: str) -> List[Tuple[str, st
 async def set_stats_message(date_str: str, chat_id: int, message_id: int):
     async with get_db() as conn:
         await conn.execute(
-            "INSERT INTO evening_stats_messages (date, chat_id, message_id) VALUES ($1, $2, $3) ON CONFLICT(date) DO UPDATE SET chat_id = excluded.chat_id, message_id = excluded.message_id",
+            "INSERT INTO evening_stats_messages (date, chat_id, message_id) VALUES ($1, $2, $3) ON CONFLICT(date) DO UPDATE SET chat_id = EXCLUDED.chat_id, message_id = EXCLUDED.message_id",
             date_str, chat_id, message_id)
 
 
@@ -650,13 +662,10 @@ async def archive_current_evening():
             data_to_insert = []
             for r in rows:
                 money = 100
-                data_to_insert.append((date_to_archive, r['user_id'], r['status'], r['full_name'], r['nickname'], money))
+                await conn.execute(
+                    "INSERT INTO evening_history (date, user_id, status, full_name, nickname, amount) VALUES ($1, $2, $3, $4, $5, $6)",
+                    date_to_archive, r['user_id'], r['status'], r['full_name'], r['nickname'], money)
 
-            await conn.executemany(
-                "INSERT INTO evening_history (date, user_id, status, full_name, nickname, amount) VALUES ($1, $2, $3, $4, $5, $6)",
-                data_to_insert)
-
-            for r in rows:
                 if r['status'] in ("Вовремя", "Позже"):
                     await conn.execute("UPDATE users SET last_visit = $1 WHERE user_id = $2",
                                        f"{date_to_archive} 20:00", r['user_id'])
@@ -712,7 +721,7 @@ async def get_inactive_players(days: int = 30) -> list:
 async def mark_evening_bills_sent(date_str: str):
     async with get_db() as conn:
         await conn.execute(
-            "INSERT INTO evening_status (date, bills_sent) VALUES ($1, 1) ON CONFLICT(date) DO UPDATE SET bills_sent = 1",
+            "INSERT INTO evening_status (date, bills_sent) VALUES ($1, 1) ON CONFLICT(date) DO UPDATE SET bills_sent = EXCLUDED.bills_sent",
             date_str)
 
 
@@ -857,6 +866,7 @@ async def get_user_roles_stats(user_id: int) -> List[Dict]:
             "kicks": total_kicks or 0, "ppk_causes": total_ppk or 0,
         })
     return result
+
 
 # ========== 8. ИСТОРИЯ ИГР ==========
 async def save_game_history(game_date: str, winner_label: str, protocol_text: str, game_number: Optional[int] = None,
@@ -1026,7 +1036,7 @@ async def get_announcement_requested(date: str) -> bool:
 async def set_announcement_requested(date: str, requested: bool):
     async with get_db() as conn:
         await conn.execute(
-            "INSERT INTO game_dates (date, announcement_requested) VALUES ($1, $2) ON CONFLICT(date) DO UPDATE SET announcement_requested = excluded.announcement_requested",
+            "INSERT INTO game_dates (date, announcement_requested) VALUES ($1, $2) ON CONFLICT(date) DO UPDATE SET announcement_requested = EXCLUDED.announcement_requested",
             date, 1 if requested else 0)
 
 
@@ -1034,7 +1044,7 @@ async def save_night_kills_order(game_date: str, game_number: int, night_kills_o
     search_date = _ensure_iso_date(game_date)
     async with get_db() as conn:
         await conn.execute(
-            "INSERT INTO night_kills_order (game_date, game_number, kill_order) VALUES ($1, $2, $3) ON CONFLICT(game_date, game_number) DO UPDATE SET kill_order = excluded.kill_order",
+            "INSERT INTO night_kills_order (game_date, game_number, kill_order) VALUES ($1, $2, $3) ON CONFLICT(game_date, game_number) DO UPDATE SET kill_order = EXCLUDED.kill_order",
             search_date, game_number, json.dumps(night_kills_order))
 
 
