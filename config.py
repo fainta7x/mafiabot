@@ -10,7 +10,7 @@ ANNOUNCE_TOPIC_ID = 5912
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://postgres:Test1TestMafia@db.udhsmhlhzdkzsrwrhalp.supabase.co:5432/postgres"
+    "postgresql://neondb_owner:npg_zp9sB8EjIqmY@ep-winter-tree-apxi4zb4-pooler.c-7.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 )
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'https://mafiabot-docker.onrender.com')
 USE_WEBHOOK = os.environ.get('USE_WEBHOOK', 'False').lower() == 'true'

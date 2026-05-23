@@ -13,31 +13,29 @@ _db_pool = None
 async def get_db_pool():
     global _db_pool
     if _db_pool is None:
-        # Получаем IPv4 адрес
+        # Принудительно получаем IPv4 адрес
+        host = "ep-winter-tree-apxi4zb4-pooler.c-7.us-east-1.aws.neon.tech"
+        
+        # Разрешаем имя в IPv4
         try:
-            addr_info = socket.getaddrinfo(
-                "db.udhsmhlhzdkzsrwrhalp.supabase.co",
-                5432,
-                socket.AF_INET,
-                socket.SOCK_STREAM
-            )
-            host = addr_info[0][4][0] if addr_info else "db.udhsmhlhzdkzsrwrhalp.supabase.co"
-            print(f"Подключаюсь к {host}")
-        except:
-            host = "db.udhsmhlhzdkzsrwrhalp.supabase.co"
+            addr_info = socket.getaddrinfo(host, 5432, socket.AF_INET, socket.SOCK_STREAM)
+            if addr_info:
+                host = addr_info[0][4][0]  # Берём первый IPv4 адрес
+                print(f"Подключаюсь к IPv4: {host}")
+        except Exception as e:
+            print(f"Ошибка разрешения IPv4: {e}")
         
         _db_pool = await asyncpg.create_pool(
-            host=host,
+            host=host,  # используем IP вместо домена
             port=5432,
-            user="postgres",
-            password="Test1TestMafia",
-            database="postgres",
+            user="neondb_owner",
+            password="npg_zp9sB8EjIqmY",
+            database="neondb",
             ssl="require",
             min_size=1,
-            max_size=10,
-            command_timeout=60
+            max_size=10
         )
-        print("✅ Пул соединений с Supabase создан")
+        print("✅ Пул соединений создан")
     return _db_pool
 
 
