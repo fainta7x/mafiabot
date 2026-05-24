@@ -5,7 +5,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import Command
 import database as db
 import keyboards
-import config 
 
 router = Router()
 

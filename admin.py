@@ -9,6 +9,9 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ParseMode
+import shutil
+import tempfile
+import datetime
 import os
 import config
 import database
@@ -570,7 +573,7 @@ async def back_to_specific_month(call: CallbackQuery):
 @router.message(F.text == "📁 Бэкапы")
 async def admin_backup_menu(message: Message):
     """Открывает подменю бэкапов"""
-    if message.from_user.id not in ADMIN_IDS:
+    if message.from_user.id != config.BACKUP_ADMIN_ID:
         await message.answer("⛔ Доступ запрещён")
         return
     
@@ -584,7 +587,7 @@ async def admin_backup_menu(message: Message):
 @router.message(F.text == "📁 Создать бэкап")
 async def admin_create_backup(message: Message):
     """Создание бэкапа и отправка"""
-    if message.from_user.id not in ADMIN_IDS:
+    if message.from_user.id != config.BACKUP_ADMIN_ID:
         await message.answer("⛔ Доступ запрещён")
         return
     
@@ -598,7 +601,7 @@ async def admin_create_backup(message: Message):
     
     try:
         # Копируем БД во временный файл
-        shutil.copy2(db.DB_NAME, temp_path)
+        shutil.copy2(database.DB_NAME, temp_path)
         
         # Отправляем файл
         await message.answer_document(
@@ -620,7 +623,7 @@ async def admin_create_backup(message: Message):
 @router.message(F.text == "🔄 Восстановить бэкап")
 async def admin_restore_backup(message: Message):
     """Запрос на отправку файла для восстановления"""
-    if message.from_user.id not in ADMIN_IDS:
+    if message.from_user.id != config.BACKUP_ADMIN_ID:
         await message.answer("⛔ Доступ запрещён")
         return
     
@@ -635,7 +638,7 @@ async def admin_restore_backup(message: Message):
 @router.message(F.document)
 async def handle_backup_file(message: Message):
     """Обработка загруженного файла бэкапа"""
-    if message.from_user.id not in ADMIN_IDS:
+    if message.from_user.id != config.BACKUP_ADMIN_ID:
         await message.answer("⛔ Доступ запрещён")
         return
     
@@ -669,10 +672,10 @@ async def handle_backup_file(message: Message):
         
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = os.path.join(backup_dir, f"before_restore_{timestamp}.db")
-        shutil.copy2(db.DB_NAME, backup_path)
+        shutil.copy2(database.DB_NAME, backup_path)
         
         # Восстанавливаем
-        shutil.copy2(temp_path, db.DB_NAME)
+        shutil.copy2(temp_path, database.DB_NAME)
         
         # Удаляем временный файл
         os.remove(temp_path)
