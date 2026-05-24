@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from aiogram import Bot, Dispatcher, BaseMiddleware
-from aiogram.types import Update
+from aiogram.types import Update, FSInputFile
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 import config
@@ -13,6 +13,8 @@ from handlers import shop
 import admin
 from game import router as game_router  # игровой роутер
 from commands import setup_bot_commands
+import datetime
+import database as db
 
 class MyLoggerMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: Update, data):
@@ -116,6 +118,8 @@ async def start_webhook():
 
     setup_handlers()
 
+    asyncio.create_task(daily_backup_task())
+
     app = web.Application()
     app.router.add_post("/webhook", handle_webhook)
     app.router.add_get("/health", lambda request: web.Response(text="OK"))
@@ -160,3 +164,30 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print("❌ Бот выключен")
+
+# Автоматические бэкапы в 3:00
+async def daily_backup_task():
+    while True:
+        now = datetime.datetime.now()
+        next_backup = now.replace(hour=3, minute=0, second=0, microsecond=0)
+        if now >= next_backup:
+            next_backup += datetime.timedelta(days=1)
+        
+        wait_seconds = (next_backup - now).total_seconds()
+        await asyncio.sleep(wait_seconds)
+        
+        backup_path = await db.create_backup_file()
+        
+        if backup_path:
+            try:
+                await bot.send_document(
+                    config.BACKUP_ADMIN_ID, 
+                    FSInputFile(backup_path),
+                    caption="📁 **Ежедневный бэкап**",
+                    parse_mode="Markdown"
+                )
+                logger.info(f"✅ Бэкап отправлен админу {config.BACKUP_ADMIN_ID}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки: {e}")
+            
+            await db.delete_temp_file(backup_path)

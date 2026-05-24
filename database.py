@@ -3,8 +3,38 @@ import datetime
 from typing import Optional, Tuple, List, Dict, Any, Union
 from contextlib import asynccontextmanager
 import aiosqlite
+import tempfile
+import os
+import shutil
 
 DB_NAME = "mafia_crm.db"
+BACKUP_DIR = "backups"
+
+# СОЗДАНИЕ БЭКАПОВ
+async def create_backup() -> Optional[str]:
+    try:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"mafia_crm_backup_{timestamp}.db"
+        
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, filename)
+        shutil.copy2(DB_NAME, temp_path)
+        
+        print(f"✅ Временный бэкап создан: {temp_path}")
+        return temp_path
+        
+    except Exception as e:
+        print(f"❌ Ошибка создания бэкапа: {e}")
+        return None
+
+async def delete_temp_file(file_path: str):
+    try:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+            print(f"🗑️ Временный файл удалён: {file_path}")
+    except Exception as e:
+        print(f"❌ Ошибка удаления файла: {e}")
+
 
 # ========== УТИЛИТЫ ДЛЯ РАБОТЫ С БД ==========
 @asynccontextmanager

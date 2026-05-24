@@ -15,3 +15,4 @@ async def setup_bot_commands(bot):
     ]
     # Устанавливаем команды для всех пользователей
     await bot.set_my_commands(commands)
+    print(f"✅ Установлено команд: {len(commands)}") 

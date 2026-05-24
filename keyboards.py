@@ -108,7 +108,8 @@ def admin_menu():
     builder.button(text="❌ Отменить вечер")
     builder.button(text="⚖ Судьи")
     builder.button(text="🏠 В главное меню")
-    builder.adjust(2, 3, 2, 2, 2)
+    builder.button(text="📁 Дай бэкап")
+    builder.adjust(2, 3, 2, 2, 3)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
