@@ -1,6 +1,6 @@
 import json
 import datetime
-from typing import Optional, Tuple, List, Dict, Any, Union
+from typing import Optional, Tuple, List, Dict, Any
 from contextlib import asynccontextmanager
 import aiosqlite
 import tempfile
@@ -8,7 +8,6 @@ import os
 import shutil
 
 DB_NAME = "mafia_crm.db"
-BACKUP_DIR = "backups"
 
 # СОЗДАНИЕ БЭКАПОВ
 async def create_backup() -> Optional[str]:
