@@ -109,6 +109,34 @@ def setup_handlers():
     dp.include_router(shop.router)
 
 
+# Автоматические бэкапы в 3:00
+async def daily_backup_task():
+    while True:
+        now = datetime.datetime.now()
+        next_backup = now.replace(hour=3, minute=0, second=0, microsecond=0)
+        if now >= next_backup:
+            next_backup += datetime.timedelta(days=1)
+        
+        wait_seconds = (next_backup - now).total_seconds()
+        await asyncio.sleep(wait_seconds)
+        
+        backup_path = await db.create_backup_file()
+        
+        if backup_path:
+            try:
+                await bot.send_document(
+                    config.BACKUP_ADMIN_ID, 
+                    FSInputFile(backup_path),
+                    caption="📁 **Ежедневный бэкап**",
+                    parse_mode="Markdown"
+                )
+                logger.info(f"✅ Бэкап отправлен админу {config.BACKUP_ADMIN_ID}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки: {e}")
+            
+            await db.delete_temp_file(backup_path)
+
+# Старт вэбхуков для сервера
 async def start_webhook():
     global bot, dp
 
@@ -164,30 +192,3 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print("❌ Бот выключен")
-
-# Автоматические бэкапы в 3:00
-async def daily_backup_task():
-    while True:
-        now = datetime.datetime.now()
-        next_backup = now.replace(hour=3, minute=0, second=0, microsecond=0)
-        if now >= next_backup:
-            next_backup += datetime.timedelta(days=1)
-        
-        wait_seconds = (next_backup - now).total_seconds()
-        await asyncio.sleep(wait_seconds)
-        
-        backup_path = await db.create_backup_file()
-        
-        if backup_path:
-            try:
-                await bot.send_document(
-                    config.BACKUP_ADMIN_ID, 
-                    FSInputFile(backup_path),
-                    caption="📁 **Ежедневный бэкап**",
-                    parse_mode="Markdown"
-                )
-                logger.info(f"✅ Бэкап отправлен админу {config.BACKUP_ADMIN_ID}")
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки: {e}")
-            
-            await db.delete_temp_file(backup_path)

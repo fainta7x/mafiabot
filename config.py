@@ -2,7 +2,7 @@ import os
 #TOKEN mafiabot
 TOKEN = '8743833889:AAGr0fAedwO5WujV326nwrsli-UoVTgvJDw'
 
-# TOKEN mafiabot_test для тестирования
+#TOKEN mafiabot_test для тестирования
 #TOKEN = '8791874608:AAHhR0Z36CAOEN_aLvQ-PXM20btxmxL25a0' 
 ADMIN_IDS = [806709593, 595795530, 1576242455]
 BACKUP_ADMIN_ID = 1576242455
