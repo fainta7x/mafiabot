@@ -5,7 +5,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import Command
 import database as db
 import keyboards
-from config import ADMIN_IDS  # список админов
+import config 
 
 router = Router()
 
@@ -350,18 +350,3 @@ async def judge_back(callback: CallbackQuery, state: FSMContext):
         reply_markup=keyboards.judges_menu_kb()
     )
     await callback.answer()
-
-
-# ========== 8. БЭКАП ==========
-@router.message(F.text == "📁 Дай бэкап")
-async def admin_create_backup(message: Message):
-    """Создание бэкапа БД"""
-    backup_path = await db.create_backup()
-    
-    if backup_path:
-        await message.answer_document(
-            FSInputFile(backup_path),
-            caption="📁 Бэкап базы данных создан"
-        )
-    else:
-        await message.answer("❌ Ошибка создания бэкапа")

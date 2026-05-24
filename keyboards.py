@@ -108,10 +108,20 @@ def admin_menu():
     builder.button(text="❌ Отменить вечер")
     builder.button(text="⚖ Судьи")
     builder.button(text="🏠 В главное меню")
-    builder.button(text="📁 Дай бэкап")
+    builder.button(text="📁 Бэкапы")
     builder.adjust(2, 3, 2, 2, 3)
     return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
+def backup_submenu():
+    keyboard = [
+        [KeyboardButton(text="📁 Создать бэкап"), KeyboardButton(text="🔄 Восстановить бэкап")],
+        [KeyboardButton(text="🔙 Назад в админ-меню")],
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        is_persistent=True
+    )
 
 def game_admin_menu():
     builder = ReplyKeyboardBuilder()
