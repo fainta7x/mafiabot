@@ -4,7 +4,7 @@ from typing import Optional, Tuple, List, Dict, Any, Union
 from contextlib import asynccontextmanager
 import aiosqlite
 
-DB_NAME = "/data/mafia_crm.db"
+DB_NAME = "mafia_crm.db"
 
 # ========== УТИЛИТЫ ДЛЯ РАБОТЫ С БД ==========
 @asynccontextmanager
