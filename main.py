@@ -111,6 +111,9 @@ def setup_handlers():
 
 # Автоматические бэкапы в 3:00
 async def daily_backup_task():
+    """Фоновая задача для ежедневного бэкапа в 3:00"""
+    global bot
+    
     while True:
         now = datetime.datetime.now()
         next_backup = now.replace(hour=3, minute=0, second=0, microsecond=0)
@@ -118,7 +121,12 @@ async def daily_backup_task():
             next_backup += datetime.timedelta(days=1)
         
         wait_seconds = (next_backup - now).total_seconds()
+        logger.info(f"⏰ Следующий бэкап через {wait_seconds/3600:.1f} часов")
         await asyncio.sleep(wait_seconds)
+        
+        if bot is None:
+            logger.error("❌ Бот не инициализирован, бэкап не создан")
+            continue
         
         backup_path = await db.create_backup_file()
         
@@ -127,19 +135,20 @@ async def daily_backup_task():
                 await bot.send_document(
                     config.BACKUP_ADMIN_ID, 
                     FSInputFile(backup_path),
-                    caption="📁 **Ежедневный бэкап**",
+                    caption="📁 **Ежедневный бэкап**\n\n"
+                            f"📅 Дата: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}",
                     parse_mode="Markdown"
                 )
                 logger.info(f"✅ Бэкап отправлен админу {config.BACKUP_ADMIN_ID}")
             except Exception as e:
-                logger.error(f"❌ Ошибка отправки: {e}")
-            
-            await db.delete_temp_file(backup_path)
+                logger.error(f"❌ Ошибка отправки бэкапа: {e}")
+            finally:
+                await db.delete_temp_file(backup_path)
 
-# Старт вэбхуков для сервера
+
+# Старт вебхуков для сервера
 async def start_webhook():
     global bot, dp
-
     storage = MemoryStorage()
     bot = Bot(token=config.TOKEN)
     dp = Dispatcher(storage=storage)
@@ -147,6 +156,7 @@ async def start_webhook():
     setup_handlers()
 
     asyncio.create_task(daily_backup_task())
+    logger.info("✅ Задача ежедневного бэкапа запущена")
 
     app = web.Application()
     app.router.add_post("/webhook", handle_webhook)
